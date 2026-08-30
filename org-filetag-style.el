@@ -115,69 +115,6 @@ styles are layered on top of this and win on overlapping keys."
         (when tag-style
           (setq style (org-filetag-style--merge style tag-style)))))))
 
-(defvar org-filetag-style--block-delim-indent-installed nil
-  "Whether `org-filetag-style-indent-block-delimiters' has already
-registered its font-lock keyword. Guards against piling up duplicate
-keywords if it's called from every buffer's style application.")
-
-;;;###autoload
-(defun org-filetag-style-indent-block-delimiters (&optional width)
-  "Visually indent #+begin_/#+end_ lines by WIDTH tabs (default 1).
-
-This doesn't touch the buffer's actual text -- it attaches a
-`line-prefix' display property to the first character of each
-delimiter line, purely cosmetic and safe to call from :eval in a
-style plist. Registers its font-lock keyword once, globally for
-`org-mode', the first time it's called."
-  (unless org-filetag-style--block-delim-indent-installed
-    (let ((prefix (make-string (or width 1) ?\t)))
-      (font-lock-add-keywords
-       'org-mode
-       `(("^[ \t]*#\\+\\(?:begin\\|end\\)_[a-zA-Z_-]+.*$"
-          (0 (progn
-               (put-text-property (match-beginning 0) (1+ (match-beginning 0))
-                                   'line-prefix ,prefix)
-               nil))))
-       'append))
-    (setq org-filetag-style--block-delim-indent-installed t)))
-
-(defvar org-filetag-style--block-end-hide-installed nil
-  "Whether `org-filetag-style-hide-block-end-lines' has already
-registered its font-lock keyword. Guards against piling up duplicate
-keywords if it's called from every buffer's style application.")
-
-;;;###autoload
-(defface org-filetag-style-block-end-marker
-  '((t :inherit shadow))
-  "Face for the compact end-of-block marker drawn by
-`org-filetag-style-hide-block-end-lines' in place of the full
-#+end_ line."
-  :group 'org-filetag-style)
-
-(defvar org-filetag-style--block-end-hide-installed nil
-  "Whether `org-filetag-style-hide-block-end-lines' has already
-registered its font-lock keyword. Guards against piling up duplicate
-keywords if it's called from every buffer's style application.")
-
-;;;###autoload
-(defun org-filetag-style-hide-block-end-lines (&optional marker)
-  "Replace #+end_ lines with a compact MARKER (default \"#\"), appended
-to the end of the block's last content line instead of shown on its
-own row."
-  (unless org-filetag-style--block-end-hide-installed
-    (let ((marker-str (propertize (or marker "#") 'face 'org-filetag-style-block-end-marker)))
-      (font-lock-add-keywords
-       'org-mode
-       `(("\n[ \t]*#\\+end_[a-zA-Z_-]+.*"
-          (0 (progn
-               (put-text-property (match-beginning 0) (match-end 0)
-                                   'display ,marker-str)
-               (put-text-property (match-beginning 0) (match-end 0)
-                                   'font-lock-multiline t)
-               nil))))
-       'append))
-    (setq org-filetag-style--block-end-hide-installed t)))
-
 (defconst org-filetag-style--heading-faces
   '(org-level-1 org-level-2 org-level-3 org-level-4 org-level-5 org-level-6
     org-level-7 org-level-8 org-document-title)
