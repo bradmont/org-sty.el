@@ -285,6 +285,21 @@ the jit-lock function to avoid overhead."
       (org-filetag-style--paragraph-line-spacing--disable-jit)
       (org-filetag-style-clear-paragraph-line-spacing))))
 
+(defun org-filetag-style--text-scale-refresh (&rest _)
+  "Recompute paragraph-spacing pixel heights after a text-scale change.
+
+`text-scale-mode-hook' only fires on the 0/non-zero transition, not on
+every increment, so this advises `text-scale-set' directly -- the
+common primitive behind `text-scale-increase', `text-scale-decrease',
+and `text-scale-adjust'. Stale spacers (sized for the old font) are
+cleared, then jit is invoked explicitly on the visible range, since
+merely clearing properties doesn't itself trigger jit-lock refontification."
+  (when (and (derived-mode-p 'org-mode)
+             org-filetag-style--paragraph-line-spacing-ratio)
+    (org-filetag-style-clear-paragraph-line-spacing)
+    (org-filetag-style--paragraph-line-spacing--refresh-visible)))
+
+
 (defconst org-filetag-style--paragraph-spacing-prop
   'org-filetag-style--paragraph-spacing
   "Text property marking ranges that got paragraph spacing from org-filetag-style.")
@@ -491,6 +506,8 @@ Use this after editing #+FILETAGS by hand or via
 
 (advice-add 'org-set-tags-command :after
             (lambda (&rest _) (org-filetag-style-refresh)))
+(advice-add 'text-scale-mode :after
+            #'org-filetag-style--text-scale-refresh)
 
 (provide 'org-filetag-style)
 ;;; org-filetag-style.el ends here
