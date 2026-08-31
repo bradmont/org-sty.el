@@ -124,6 +124,10 @@ Uses RATIO (defaults to `variable-spacing-ratio') and operates on
 BEG..END (defaults to the whole buffer).  Skips paragraphs inside any
 element type listed in `variable-spacing--excluded-parents'.
 
+Uses the org-element cache via `org-element-at-point'; does not reparse
+the buffer.  Safe to call from jit-lock: widens internally so element
+boundaries are never distorted by buffer narrowing.
+
 When called interactively, operates on the active region when present,
 otherwise the whole buffer."
   (interactive (list nil
@@ -132,31 +136,43 @@ otherwise the whole buffer."
   (unless (derived-mode-p 'org-mode)
     (user-error "variable-spacing-apply: not in an Org buffer"))
   (let* ((ratio (or ratio variable-spacing-ratio 1.5))
-         (region-specified (and beg end))
          (beg (or beg (point-min)))
-         (end (or end (point-max)))
-         (ast (if region-specified
-                  (save-restriction
-                    (narrow-to-region beg end)
-                    (org-element-parse-buffer))
-                (org-element-parse-buffer))))
+         (end (or end (point-max))))
     (variable-spacing-clear beg end)
-    (org-element-map ast 'paragraph
-      (lambda (p)
-        (let ((pb (org-element-property :begin p))
-              (pe (org-element-property :end p)))
-          (when (and pb pe
-                     (< pb end)
-                     (> pe beg)
-                     (save-excursion
-                       (goto-char pb)
-                       (not (org-element-lineage
-                             (org-element-context)
-                             variable-spacing--excluded-parents
-                             t))))
-            (variable-spacing--put ratio
-                                   (max pb beg)
-                                   (min pe end))))))))
+    (org-with-wide-buffer
+     (goto-char beg)
+     (while (< (point) end)
+       (let* ((el   (org-element-at-point))
+              (type (org-element-type el))
+              (el-beg (org-element-property :begin el))
+              (el-end (org-element-property :end   el)))
+         (cond
+          ;; Paragraph: check whether it sits inside an excluded
+          ;; container.  If so, jump past that whole container for
+          ;; efficiency.  Otherwise apply spacing and move on.
+          ((eq type 'paragraph)
+           (let ((excluded (org-element-lineage
+                            el variable-spacing--excluded-parents)))
+             (if excluded
+                 (goto-char (or (org-element-property :end excluded)
+                                el-end))
+               (variable-spacing--put ratio
+                                      (max el-beg beg)
+                                      (min el-end end))
+               (goto-char el-end))))
+          ;; An excluded container encountered directly (e.g. point is
+          ;; on its #+begin_ line): jump past the whole thing.
+          ((memq type variable-spacing--excluded-parents)
+           (goto-char (or el-end (1+ (point)))))
+          ;; Anything else (headline, section, plain-list, keyword …):
+          ;; enter it by advancing to its contents, or past its own
+          ;; position if it has no contents.  The (max … (1+ (point)))
+          ;; guard ensures forward progress if :contents-begin is stale.
+          (t
+           (goto-char (max (or (org-element-property :contents-begin el)
+                               el-end
+                               (1+ (point)))
+                           (1+ (point)))))))))))
 
 ;;; jit-lock integration
 
