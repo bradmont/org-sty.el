@@ -40,12 +40,6 @@
 ;; managed block, the previous block's delimiters are re-hidden and the
 ;; new one's are revealed.
 ;;
-;; This mode supersedes `org-filetag-style-indent-block-delimiters':
-;; drop that from your style plists' :eval once this is enabled.
-;; Delimiter lines are invisible by default, and only get a one-tab
-;; `line-prefix' (see `org-block-appear-indent-width') while revealed,
-;; so the old always-on indent isn't needed alongside this.
-;;
 ;; Known limitation: the `invisible' property is overwritten outright
 ;; rather than layered into a list, so a delimiter line that is *also*
 ;; inside a heading Org has folded (which uses `invisible' with value
@@ -71,11 +65,6 @@
   "Hide Org block delimiter lines, revealing them near point."
   :group 'org)
 
-(defcustom org-block-appear-indent-width 1
-  "Number of tabs to indent a delimiter line by while it's revealed.
-Set to 0 to disable indenting revealed delimiter lines."
-  :type 'integer
-  :group 'org-block-appear)
 
 (defconst org-block-appear--element-types
   '(src-block example-block export-block quote-block verse-block
@@ -167,16 +156,9 @@ same pattern `org-filetag-style-clear-paragraph-line-spacing' uses."
 ;; Revealing (post-command-hook side)
 ;; ------------------------------------------------------------------
 
-(defun org-block-appear--indent-line (beg)
-  "Give the delimiter line starting at BEG a `line-prefix' tab.
-No-op when `org-block-appear-indent-width' is 0."
-  (when (> org-block-appear-indent-width 0)
-    (put-text-property
-     beg (1+ beg) 'line-prefix
-     (make-string org-block-appear-indent-width ?\t))))
 
 (defun org-block-appear--hide-line-at (pos)
-  "Re-hide the delimiter line starting at POS, and drop its indent."
+  "Re-hide the delimiter line starting at POS."
   (when pos
     (with-silent-modifications
       (save-excursion
@@ -187,7 +169,7 @@ No-op when `org-block-appear-indent-width' is 0."
                               'invisible 'org-block-appear)
           (put-text-property (match-beginning 0) (match-end 0)
                               org-block-appear--hidden-prop t))
-        (remove-text-properties pos (1+ pos) '(line-prefix nil))))))
+))))
 
 (defun org-block-appear--reveal-block (block)
   "Reveal BLOCK's own #+begin_/#+end_ lines.
@@ -213,8 +195,7 @@ normally happen for a well-formed block."
         (when (looking-at org-block-appear--begin-re)
           (setq begin-pos (match-beginning 0))
           (remove-text-properties begin-pos (match-end 0)
-                                   (list 'invisible nil org-block-appear--hidden-prop nil))
-          (org-block-appear--indent-line begin-pos))
+                                   (list 'invisible nil org-block-appear--hidden-prop nil)))
         (goto-char beg)
         (let (last-beg last-end)
           (while (re-search-forward org-block-appear--end-re end t)
@@ -222,8 +203,7 @@ normally happen for a well-formed block."
           (when last-beg
             (setq end-pos last-beg)
             (remove-text-properties last-beg last-end
-                                     (list 'invisible nil org-block-appear--hidden-prop nil))
-            (org-block-appear--indent-line last-beg)))))
+                                     (list 'invisible nil org-block-appear--hidden-prop nil))))))
     (cons begin-pos end-pos)))
 
 (defun org-block-appear--find-block-at-point ()
