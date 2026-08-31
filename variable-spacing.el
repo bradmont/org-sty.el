@@ -1,41 +1,77 @@
-;;; variable-spacing.el --- Variable line spacing for Org paragraphs -*- lexical-binding: t -*-
+;;; variable-spacing.el --- Variable line spacing for Org elements -*- lexical-binding: t -*-
 
 ;; Author: Brad
-;; Version: 0.1.0
+;; Version: 0.2.0
 
 ;;; Commentary:
 
-;; `variable-spacing-mode' applies proportional line spacing to bare
-;; paragraphs in an Org buffer, leaving code blocks, drawers, tables,
-;; and similar structured elements at their natural line height.
+;; `variable-spacing-mode' applies proportional line spacing to Org
+;; elements on a per-type basis, controlled by `variable-spacing-rules'.
 ;;
-;; Usage:
+;; `variable-spacing-rules' is a buffer-local plist mapping Org element
+;; type symbols to numeric ratios (or nil to explicitly exclude):
 ;;
-;;   (setq-local variable-spacing-ratio 1.6)
+;;   (setq-local variable-spacing-rules
+;;               '(paragraph   1.6
+;;                 item        1.2
+;;                 quote-block 1.3
+;;                 src-block   nil))
 ;;   (variable-spacing-mode 1)
 ;;
-;; Spacing is applied lazily via jit-lock, so large buffers are not
-;; penalised on open.  The spacers are pixel-height `line-prefix' /
-;; `wrap-prefix' display properties computed from the rendered font at
-;; the time of fontification, so they respond correctly to
-;; `text-scale-mode' adjustments.
+;; An element type absent from the plist is treated as nil: no spacing
+;; applied to it directly.  Whether its children are visited depends on
+;; whether it is a "greater element" (one that can contain other
+;; elements): greater elements not in the plist are entered
+;; transparently; non-greater elements are jumped past entirely (they
+;; cannot contain paragraphs or other spaced types anyway).
+;;
+;; Parent wins: once a type is present in the plist (even with nil),
+;; the walker jumps past the whole element and never visits its
+;; children.  A nil-ratio entry is therefore an explicit "exclude this
+;; and everything inside it."
+;;
+;; Spacing is applied lazily via jit-lock.  Spacers are pixel-height
+;; `line-prefix'/`wrap-prefix' display properties computed from the
+;; live rendered font via `font-at', so they respond correctly to
+;; `text-scale-mode'.  The initial visible-range refresh is deferred
+;; with `run-with-idle-timer' so window geometry has settled before the
+;; first sizing calculation.
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'org)
 (require 'org-element)
 (require 'jit-lock)
 
 ;;; User option
 
-(defcustom variable-spacing-ratio 1.5
-  "Line-spacing ratio applied to Org paragraphs by `variable-spacing-mode'.
-A value of 1.5 gives roughly 1.5× the rendered font height as the
-total line height (i.e. ~half a line of extra space above each line).
-Must be a positive number; values ≤ 0 are treated as disabling spacing."
-  :type 'number
+(defcustom variable-spacing-rules '(paragraph 1.5)
+  "Plist mapping Org element type symbols to line-spacing ratios.
+
+Each key is an Org element type symbol (e.g. `paragraph', `item',
+`quote-block', `src-block').  Each value is either a positive number
+(the ratio to apply to that element type) or nil (explicitly exclude
+that type and prevent the walker from visiting its children).
+
+Types absent from this plist are also not spaced directly.  Whether
+their children are visited depends on whether the type is a greater
+element (see `org-element-greater-elements'): greater elements not in
+the plist are entered transparently; non-greater elements (which cannot
+contain paragraphs) are jumped past.
+
+Parent wins: any type present in the plist (even with nil) causes the
+walker to jump past the whole element, so children never receive rules
+from enclosing scopes.
+
+Example:
+  \\='(paragraph   1.6
+    item        1.2
+    quote-block 1.3
+    src-block   nil)"
+  :type '(plist :key-type symbol :value-type (choice number (const nil)))
   :group 'variable-spacing)
-(make-variable-buffer-local 'variable-spacing-ratio)
+(make-variable-buffer-local 'variable-spacing-rules)
 
 ;;; Internal constants
 
@@ -45,18 +81,19 @@ Must be a positive number; values ≤ 0 are treated as disabling spacing."
 `variable-spacing-mode'.  Used to clear only our own properties without
 clobbering those set by other packages.")
 
-(defconst variable-spacing--excluded-parents
-  '(src-block example-block quote-block verse-block
-    drawer property-drawer table)
-  "Org element types whose paragraph children are skipped by
-`variable-spacing-apply'.  These are structured / fixed-pitch elements
-where proportional line spacing would look wrong.")
-
 ;;; Internal state
 
 (defvar-local variable-spacing--jit-installed nil
   "Non-nil when `variable-spacing--jit' is registered with jit-lock
 in the current buffer.")
+
+;;; Private helpers
+
+(defun variable-spacing--any-positive-p (rules)
+  "Return non-nil if RULES contains at least one positive numeric ratio."
+  (cl-loop for tail on rules by #'cddr
+           thereis (let ((v (cadr tail)))
+                     (and (numberp v) (> v 0)))))
 
 ;;; Pixel-height spacer
 
@@ -96,7 +133,7 @@ the range with `variable-spacing--prop' so it can be cleared precisely."
 
 ;;;###autoload
 (defun variable-spacing-clear (&optional beg end)
-  "Remove paragraph line spacing previously applied by `variable-spacing-mode'.
+  "Remove line spacing previously applied by `variable-spacing-mode'.
 If BEG..END is provided, clear only within that range.  When called
 interactively, clears the active region when present, otherwise the
 whole buffer."
@@ -118,15 +155,24 @@ whole buffer."
         (setq pos next)))))
 
 ;;;###autoload
-(defun variable-spacing-apply (&optional ratio beg end)
-  "Apply paragraph-wise line spacing to bare Org paragraphs.
-Uses RATIO (defaults to `variable-spacing-ratio') and operates on
-BEG..END (defaults to the whole buffer).  Skips paragraphs inside any
-element type listed in `variable-spacing--excluded-parents'.
+(defun variable-spacing-apply (&optional rules beg end)
+  "Apply per-type line spacing to Org elements according to RULES.
+RULES defaults to `variable-spacing-rules'.  Operates on BEG..END
+\(defaults to the whole buffer).
 
-Uses the org-element cache via `org-element-at-point'; does not reparse
-the buffer.  Safe to call from jit-lock: widens internally so element
-boundaries are never distorted by buffer narrowing.
+Walks the buffer using `org-element-at-point' (cache-backed; does not
+reparse).  For each element:
+
+  - In RULES with a positive ratio: apply that ratio to the element's
+    span then jump past it.
+  - In RULES with nil: jump past it without applying spacing; its
+    children are never visited (explicit exclude).
+  - Not in RULES, a greater element: enter it transparently.
+  - Not in RULES, not a greater element: jump past it (leaf-like;
+    cannot contain paragraphs or other spaced types).
+
+Widens internally so element boundaries are correct even when called
+from jit-lock inside a narrowed buffer.
 
 When called interactively, operates on the active region when present,
 otherwise the whole buffer."
@@ -135,53 +181,49 @@ otherwise the whole buffer."
                      (when (use-region-p) (region-end))))
   (unless (derived-mode-p 'org-mode)
     (user-error "variable-spacing-apply: not in an Org buffer"))
-  (let* ((ratio (or ratio variable-spacing-ratio 1.5))
+  (let* ((rules (or rules variable-spacing-rules))
          (beg (or beg (point-min)))
          (end (or end (point-max))))
     (variable-spacing-clear beg end)
     (org-with-wide-buffer
      (goto-char beg)
      (while (< (point) end)
-       (let* ((el   (org-element-at-point))
-              (type (org-element-type el))
-              (el-beg (org-element-property :begin el))
-              (el-end (org-element-property :end   el)))
+       (let* ((el      (org-element-at-point))
+              (type    (org-element-type el))
+              (el-beg  (org-element-property :begin el))
+              (el-end  (org-element-property :end   el)))
          (cond
-          ;; Paragraph: check whether it sits inside an excluded
-          ;; container.  If so, jump past that whole container for
-          ;; efficiency.  Otherwise apply spacing and move on.
-          ((eq type 'paragraph)
-           (let ((excluded (org-element-lineage
-                            el variable-spacing--excluded-parents)))
-             (if excluded
-                 (goto-char (or (org-element-property :end excluded)
-                                el-end))
+          ;; Type has an explicit plist entry: apply its ratio if
+          ;; positive, then always jump past the whole element.
+          ;; Children are never visited (parent wins).
+          ((plist-member rules type)
+           (let ((ratio (plist-get rules type)))
+             (when (and (numberp ratio) (> ratio 0))
                (variable-spacing--put ratio
                                       (max el-beg beg)
-                                      (min el-end end))
-               (goto-char el-end))))
-          ;; An excluded container encountered directly (e.g. point is
-          ;; on its #+begin_ line): jump past the whole thing.
-          ((memq type variable-spacing--excluded-parents)
+                                      (min el-end end))))
            (goto-char (or el-end (1+ (point)))))
-          ;; Anything else (headline, section, plain-list, keyword …):
-          ;; enter it by advancing to its contents, or past its own
-          ;; position if it has no contents.  The (max … (1+ (point)))
-          ;; guard ensures forward progress if :contents-begin is stale.
-          (t
+          ;; Not in plist, is a greater element: enter it by advancing
+          ;; to its contents.  The (max … (1+ (point))) guard ensures
+          ;; forward progress if :contents-begin would send us backward.
+          ((memq type org-element-greater-elements)
            (goto-char (max (or (org-element-property :contents-begin el)
                                el-end
                                (1+ (point)))
-                           (1+ (point)))))))))))
+                           (1+ (point)))))
+          ;; Not in plist, not a greater element: jump past it.
+          ;; These elements cannot contain paragraphs or other spaced
+          ;; types, so there is nothing to visit inside them.
+          (t
+           (goto-char (or el-end (1+ (point)))))))))))
 
 ;;; jit-lock integration
 
 (defun variable-spacing--jit (beg end)
   "jit-lock fontification function; applies spacing over BEG..END."
   (when (and (derived-mode-p 'org-mode)
-             variable-spacing-ratio
-             (> variable-spacing-ratio 0))
-    (variable-spacing-apply variable-spacing-ratio beg end)))
+             (variable-spacing--any-positive-p variable-spacing-rules))
+    (variable-spacing-apply variable-spacing-rules beg end)))
 
 (defun variable-spacing--ensure-jit ()
   "Register `variable-spacing--jit' with jit-lock if not already done."
@@ -205,13 +247,13 @@ otherwise the whole buffer."
 ;;; text-scale-mode advice
 
 (defun variable-spacing--text-scale-refresh (&rest _)
-  "Recompute paragraph-spacing pixel heights after a text-scale change.
+  "Recompute spacing pixel heights after a text-scale change.
 Advises `text-scale-mode'; stale spacers (sized for the old font) are
 cleared, then jit is applied explicitly to the visible range since
 merely clearing properties does not itself trigger jit-lock
 refontification."
   (when (and (derived-mode-p 'org-mode)
-             variable-spacing-ratio)
+             (variable-spacing--any-positive-p variable-spacing-rules))
     (variable-spacing-clear)
     (variable-spacing--refresh-visible)))
 
@@ -219,10 +261,10 @@ refontification."
 
 ;;;###autoload
 (define-minor-mode variable-spacing-mode
-  "Apply proportional line spacing to Org paragraphs.
-Spacing is determined by `variable-spacing-ratio' (set that buffer-locally
-before enabling the mode).  Structured elements (code blocks, drawers,
-tables, etc.) are left at their natural line height."
+  "Apply per-type proportional line spacing to Org elements.
+Spacing rules are defined in `variable-spacing-rules' (set that
+buffer-locally before enabling the mode).  See that variable's
+docstring for the plist format and parent-wins semantics."
   :lighter " VSpac"
   (if variable-spacing-mode
       (progn
