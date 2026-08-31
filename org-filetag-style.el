@@ -48,7 +48,7 @@
 (require 'org)
 (require 'org-element)
 (require 'face-remap)
-(require 'jit-lock)
+(require 'variable-spacing)
 
 (defgroup org-filetag-style nil
   "Apply visual styles to Org buffers based on filetags."
@@ -62,12 +62,6 @@ Recognized plist keys:
   :font            Font family name, e.g. \"Times New Roman\".
   :font-size       Point size, e.g. 12. Combined with :font via
                     `buffer-face-mode'; either can be given alone.
-  :paragraph-line-spacing
-                  A ratio (e.g. 1.0, 1.15, 1.5, 2.0) for paragraph-wise
-                  spacing.  This library emulates the ratio by attaching
-                  `line-prefix' and `wrap-prefix' display properties to
-                  bare Org paragraphs (skipping src/quote/verse/example
-                  blocks, drawers, tables, etc.).
   :num-level       Heading depth for `org-num-mode' numbering
                     (sets `org-num-max-level' and enables the mode).
                     Use `off' or nil-with-explicit key absence to
@@ -166,205 +160,7 @@ want to preserve whatever :height/:weight is already set on them."
         (push (face-remap-add-relative face (list :family family))
               org-filetag-style--heading-remap-cookies)))))
 
-(defvar-local org-filetag-style--paragraph-line-spacing-ratio nil
-  "Paragraph line spacing ratio currently active in this buffer.
 
-When non-nil and > 0, paragraph spacing is applied lazily via jit-lock
-over the visible region.")
-
-(defvar-local org-filetag-style--paragraph-line-spacing-jit-installed nil
-  "Non-nil when org-filetag-style has registered its jit-lock function.")
-
-(defun org-filetag-style--paragraph-line-spacing-jit (beg end)
-  "jit-lock function to apply paragraph spacing in BEG..END."  
-  (when (and (derived-mode-p 'org-mode)
-             org-filetag-style--paragraph-line-spacing-ratio
-             (> org-filetag-style--paragraph-line-spacing-ratio 0))
-    (org-filetag-style-apply-paragraph-line-spacing
-     org-filetag-style--paragraph-line-spacing-ratio beg end)))
-
-(defun org-filetag-style--paragraph-line-spacing--ensure-jit ()
-  (unless org-filetag-style--paragraph-line-spacing-jit-installed
-    (jit-lock-register #'org-filetag-style--paragraph-line-spacing-jit)
-    (setq org-filetag-style--paragraph-line-spacing-jit-installed t)))
-
-(defun org-filetag-style--paragraph-line-spacing--disable-jit ()
-  (when org-filetag-style--paragraph-line-spacing-jit-installed
-    (jit-lock-unregister #'org-filetag-style--paragraph-line-spacing-jit)
-    (setq org-filetag-style--paragraph-line-spacing-jit-installed nil)))
-
-(defun org-filetag-style--paragraph-line-spacing--refresh-visible ()
-  "Apply paragraph spacing to the currently visible parts of this buffer."  
-  (dolist (win (get-buffer-window-list (current-buffer) nil t))
-    (let ((vb (window-start win))
-          (ve (or (window-end win t) (point-max))))
-      (org-filetag-style--paragraph-line-spacing-jit vb ve))))
-
-(defun org-filetag-style--apply-paragraph-line-spacing (plist)
-  "Apply :paragraph-line-spacing from PLIST.
-
-This configures paragraph spacing to be applied lazily via jit-lock.
-
-If the key is absent (or set to nil/<=0), clear any paragraph spacing
-previously applied by org-filetag-style in this buffer and unregister
-the jit-lock function to avoid overhead."  
-  (let* ((has-key (plist-member plist :paragraph-line-spacing))
-         (ratio (and has-key (plist-get plist :paragraph-line-spacing)))
-         (enable (and ratio (numberp ratio) (> ratio 0))))
-    (setq-local org-filetag-style--paragraph-line-spacing-ratio (and enable ratio))
-    (if enable
-        (progn
-          ;; Ensure jit-lock is active; Org enables it via font-lock, but
-          ;; make it explicit so our registration will run.
-          (when (fboundp 'jit-lock-mode) (jit-lock-mode 1))
-          (org-filetag-style--paragraph-line-spacing--ensure-jit)
-          (org-filetag-style--paragraph-line-spacing--refresh-visible))
-      (org-filetag-style--paragraph-line-spacing--disable-jit)
-      (org-filetag-style-clear-paragraph-line-spacing))))
-
-(defun org-filetag-style--text-scale-refresh (&rest _)
-  "Recompute paragraph-spacing pixel heights after a text-scale change.
-
-`text-scale-mode-hook' only fires on the 0/non-zero transition, not on
-every increment, so this advises `text-scale-set' directly -- the
-common primitive behind `text-scale-increase', `text-scale-decrease',
-and `text-scale-adjust'. Stale spacers (sized for the old font) are
-cleared, then jit is invoked explicitly on the visible range, since
-merely clearing properties doesn't itself trigger jit-lock refontification."
-  (when (and (derived-mode-p 'org-mode)
-             org-filetag-style--paragraph-line-spacing-ratio)
-    (org-filetag-style-clear-paragraph-line-spacing)
-    (org-filetag-style--paragraph-line-spacing--refresh-visible)))
-
-
-(defconst org-filetag-style--paragraph-spacing-prop
-  'org-filetag-style--paragraph-spacing
-  "Text property marking ranges that got paragraph spacing from org-filetag-style.")
-
-(defconst org-filetag-style--paragraph-spacing-excluded-parents
-  '(src-block example-block quote-block verse-block drawer property-drawer table)
-  "Org element types under which paragraph spacing should NOT be applied.")
-
-(defun org-filetag-style--paragraph-spacing--spacer (ratio pos)
-  "Return a `space' display spec for RATIO at POS.
-
-POS is used to read the *rendered* font via `font-at' when this buffer
-is visible in some window.  When it isn't visible yet, fall back to
-`frame-char-height'."
-  (let* ((ratio (or ratio 1.5))
-         ;; `font-at' can error if asked to use a window that isn't
-         ;; displaying the current buffer.  During some startup/opening
-         ;; flows there may not be one yet.
-         (win (get-buffer-window (current-buffer) t))
-         (height
-          (or (when (window-live-p win)
-                (condition-case nil
-                    (let* ((font (font-at pos win))
-                           (fi (and font (font-info font))))
-                      (when (and (vectorp fi)
-                                 (> (length fi) 2)
-                                 (aref fi 2))
-                        (aref fi 2)))
-                  (error nil)))
-              (frame-char-height)))
-         (px (max 0 (round (* ratio height)))))
-    `(space :width 0 :height (,px))))
-
-(defun org-filetag-style--put-paragraph-line-spacing (ratio beg end)
-  "Apply paragraph line spacing to BEG..END using RATIO.
-
-This sets `line-prefix' and `wrap-prefix' and marks the range with
-`org-filetag-style--paragraph-spacing-prop' so it can be cleared
-without clobbering other packages' prefix properties."  
-  (when (< beg end)
-    (let ((spacer (org-filetag-style--paragraph-spacing--spacer ratio beg)))
-      (put-text-property beg end 'line-prefix spacer)
-      (put-text-property beg end 'wrap-prefix spacer)
-      (put-text-property beg end org-filetag-style--paragraph-spacing-prop t))))
-
-;;;###autoload
-(defun org-filetag-style-clear-paragraph-line-spacing (&optional beg end)
-  "Remove paragraph line spacing previously applied by org-filetag-style.
-
-If BEG..END is provided, clear only within that range.  If called
-interactively, clear the active region when present, otherwise the
-whole buffer."  
-  (interactive (if (use-region-p)
-                   (list (region-beginning) (region-end))
-                 (list nil nil)))
-  (let* ((beg (or beg (point-min)))
-         (end (or end (point-max)))
-         (pos beg))
-    (while (< pos end)
-      (let ((next (or (next-single-property-change pos org-filetag-style--paragraph-spacing-prop nil end)
-                      end)))
-        (when (get-text-property pos org-filetag-style--paragraph-spacing-prop)
-          (remove-text-properties pos next
-                                  (list org-filetag-style--paragraph-spacing-prop nil
-                                        'line-prefix nil
-                                        'wrap-prefix nil)))
-        (setq pos next)))))
-
-;;;###autoload
-(defun org-filetag-style-apply-paragraph-line-spacing (&optional ratio beg end)
-  "Apply paragraph-wise line spacing to bare Org paragraphs.
-
-This applies spacing only to `paragraph' elements as identified by
-`org-element', skipping paragraphs that are inside any of the element
-types in `org-filetag-style--paragraph-spacing-excluded-parents'.
-
-If BEG..END is provided, only paragraphs overlapping that range are
-considered.  If called interactively, operate on the active region
-when present, otherwise the whole buffer."  
-  (interactive (list nil
-                     (when (use-region-p) (region-beginning))
-                     (when (use-region-p) (region-end))))
-  (unless (derived-mode-p 'org-mode)
-    (user-error "org-filetag-style-apply-paragraph-line-spacing: not in an Org buffer"))
-  (let* ((region-specified (and beg end))
-         (beg (or beg (point-min)))
-         (end (or end (point-max)))
-         (ast (if region-specified
-                  (save-restriction
-                    (narrow-to-region beg end)
-                    (org-element-parse-buffer))
-                (org-element-parse-buffer))))
-    ;; Only clear what we previously applied.
-    (org-filetag-style-clear-paragraph-line-spacing beg end)
-    (org-element-map ast 'paragraph
-      (lambda (p)
-        (let ((pb (org-element-property :begin p))
-              (pe (org-element-property :end p)))
-          (when (and pb pe
-                     (< pb end)
-                     (> pe beg)
-                     ;; Avoid relying on lineage from `org-element-parse-region'
-                     ;; (which may exclude parent context if the parent begins
-                     ;; outside BEG..END).  Instead, query context at PB.
-                     (save-excursion
-                       (goto-char pb)
-                       (not (org-element-lineage
-                             (org-element-context)
-                             org-filetag-style--paragraph-spacing-excluded-parents
-                             t))))
-            (org-filetag-style--put-paragraph-line-spacing ratio
-                                                          (max pb beg)
-                                                          (min pe end))))))))
-
-(defun org-filetag-style--set-paragraph-line-spacing (&optional ratio beg end)
-  "Emulate RATIO (default 1.5) line spacing on the paragraph at point.
-
-If BEG..END is provided, apply to that range instead.
-
-This is a low-level helper; for applying paragraph spacing across a
-buffer while skipping Org blocks/drawers/tables, prefer
-`org-filetag-style-apply-paragraph-line-spacing'."  
-  (interactive)
-  (save-excursion
-    (unless (and beg end)
-      (backward-paragraph) (setq beg (point))
-      (forward-paragraph) (setq end (point)))
-    (org-filetag-style--put-paragraph-line-spacing ratio beg end)))
 
 (defun org-filetag-style--apply-num (plist)
   (when (plist-member plist :num-level)
@@ -414,10 +210,7 @@ Intended for `org-mode-hook'; safe to call again any time to refresh."
       (org-filetag-style--apply-indent style)
       (org-filetag-style--apply-olivetti style)
       (org-filetag-style--apply-font style)
-      (org-filetag-style--apply-eval style)
-      ;; Do this after font/face changes so `font-at' sees the final
-      ;; rendered font when computing pixel sizes.
-      (org-filetag-style--apply-paragraph-line-spacing style))))
+      (org-filetag-style--apply-eval style))))
 
 ;;;###autoload
 (defun org-filetag-style-debug ()
@@ -443,8 +236,6 @@ Use this after editing #+FILETAGS by hand or via
 
 (advice-add 'org-set-tags-command :after
             (lambda (&rest _) (org-filetag-style-refresh)))
-(advice-add 'text-scale-mode :after
-            #'org-filetag-style--text-scale-refresh)
 
 (provide 'org-filetag-style)
 ;;; org-filetag-style.el ends here
