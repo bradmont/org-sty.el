@@ -83,6 +83,7 @@
 (require 'org)
 (require 'org-element)
 (require 'jit-lock)
+(require 'face-remap)
 
 ;;;; ----------------------------------------------------------------
 ;;;; User options
@@ -91,6 +92,76 @@
 (defgroup variable-spacing nil
   "Variable line spacing via pluggable backends."
   :group 'display)
+
+(defface text-body
+  '((t :inherit default :height 120))
+  "Face for word-processor body text in `variable-spacing-mode' buffers.
+
+Two mechanisms make this the sizing root for body content:
+
+  1. `variable-spacing--put' stamps it as a `face' property over every
+     region that receives a line-spacing ratio (typically paragraphs).
+
+  2. On mode enable, `variable-spacing--install-body-remaps' adds a
+     buffer-local `face-remap-add-relative' entry injecting
+     `(:inherit text-body)' for each face in
+     `variable-spacing-body-faces' (curated Org content faces).
+
+Meanwhile `default' is remapped buffer-locally to the small floor
+height (`variable-spacing-floor-height'), so structural/metadata
+elements such as drawers and keywords naturally render small without
+any per-face configuration.
+
+Set the body height globally once:
+
+  (set-face-attribute \\='text-body nil :height 110)
+
+The `defface' defaults to `:height 120' (12 pt at standard DPI), which
+can be overridden via `set-face-attribute' or Customize."
+  :group 'variable-spacing)
+
+(defcustom variable-spacing-floor-height 60
+  "Buffer-local floor `:height' applied to `default' in `variable-spacing-mode'.
+
+In Emacs face-height units (1/10 of a point), so 60 = 6 pt.  When
+`variable-spacing-mode' is enabled this value is installed via
+`face-remap-add-relative' on `default', making it the minimum rendered
+size for any face that does not inherit from `text-body' or carry its
+own explicit `:height'.  This naturally shrinks structural/metadata
+elements (drawers, property values, keywords, meta-lines) without
+requiring per-face configuration.
+
+The remap is strictly buffer-local and is removed on mode disable."
+  :type 'integer
+  :group 'variable-spacing)
+
+(defcustom variable-spacing-body-faces
+  '(org-block
+    org-block-begin-line
+    org-block-end-line
+    org-table
+    org-formula
+    org-code
+    org-verbatim
+    org-link
+    org-footnote
+    org-list-dt
+    org-quote
+    org-verse)
+  "Faces that should render at body-text size in `variable-spacing-mode' buffers.
+
+When the mode is enabled, each face in this list receives a
+buffer-local remap via `face-remap-add-relative' that injects
+`(:inherit text-body)' into its effective attribute chain.  This
+overrides the floor height installed on `default', so these faces
+render at whatever `:height' `text-body' carries.
+
+Only faces that are already loaded (per `facep') at mode-enable time
+are remapped; faces loaded later are not affected until the mode is
+toggled.  Structural/metadata faces (drawers, property values, keywords,
+meta-lines) are intentionally absent — they fall through to the floor."
+  :type '(repeat face)
+  :group 'variable-spacing)
 
 (defcustom variable-spacing-rules '(paragraph 1.5)
   "Plist mapping element type symbols to line-spacing ratios.
@@ -135,6 +206,10 @@ Scoped so only our own properties are cleared without affecting others.")
 Set automatically by `variable-spacing-mode' via
 `variable-spacing--detect-backend'.  Can be overridden manually after
 enabling the mode.")
+
+(defvar-local variable-spacing--body-remap-cookies nil
+  "List of cookies from `face-remap-add-relative' for `text-body' injection.
+Installed on `variable-spacing-mode' enable; removed on disable.")
 
 ;;;; ----------------------------------------------------------------
 ;;;; Private helpers
@@ -228,13 +303,35 @@ adding entries to `variable-spacing-rules'.")
 (defun variable-spacing--org-container-p (type)
   (memq type variable-spacing--org-structural-containers))
 
+(defun variable-spacing--org-find-ruled-ancestor (el rules)
+  "Return the nearest ancestor of EL whose type is present in RULES, or nil.
+
+Enforces parent-wins semantics when jit-lock starts a fontification
+pass mid-block: `org-element-at-point' returns the innermost element
+rather than the enclosing block, and without this check the child's
+ratio would be applied instead of the block's.
+
+Walks the `:parent' chain from EL upward; returns the first ancestor
+element whose type is a key in RULES, or nil if none is found.  The
+`:parent' property is populated by the org-element cache (Org 9.5+);
+when it is nil the function safely returns nil and the walker falls
+back to its normal behaviour."
+  (let ((parent (org-element-property :parent el)))
+    (while (and parent
+                (not (plist-member rules (org-element-type parent))))
+      (setq parent (org-element-property :parent parent)))
+    (and parent
+         (plist-member rules (org-element-type parent))
+         parent)))
+
 (defconst variable-spacing-org-backend
-  (list :element-at-point #'variable-spacing--org-element-at-point
-        :element-type      #'variable-spacing--org-element-type
-        :element-begin     #'variable-spacing--org-element-begin
-        :element-end       #'variable-spacing--org-element-end
-        :contents-begin    #'variable-spacing--org-contents-begin
-        :container-p       #'variable-spacing--org-container-p)
+  (list :element-at-point    #'variable-spacing--org-element-at-point
+        :element-type         #'variable-spacing--org-element-type
+        :element-begin        #'variable-spacing--org-element-begin
+        :element-end          #'variable-spacing--org-element-end
+        :contents-begin       #'variable-spacing--org-contents-begin
+        :container-p          #'variable-spacing--org-container-p
+        :find-ruled-ancestor  #'variable-spacing--org-find-ruled-ancestor)
   "Variable-spacing backend for Org buffers.
 Uses `org-element-at-point' (cache-backed) for element detection.
 Registered for `org-mode' in `variable-spacing-mode-backends'.")
@@ -243,16 +340,17 @@ Registered for `org-mode' in `variable-spacing-mode-backends'.")
 ;;;; Pixel-height spacer
 ;;;; ----------------------------------------------------------------
 
-(defun variable-spacing--spacer (ratio pos)
-  "Return a `space' display spec for RATIO at POS.
-Reads the rendered font via `font-at' when the buffer is visible;
-falls back to `frame-char-height' otherwise."
+(defun variable-spacing--spacer (ratio _pos)
+  "Return a `space' display spec for RATIO.
+Measures the rendered height of `text-body' via `face-font' rather
+than `font-at', so the result is independent of whatever `face' text
+properties may (or may not) be set at _POS."
   (let* ((ratio (or ratio 1.5))
          (win (get-buffer-window (current-buffer) t))
          (height
           (or (when (window-live-p win)
                 (condition-case nil
-                    (let* ((font (font-at pos win))
+                    (let* ((font (face-font 'text-body (window-frame win)))
                            (fi   (and font (font-info font))))
                       (when (and (vectorp fi) (> (length fi) 2) (aref fi 2))
                         (aref fi 2)))
@@ -261,12 +359,40 @@ falls back to `frame-char-height' otherwise."
          (px (max 0 (round (* ratio height)))))
     `(space :width 0 :height (,px))))
 
+(defun variable-spacing--add-body-face (beg end)
+  "Add `text-body' as a low-priority `face' property over BEG..END.
+Uses `add-face-text-property' with APPEND=t so that any face already
+present at a position (e.g. `org-footnote', `org-cite') remains as the
+higher-priority entry and its own appearance is preserved."
+  (add-face-text-property beg end 'text-body t))
+
+(defun variable-spacing--remove-body-face (beg end)
+  "Remove only `text-body' from the `face' property in BEG..END.
+Handles both a singleton symbol and a list, leaving any other faces
+(e.g. `org-footnote') intact."
+  (let ((pos beg))
+    (while (< pos end)
+      (let* ((next (or (next-single-property-change pos 'face nil end) end))
+             (f    (get-text-property pos 'face)))
+        (cond
+         ((eq f 'text-body)
+          (remove-text-properties pos next '(face nil)))
+         ((and (listp f) (memq 'text-body f))
+          (let ((trimmed (remq 'text-body f)))
+            (if trimmed
+                (put-text-property pos next 'face trimmed)
+              (remove-text-properties pos next '(face nil))))))
+        (setq pos next)))))
+
 (defun variable-spacing--put (ratio beg end)
-  "Apply line-spacing for RATIO to BEG..END via text properties."
+  "Apply line-spacing for RATIO to BEG..END via text properties.
+Adds `text-body' as a low-priority face alongside any face already
+present (e.g. `org-footnote', `org-cite') rather than replacing it."
   (when (< beg end)
     (let ((spacer (variable-spacing--spacer ratio beg)))
       (put-text-property beg end 'line-prefix spacer)
       (put-text-property beg end 'wrap-prefix spacer)
+      (variable-spacing--add-body-face beg end)
       (put-text-property beg end variable-spacing--prop t))))
 
 ;;;; ----------------------------------------------------------------
@@ -292,7 +418,8 @@ when called interactively."
           (remove-text-properties pos next
                                   (list variable-spacing--prop nil
                                         'line-prefix nil
-                                        'wrap-prefix nil)))
+                                        'wrap-prefix nil))
+          (variable-spacing--remove-body-face pos next))
         (setq pos next)))))
 
 ;;;###autoload
@@ -322,12 +449,16 @@ otherwise the whole buffer."
          (beg     (or beg (point-min)))
          (end     (or end (point-max)))
          ;; Resolve backend functions once up front.
-         (fn-at-point    (variable-spacing--backend-get backend :element-at-point))
-         (fn-type        (variable-spacing--backend-get backend :element-type))
-         (fn-begin       (variable-spacing--backend-get backend :element-begin))
-         (fn-end         (variable-spacing--backend-get backend :element-end))
-         (fn-contents    (variable-spacing--backend-get backend :contents-begin))
-         (fn-container-p (variable-spacing--backend-get backend :container-p)))
+         (fn-at-point     (variable-spacing--backend-get backend :element-at-point))
+         (fn-type         (variable-spacing--backend-get backend :element-type))
+         (fn-begin        (variable-spacing--backend-get backend :element-begin))
+         (fn-end          (variable-spacing--backend-get backend :element-end))
+         (fn-contents     (variable-spacing--backend-get backend :contents-begin))
+         (fn-container-p  (variable-spacing--backend-get backend :container-p))
+         ;; Optional: backends may supply this to enforce parent-wins
+         ;; when jit-lock starts mid-block (returns the nearest ancestor
+         ;; element whose type is in RULES, or nil).
+         (fn-find-ancestor (variable-spacing--backend-get backend :find-ruled-ancestor)))
     (variable-spacing-clear beg end)
     (save-restriction
       (widen)
@@ -342,12 +473,19 @@ otherwise the whole buffer."
              ;; Explicit plist entry: apply ratio if positive, always
              ;; jump past (parent wins / explicit exclude).
              ((plist-member rules type)
-              (let ((ratio (plist-get rules type)))
-                (when (and (numberp ratio) (> ratio 0))
-                  (variable-spacing--put ratio
-                                         (max el-beg beg)
-                                         (min el-end end))))
-              (goto-char (or el-end (1+ (point)))))
+              (let* ((ratio    (plist-get rules type))
+                     (ancestor (and fn-find-ancestor
+                                    (funcall fn-find-ancestor el rules))))
+                (if ancestor
+                    ;; A containing block already governs this region
+                    ;; (jit-lock started mid-block).  Jump past the
+                    ;; ancestor's end without applying the child's ratio.
+                    (goto-char (or (funcall fn-end ancestor) (1+ (point))))
+                  (when (and (numberp ratio) (> ratio 0))
+                    (variable-spacing--put ratio
+                                           (max el-beg beg)
+                                           (min el-end end)))
+                  (goto-char (or el-end (1+ (point)))))))
              ;; Not in plist, is a container: enter transparently.
              ((funcall fn-container-p type)
               (goto-char (max (or (funcall fn-contents el)
@@ -387,7 +525,86 @@ otherwise the whole buffer."
       (variable-spacing--jit vb ve))))
 
 ;;;; ----------------------------------------------------------------
-;;;; text-scale-mode advice
+;;;; Buffer-local text-body face injection
+;;;; ----------------------------------------------------------------
+
+(defun variable-spacing--install-body-remaps ()
+  "Install buffer-local face remaps for the `text-body' floor/body model.
+
+Two things happen:
+
+  1. `default' is remapped with a floor `:height' of
+     `variable-spacing-floor-height', so structural/metadata elements
+     (drawers, property values, keywords, etc.) render small without
+     per-face configuration.
+
+  2. Each face in `variable-spacing-body-faces' that is already loaded
+     receives a `(:inherit text-body)' remap, overriding the floor and
+     making those faces track `text-body' for sizing.
+
+All remaps are buffer-local; cookies are stored in
+`variable-spacing--body-remap-cookies' for clean removal."
+  (setq variable-spacing--body-remap-cookies nil)
+  ;; 1. Floor on default.
+  (push (face-remap-add-relative 'default :height variable-spacing-floor-height)
+        variable-spacing--body-remap-cookies)
+  ;; 2. Body-size injection for curated content faces.
+  (dolist (face variable-spacing-body-faces)
+    (when (facep face)
+      (push (face-remap-add-relative face :inherit 'text-body)
+            variable-spacing--body-remap-cookies))))
+
+(defun variable-spacing--remove-body-remaps ()
+  "Remove all buffer-local face remaps installed on `variable-spacing-mode' enable."
+  (dolist (cookie variable-spacing--body-remap-cookies)
+    (face-remap-remove-relative cookie))
+  (setq variable-spacing--body-remap-cookies nil))
+
+;;;; ----------------------------------------------------------------
+;;;; Unfontify advice — preserve face stamps through font-lock cycles
+;;;; ----------------------------------------------------------------
+
+(defun variable-spacing--around-unfontify (orig beg end)
+  "Advise `font-lock-unfontify-region' to preserve `face' `text-body' stamps.
+
+Calls ORIG (the real unfontify function) over BEG..END, then
+re-stamps `face' `text-body' on any span marked by our sentinel
+property `variable-spacing--prop'.
+
+This is more robust than racing for last place in the jit-lock
+function queue: the sentinel is never in any managed-props list, so it
+survives unfontify intact and serves as a stable record of what we
+own.  The advice runs only in buffers where `variable-spacing-mode' is
+active."
+  (funcall orig beg end)
+  (when (bound-and-true-p variable-spacing-mode)
+    (let ((pos beg))
+      (while (< pos end)
+        (let ((next (or (next-single-property-change
+                         pos variable-spacing--prop nil end)
+                        end)))
+          (when (get-text-property pos variable-spacing--prop)
+            (variable-spacing--add-body-face pos next))
+          (setq pos next))))))
+
+(defun variable-spacing--enable-unfontify-advice ()
+  "Add `variable-spacing--around-unfontify' to `font-lock-unfontify-region'.
+Safe to call multiple times; `advice-add' is idempotent for a given
+function symbol."
+  (advice-add 'font-lock-unfontify-region :around
+              #'variable-spacing--around-unfontify))
+
+(defun variable-spacing--disable-unfontify-advice ()
+  "Remove the unfontify advice if no other buffer still has the mode on."
+  (unless (cl-some (lambda (buf)
+                     (and (not (eq buf (current-buffer)))
+                          (buffer-local-value 'variable-spacing-mode buf)))
+                   (buffer-list))
+    (advice-remove 'font-lock-unfontify-region
+                   #'variable-spacing--around-unfontify)))
+
+;;;; ----------------------------------------------------------------
+;;;; text-scale-mode advice / text-body face-change hook
 ;;;; ----------------------------------------------------------------
 
 (defun variable-spacing--text-scale-refresh (&rest _)
@@ -398,6 +615,19 @@ jit-lock refontification."
   (when (variable-spacing--any-positive-p variable-spacing-rules)
     (variable-spacing-clear)
     (variable-spacing--refresh-visible)))
+
+(defun variable-spacing--text-body-face-refresh (face &rest _)
+  "Recompute spacers in `variable-spacing-mode' buffers when FACE is `text-body'.
+
+Advises `set-face-attribute'.  Spacers are pixel values baked in at
+fontification time; changing `text-body' height later leaves them
+stale unless we clear and re-apply."
+  (when (eq face 'text-body)
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (bound-and-true-p variable-spacing-mode)
+          (variable-spacing-clear)
+          (variable-spacing--refresh-visible))))))
 
 ;;;; ----------------------------------------------------------------
 ;;;; Minor mode
@@ -421,6 +651,7 @@ format and parent-wins semantics."
                     (variable-spacing--detect-backend))
         (when (fboundp 'jit-lock-mode) (jit-lock-mode 1))
         (variable-spacing--ensure-jit)
+        (variable-spacing--install-body-remaps)
         ;; Defer the initial visible-range refresh so it runs after the
         ;; current hook/command completes and window geometry has settled.
         ;; Calling --refresh-visible synchronously during a mode hook can
@@ -433,11 +664,18 @@ format and parent-wins semantics."
                      (with-current-buffer buf
                        (variable-spacing--refresh-visible))))))
         (advice-add 'text-scale-mode :after
-                    #'variable-spacing--text-scale-refresh))
+                    #'variable-spacing--text-scale-refresh)
+        (advice-add 'set-face-attribute :after
+                    #'variable-spacing--text-body-face-refresh)
+        (variable-spacing--enable-unfontify-advice))
+    (variable-spacing--remove-body-remaps)
     (variable-spacing--disable-jit)
     (variable-spacing-clear)
     (advice-remove 'text-scale-mode
-                   #'variable-spacing--text-scale-refresh)))
+                   #'variable-spacing--text-scale-refresh)
+    (advice-remove 'set-face-attribute
+                   #'variable-spacing--text-body-face-refresh)
+    (variable-spacing--disable-unfontify-advice)))
 
 (provide 'variable-spacing)
 ;;; variable-spacing.el ends here
