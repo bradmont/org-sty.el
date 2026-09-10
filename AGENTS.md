@@ -222,16 +222,51 @@ diagnosed.  Likely candidates: faces applied by Org constructs not yet in
 `variable-spacing-body-faces`, or timing issues with the after-fontify pass
 on initial buffer load before the mode is enabled.
 
-### Future direction: face-driven spacing
+### Face-driven spacing — IMPLEMENTED
 
-Once face stamping is stable, the spacing mechanism should migrate to the
-same model.  The envisioned API is a custom face attribute (e.g.
-`:variable-spacing-ratio`) that the library reads from whichever face is
-active at each buffer position and uses to compute the `line-prefix` /
-`wrap-prefix` spacer.  This decouples spacing rules from element-type
-detection entirely: `(set-face-attribute 'org-quote nil
-:variable-spacing-ratio 1.0)` would control both the font and the line
-spacing of quote blocks from one declaration.
+`variable-spacing-ratio` symbol property (stored with `put`, intercepted
+from `set-face-attribute` via `:around` advice) drives the spacing pass.
+See the current `variable-spacing.el` for the full implementation.
+
+### Next design direction: per-face styling in org-filetag-style
+
+The current `org-filetag-style-alist` plist mixes three concerns:
+
+  1. Settings for `default` (`:font`, `:font-size`) — handled by `--apply-font`
+  2. Document-wide mode toggles and spacing ratios — handled by `:eval`
+  3. Face-specific styling (heading heights, block backgrounds, etc.)
+     — currently done via `set-face-attribute` in `:eval`, which is global
+     and not cleaned up between style switches
+
+The goal is to split these cleanly and support face-specific remaps with
+automatic cookie tracking, including support for custom properties like
+`variable-spacing-ratio`.  Tentative design:
+
+  - Keep `:font` / `:font-size` for `default` (as now, already buffer-local)
+  - Add a `:faces` key (or similar) that maps face symbols to attribute
+    plists, installed via `face-remap-add-relative` and tracked in a new
+    buffer-local `org-filetag-style--eval-remap-cookies` list
+  - The library clears those cookies and re-applies on each call to
+    `org-filetag-style-apply`, so re-applying a style is idempotent
+  - A helper `org-filetag-style-remap` could be called from `:eval` for
+    ad-hoc face remaps that also get tracked and cleaned up
+  - This would let users write e.g.:
+
+      ("thesis" . (:font "Times New Roman" :font-size 12
+                   :faces ((org-quote  . (:slant italic :variable-spacing-ratio 1.0))
+                           (org-level-1 . (:height 2.4)))
+                   :eval (progn
+                           (put 'text-body 'variable-spacing-ratio 1.6)
+                           (variable-spacing-mode 1))))
+
+  - Plist-of-plists syntax is verbose; alternatives worth considering:
+    a flat list of `(FACE ATTR VAL ATTR VAL …)` triples, or a dedicated
+    `(org-filetag-style-remap FACE &rest ATTRS)` call inside `:eval`
+
+  - The `:around` advice on `set-face-attribute` in `variable-spacing.el`
+    already intercepts `:variable-spacing-ratio`; the face-remap path in
+    org-filetag-style would need to call `put` directly (or go through the
+    same advice) for that property to work
 
 ## Emacs version requirement
 
