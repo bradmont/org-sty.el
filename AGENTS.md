@@ -155,99 +155,83 @@ validates this model interactively. It is not part of the library.
 - **Generalising `variable-spacing-mode`** beyond Org via pluggable backends
   is partially done (text backend exists) but not fully exercised outside Org.
 
-## Branch `text-body-face` — WIP design spec
+## Branch `text-body-face` — current state
 
-This branch is a work-in-progress that reworks how body-text sizing is
-applied.  The goal is to make `default` a true floor (very small, e.g. 6pt)
-and have body text opt in to a larger `text-body` face rather than inheriting
-from `default`.  An agent resuming this branch should implement the approach
-described below.
+This branch reworks body-text sizing so that `default` is a true floor
+(very small, e.g. 6pt) and body text opts in to a larger `text-body` face.
 
-### The problem with the current approach on this branch
+### What is implemented and working
 
-`variable-spacing--put` stamps `text-body` as a `face` text property at
-spacing time (jit-lock).  An unfontify `:around` advice then re-stamps it
-after each font-lock unfontification cycle.  This causes `org-quote` block
-content to sometimes appear body-sized even when the user has configured quote
-blocks as single-spaced, because the stamp lands on the block's paragraph
-content via the spacing pass and then fights the `org-quote` face remap.
+**Two orthogonal mechanisms** give every character the right size:
 
-### Desired model
+1. **Buffer-local face remaps** (`face-remap-add-relative`): a curated list
+   of faces (`variable-spacing-body-faces`) each receive `(:inherit text-body)`
+   injected into their effective attribute chain.  Three populations:
+   - Heading faces `org-level-1`…`org-level-8` — applied by Org as
+     `font-lock-face`; remap is the only way to lift them above the floor.
+   - Primitive emphasis faces `bold`, `italic`, `underline` — applied by
+     Org's anchor functions directly as `face`; without a remap they would
+     fall to the floor.
+   - Content block / inline markup faces: `org-quote`, `org-verse`,
+     `org-block`, `org-block-begin-line`, `org-block-end-line`, `org-table`,
+     `org-formula`, `org-code`, `org-verbatim`, `org-link`, `org-link-id`,
+     `org-cite`, `org-cite-key`, `org-footnote`, `org-list-dt`.
 
-**Two orthogonal mechanisms** together give every character the right size:
+2. **After-fontify pass** (`font-lock-fontify-keywords-region` `:after`
+   advice): after Org's complete keyword list has run for each jit-lock chunk,
+   scans the region for characters with *neither* `face` nor `font-lock-face`
+   (plain paragraph text Org leaves bare) and stamps `text-body` on those runs,
+   skipping bare `\n` characters.  Stale stamps are cleared before re-stamping
+   so that text newly covered by an Org face does not retain a stale stamp.
+   The advice targets `font-lock-fontify-keywords-region` (not the outer
+   `font-lock-fontify-region`) because that inner function is called with the
+   already-extended `[fstart, fend]` bounds that jit-lock marks as clean —
+   advising the outer function would miss text covered by region extension.
 
-1. **Buffer-local face remaps** (`face-remap-add-relative`) on a curated list
-   of Org faces (`org-level-1`…`org-level-8`, `org-quote`, `org-verse`,
-   `org-block`, `org-block-begin-line`, `org-block-end-line`, `org-table`,
-   `org-formula`, `org-code`, `org-verbatim`, `org-link`, `org-footnote`,
-   `org-list-dt`): inject `(:inherit text-body)` into each face's effective
-   chain.  These faces already carry an Org-applied face property so they size
-   via the remap.  `org-quote` is intentionally in this list — quote blocks
-   default to body size, and users who want them smaller can remap the face.
+On mode **disable**: `variable-spacing--remove-body-face` is called over the
+full buffer to clean up stamps (which carry no `variable-spacing--prop`
+sentinel and so are not caught by `variable-spacing-clear`).
 
-2. **After-fontify pass** (`font-lock-fontify-region` `:after` advice):
-   after Org's full keyword list runs for each jit-lock chunk, scan BEG..END
-   for characters with *neither* a `face` nor a `font-lock-face` property
-   (plain paragraph text that Org leaves completely bare) and stamp `text-body`
-   on those runs.  **Skip bare newline characters** — a newline with
-   `text-body` would inflate the line height for blank lines and small
-   structural lines.
+### Known remaining issues
 
-### How Org applies faces (key facts for the implementation)
+**Newline face propagation** — each `\n` should display at the same height
+as the character immediately before it (so inter-paragraph blank lines are
+body-sized, but newlines at the end of floor-sized structural lines stay
+small).  This was attempted by adding a `search-forward "\n"` loop as a
+third pass inside `variable-spacing--after-fontify`, but it caused Emacs to
+lock up on mode enable.  The loop fires on every `font-lock-fontify-keywords-
+region` call, which is extremely frequent; the approach needs rethinking.
+The fix should *not* use a linear character search inside a per-fontification
+callback.  One candidate: run the newline pass lazily via a separate
+`jit-lock-register`ed function so it is rate-limited by jit-lock's own
+scheduling.
 
-- Anchor functions (`org-fontify-meta-lines-and-blocks`, `org-do-emphasis-faces`,
-  `org-activate-links`, etc.) write directly to the `face` text property via
-  `add-face-text-property` or `add-text-properties '(face …)`.
-- Regexp keyword entries (headlines, tables, TODO keywords, checkboxes) use
-  the standard font-lock FACESPEC form, which writes `font-lock-face`.
-- Therefore: checking *both* `face` and `font-lock-face` at each position is
-  necessary to correctly identify plain text.  Use the minimum of both
-  `next-single-property-change` results to advance the scan.
-- `org-quote` block body: Org calls `(add-face-text-property beg end 'org-quote t)`
-  so those chars have `face = org-quote`.  The after-fontify pass sees this
-  and skips them.  They size via the remap on `org-quote`.
+**`text-scale-mode` compatibility** — `text-scale-mode` works by adding a
+float `:height` multiplier to `default`.  Float multipliers compose
+multiplicatively up the remap chain, but our integer heights (`text-body`
+`:height 120`, floor remap `:height 60`) are absolute overrides that ignore
+the float.  The fix requires expressing both as floats: the floor as
+`floor_pt / global_default_pt` computed at mode-enable time, and `text-body`
+as a float ratio (body / floor).  This was implemented and reverted because
+the interaction with `org-filetag-style--apply-font` (which strips all
+`default` remaps via `assq-delete-all` before installing its own) broke the
+floor.  The two modules need a coordination protocol before this can land.
 
-### Survival across unfontify cycles
-
-`text-body` stamps applied by the after-fontify pass have no
-`font-lock-fontified t` marker, so they are *not* in font-lock's managed-props
-set and survive `font-lock-default-unfontify-region`.  However, stale stamps
-can accumulate if text transitions from plain to Org-styled (e.g. a quote
-block is newly typed).  The after-fontify pass must therefore *clear* stale
-`text-body` stamps from BEG..END before re-stamping, using
-`variable-spacing--remove-body-face`.  No separate unfontify advice is needed.
-
-### Changes from current branch state
-
-- **Remove** the entire unfontify `:around` advice section
-  (`variable-spacing--around-unfontify`, `..--enable-unfontify-advice`,
-  `..--disable-unfontify-advice`) and all calls to them in the mode body.
-- **Remove** `(variable-spacing--add-body-face beg end)` from
-  `variable-spacing--put` — spacing and face-stamping are now orthogonal.
-- **Remove** `(variable-spacing--remove-body-face pos next)` from
-  `variable-spacing-clear` — that function only manages spacing properties.
-- **Add** `variable-spacing--after-fontify (beg end &optional _loudly)`:
-  (1) call `variable-spacing--remove-body-face beg end`,
-  (2) walk with combined `face`/`font-lock-face` boundary detection,
-  (3) for each unstyled span use `skip-chars-forward "^\n"` to stamp only
-  non-newline runs.
-- **Add** `variable-spacing--enable-after-fontify-advice` /
-  `variable-spacing--disable-after-fontify-advice` (same reference-counting
-  pattern as the existing unfontify helpers).
-- **Add** `org-level-1` through `org-level-8` to `variable-spacing-body-faces`.
-- On mode **disable**: call `(variable-spacing--remove-body-face (point-min) (point-max))`
-  to clean up stamps that have no `variable-spacing--prop` sentinel.
+**Some faces not fontified correctly** — noted during testing but not yet
+diagnosed.  Likely candidates: faces applied by Org constructs not yet in
+`variable-spacing-body-faces`, or timing issues with the after-fontify pass
+on initial buffer load before the mode is enabled.
 
 ### Future direction: face-driven spacing
 
-Once the face stamping is stable, the spacing mechanism should be migrated to
-the same model.  The envisioned API is a face property (e.g.
-`variable-spacing-ratio`) that the library reads from whichever face is active
-at each character position, then applies the appropriate `line-prefix` /
-`wrap-prefix` spacer.  This decouples spacing rules from element-type detection
-entirely and lets a single `set-face-attribute 'org-quote nil
-'variable-spacing-ratio 1.0)` control both the font and the spacing of quote
-blocks from one place.
+Once face stamping is stable, the spacing mechanism should migrate to the
+same model.  The envisioned API is a custom face attribute (e.g.
+`:variable-spacing-ratio`) that the library reads from whichever face is
+active at each buffer position and uses to compute the `line-prefix` /
+`wrap-prefix` spacer.  This decouples spacing rules from element-type
+detection entirely: `(set-face-attribute 'org-quote nil
+:variable-spacing-ratio 1.0)` would control both the font and the line
+spacing of quote blocks from one declaration.
 
 ## Emacs version requirement
 

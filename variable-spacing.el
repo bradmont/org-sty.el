@@ -97,20 +97,8 @@
   '((t :inherit default :height 120))
   "Face for word-processor body text in `variable-spacing-mode' buffers.
 
-Two mechanisms make this the sizing root for body content:
-
-  1. `variable-spacing--put' stamps it as a `face' property over every
-     region that receives a line-spacing ratio (typically paragraphs).
-
-  2. On mode enable, `variable-spacing--install-body-remaps' adds a
-     buffer-local `face-remap-add-relative' entry injecting
-     `(:inherit text-body)' for each face in
-     `variable-spacing-body-faces' (curated Org content faces).
-
-Meanwhile `default' is remapped buffer-locally to the small floor
-height (`variable-spacing-floor-height'), so structural/metadata
-elements such as drawers and keywords naturally render small without
-any per-face configuration.
+Faces in `variable-spacing-body-faces' receive a buffer-local
+`(:inherit text-body)' remap so they track this face's height.
 
 Set the body height globally once:
 
@@ -136,7 +124,29 @@ The remap is strictly buffer-local and is removed on mode disable."
   :group 'variable-spacing)
 
 (defcustom variable-spacing-body-faces
-  '(org-block
+  '(;; Heading faces — sized at body scale so they remain visible.
+    ;; Their own relative :height multipliers still apply on top of
+    ;; text-body, so hierarchy is preserved.
+    org-level-1
+    org-level-2
+    org-level-3
+    org-level-4
+    org-level-5
+    org-level-6
+    org-level-7
+    org-level-8
+    ;; Primitive Emacs emphasis faces — Org's anchor functions apply
+    ;; these directly (from org-emphasis-alist), so they need a remap
+    ;; rather than a text-property stamp to reach body size.
+    bold
+    italic
+    underline
+    ;; Content block faces — quote/verse/code blocks, tables, inline
+    ;; markup, links, footnotes, and list terms should all render at
+    ;; body size.  org-quote is intentionally included: quote blocks
+    ;; default to body size; users who want them smaller can remap
+    ;; the face independently.
+    org-block
     org-block-begin-line
     org-block-end-line
     org-table
@@ -144,22 +154,44 @@ The remap is strictly buffer-local and is removed on mode disable."
     org-code
     org-verbatim
     org-link
+    org-link-id
+    org-cite
+    org-cite-key
     org-footnote
     org-list-dt
     org-quote
     org-verse)
   "Faces that should render at body-text size in `variable-spacing-mode' buffers.
 
-When the mode is enabled, each face in this list receives a
-buffer-local remap via `face-remap-add-relative' that injects
-`(:inherit text-body)' into its effective attribute chain.  This
-overrides the floor height installed on `default', so these faces
-render at whatever `:height' `text-body' carries.
+When the mode is enabled, each face in this list receives a buffer-local
+remap via `face-remap-add-relative' that injects `(:inherit text-body)'
+into its effective attribute chain.  This overrides the floor height
+installed on `default', so these faces render at whatever `:height'
+`text-body' carries.
 
-Only faces that are already loaded (per `facep') at mode-enable time
-are remapped; faces loaded later are not affected until the mode is
-toggled.  Structural/metadata faces (drawers, property values, keywords,
-meta-lines) are intentionally absent — they fall through to the floor."
+Three populations are covered:
+
+  Heading faces (org-level-1…org-level-8): applied by Org's regexp
+  font-lock keywords as `font-lock-face'.  The after-fontify pass skips
+  them, so the remap is the only way to lift them above the floor.  Their
+  intrinsic relative `:height' multipliers still compose on top of
+  text-body, preserving heading hierarchy.
+
+  Primitive emphasis faces (bold, italic, underline): applied directly by
+  `org-do-emphasis-faces' as a `face' text property.  The after-fontify
+  pass skips them because they are styled.  Without a remap they would
+  inherit from `default' and render at floor size.
+
+  Content block / inline markup faces (org-quote, org-block, org-link,
+  org-cite, …): applied by Org's anchor functions as a `face' property.
+  The after-fontify pass skips them too.  The remap makes them track
+  text-body by default.
+
+Structural/metadata faces (drawers, property values, keywords, meta-lines)
+are intentionally absent — they fall through to the floor.
+
+Only faces that are already loaded (per `facep') at mode-enable time are
+remapped; faces loaded later are not affected until the mode is toggled."
   :type '(repeat face)
   :group 'variable-spacing)
 
@@ -385,14 +417,11 @@ Handles both a singleton symbol and a list, leaving any other faces
         (setq pos next)))))
 
 (defun variable-spacing--put (ratio beg end)
-  "Apply line-spacing for RATIO to BEG..END via text properties.
-Adds `text-body' as a low-priority face alongside any face already
-present (e.g. `org-footnote', `org-cite') rather than replacing it."
+  "Apply line-spacing for RATIO to BEG..END via text properties."
   (when (< beg end)
     (let ((spacer (variable-spacing--spacer ratio beg)))
       (put-text-property beg end 'line-prefix spacer)
       (put-text-property beg end 'wrap-prefix spacer)
-      (variable-spacing--add-body-face beg end)
       (put-text-property beg end variable-spacing--prop t))))
 
 ;;;; ----------------------------------------------------------------
@@ -418,8 +447,7 @@ when called interactively."
           (remove-text-properties pos next
                                   (list variable-spacing--prop nil
                                         'line-prefix nil
-                                        'wrap-prefix nil))
-          (variable-spacing--remove-body-face pos next))
+                                        'wrap-prefix nil)))
         (setq pos next)))))
 
 ;;;###autoload
@@ -478,9 +506,17 @@ otherwise the whole buffer."
                                     (funcall fn-find-ancestor el rules))))
                 (if ancestor
                     ;; A containing block already governs this region
-                    ;; (jit-lock started mid-block).  Jump past the
-                    ;; ancestor's end without applying the child's ratio.
-                    (goto-char (or (funcall fn-end ancestor) (1+ (point))))
+                    ;; (jit-lock started mid-block).  The initial clear
+                    ;; wiped its spacing from beg onward; re-apply the
+                    ;; ancestor's own ratio before jumping past so that
+                    ;; section is not left blank.
+                    (let* ((a-ratio (plist-get rules (funcall fn-type ancestor)))
+                           (a-end   (or (funcall fn-end ancestor) (1+ (point)))))
+                      (when (and (numberp a-ratio) (> a-ratio 0))
+                        (variable-spacing--put a-ratio
+                                               (max (funcall fn-begin ancestor) beg)
+                                               (min a-end end)))
+                      (goto-char a-end))
                   (when (and (numberp ratio) (> ratio 0))
                     (variable-spacing--put ratio
                                            (max el-beg beg)
@@ -501,9 +537,29 @@ otherwise the whole buffer."
 ;;;; ----------------------------------------------------------------
 
 (defun variable-spacing--jit (beg end)
-  "jit-lock fontification function; applies spacing over BEG..END."
+  "jit-lock fontification function; applies spacing over BEG..END.
+Before applying, extends BEG..END via `font-lock-extend-region-functions'
+to safe element boundaries.  In Org buffers, Org's own extension
+functions snap the region to block edges, so the walker never starts
+mid-block and parent-wins semantics are always correct.  In other
+buffers the hook is a no-op.  Mirrors the fixpoint loop used by
+`font-lock-extend-region' itself."
   (when (variable-spacing--any-positive-p variable-spacing-rules)
-    (variable-spacing-apply variable-spacing-rules beg end)))
+    (let ((font-lock-beg beg)
+          (font-lock-end end))
+      ;; Extend to safe element boundaries using font-lock's mechanism.
+      ;; Wrapped in condition-case: extension functions expect to run inside
+      ;; font-lock's own context and may signal errors when called from
+      ;; jit-lock directly.  On error, fall back silently to beg/end.
+      (condition-case nil
+          (let ((extended t))
+            (while extended
+              (setq extended
+                    (run-hook-with-args-until-success
+                     'font-lock-extend-region-functions))))
+        (error nil))
+      (variable-spacing-apply variable-spacing-rules
+                               font-lock-beg font-lock-end))))
 
 (defun variable-spacing--ensure-jit ()
   "Register `variable-spacing--jit' with jit-lock if not already done."
@@ -561,47 +617,85 @@ All remaps are buffer-local; cookies are stored in
   (setq variable-spacing--body-remap-cookies nil))
 
 ;;;; ----------------------------------------------------------------
-;;;; Unfontify advice — preserve face stamps through font-lock cycles
+;;;; After-fontify pass — stamp text-body on Org-unstyled characters
 ;;;; ----------------------------------------------------------------
 
-(defun variable-spacing--around-unfontify (orig beg end)
-  "Advise `font-lock-unfontify-region' to preserve `face' `text-body' stamps.
+(defun variable-spacing--after-fontify (beg end &optional _loudly)
+  "Stamp `text-body' on characters in BEG..END that Org left unstyled.
+Advises `font-lock-fontify-keywords-region' with :after.  Runs only
+in buffers where `variable-spacing-mode' is active.
 
-Calls ORIG (the real unfontify function) over BEG..END, then
-re-stamps `face' `text-body' on any span marked by our sentinel
-property `variable-spacing--prop'.
+After Org's full keyword list runs for a jit-lock chunk two categories
+of characters exist:
 
-This is more robust than racing for last place in the jit-lock
-function queue: the sentinel is never in any managed-props list, so it
-survives unfontify intact and serves as a stable record of what we
-own.  The advice runs only in buffers where `variable-spacing-mode' is
-active."
-  (funcall orig beg end)
+  Styled   — Org set a `face' text property (anchor functions: blocks,
+              emphasis, links) or a `font-lock-face' property (regexp
+              keywords: headlines, tables, TODO keywords).
+
+  Unstyled — neither property is set.  This is plain paragraph text
+              that Org intentionally leaves bare.
+
+This function stamps `text-body' on the unstyled characters so they
+render at body-text size rather than falling through to the floor
+height of `default'.
+
+Bare newlines are excluded: a \\n with `text-body' would inflate the
+line height for blank lines and for small structural lines that contain
+only a newline.  Each unstyled span is walked with
+`skip-chars-forward' to stamp only non-newline runs.
+
+Stale stamps from a previous fontification cycle are cleared first,
+so that spans which have since acquired an Org face (e.g. a quote
+block that was just typed) do not retain a stale `text-body' stamp
+alongside their Org face."
   (when (bound-and-true-p variable-spacing-mode)
-    (let ((pos beg))
-      (while (< pos end)
-        (let ((next (or (next-single-property-change
-                         pos variable-spacing--prop nil end)
-                        end)))
-          (when (get-text-property pos variable-spacing--prop)
-            (variable-spacing--add-body-face pos next))
-          (setq pos next))))))
+    (with-silent-modifications
+      ;; 1. Clear stale text-body stamps so newly Org-styled text is clean.
+      (variable-spacing--remove-body-face beg end)
+      ;; 2. Re-stamp on truly unstyled, non-newline runs.
+      (let ((pos beg))
+        (while (< pos end)
+          (let* ((next-face    (next-single-property-change
+                                pos 'face nil end))
+                 (next-fl-face (next-single-property-change
+                                pos 'font-lock-face nil end))
+                 ;; Advance to whichever face boundary comes first.
+                 (next         (min (or next-face end)
+                                    (or next-fl-face end))))
+            (when (and (null (get-text-property pos 'face))
+                       (null (get-text-property pos 'font-lock-face)))
+              ;; Unstyled span: stamp text-body on non-newline runs only.
+              (save-excursion
+                (goto-char pos)
+                (while (< (point) next)
+                  (let ((run-start (point)))
+                    (skip-chars-forward "^\n" next)
+                    (when (> (point) run-start)
+                      (add-face-text-property run-start (point) 'text-body t))
+                    (when (and (< (point) next) (= (char-after) ?\n))
+                      (forward-char 1)))))) ; end save-excursion / when unstyled
+            (setq pos next)))))))           ; end let* / while / let
 
-(defun variable-spacing--enable-unfontify-advice ()
-  "Add `variable-spacing--around-unfontify' to `font-lock-unfontify-region'.
-Safe to call multiple times; `advice-add' is idempotent for a given
-function symbol."
-  (advice-add 'font-lock-unfontify-region :around
-              #'variable-spacing--around-unfontify))
+(defun variable-spacing--enable-after-fontify-advice ()
+  "Add `variable-spacing--after-fontify' as :after advice on fontification.
+Advises `font-lock-fontify-keywords-region', which is called by
+`font-lock-default-fontify-region' with the already-extended
+\[fstart, fend] bounds — the same range jit-lock marks as clean.
+Advising this inner function rather than `font-lock-fontify-region'
+ensures our stamp pass covers exactly the text that was fontified,
+including any region extended by `font-lock-extend-region-functions'.
+Safe to call multiple times; `advice-add' is idempotent."
+  (advice-add 'font-lock-fontify-keywords-region :after
+              #'variable-spacing--after-fontify))
 
-(defun variable-spacing--disable-unfontify-advice ()
-  "Remove the unfontify advice if no other buffer still has the mode on."
+(defun variable-spacing--disable-after-fontify-advice ()
+  "Remove the after-fontify advice when no other buffer still has the mode on."
   (unless (cl-some (lambda (buf)
                      (and (not (eq buf (current-buffer)))
                           (buffer-local-value 'variable-spacing-mode buf)))
                    (buffer-list))
-    (advice-remove 'font-lock-unfontify-region
-                   #'variable-spacing--around-unfontify)))
+    (advice-remove 'font-lock-fontify-keywords-region
+                   #'variable-spacing--after-fontify)))
 
 ;;;; ----------------------------------------------------------------
 ;;;; text-scale-mode advice / text-body face-change hook
@@ -667,15 +761,16 @@ format and parent-wins semantics."
                     #'variable-spacing--text-scale-refresh)
         (advice-add 'set-face-attribute :after
                     #'variable-spacing--text-body-face-refresh)
-        (variable-spacing--enable-unfontify-advice))
+        (variable-spacing--enable-after-fontify-advice))
     (variable-spacing--remove-body-remaps)
     (variable-spacing--disable-jit)
     (variable-spacing-clear)
+    (variable-spacing--remove-body-face (point-min) (point-max))
     (advice-remove 'text-scale-mode
                    #'variable-spacing--text-scale-refresh)
     (advice-remove 'set-face-attribute
                    #'variable-spacing--text-body-face-refresh)
-    (variable-spacing--disable-unfontify-advice)))
+    (variable-spacing--disable-after-fontify-advice)))
 
 (provide 'variable-spacing)
 ;;; variable-spacing.el ends here
