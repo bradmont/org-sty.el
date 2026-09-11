@@ -136,6 +136,15 @@ validates this model interactively. It is not part of the library.
 
 ## Known planned work (not yet implemented)
 
+- **Text alignment (`text-align` as a synthetic face property):** Following
+  the same pattern as `variable-spacing-ratio`, text alignment (left, centre,
+  right) could be implemented as a symbol property on faces, intercepted
+  and applied as a `line-prefix` display property with a computed
+  `(space :align-to ...)` spec.  True centring requires measuring the
+  rendered pixel width of each line at fontification time.  This is
+  a natural next synthetic face attribute after spacing ratio is fully
+  working.
+
 - **Document portability / style snapshots:** For a genuine WP workflow,
   a document should be viewable identically by another user who does not
   have the same `org-filetag-style-alist` configuration.  A function to

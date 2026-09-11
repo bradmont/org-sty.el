@@ -54,18 +54,23 @@
   :group 'display)
 
 (defface text-body
-  '((t :inherit default :height 120))
+  '((t :inherit default :height 2.0))
   "Face for word-processor body text in `variable-spacing-mode' buffers.
 
 Faces in `variable-spacing-content-faces' receive a buffer-local
 `(:inherit text-body)' remap so they track this face's height.
 
-Set the body height globally once:
+The `:height 2.0' is a float multiplier relative to `default'.  When
+`variable-spacing-mode' is active, `default' is remapped to
+`variable-spacing-floor-height' (default 60 = 6 pt), so body text
+renders at 2.0 × 6 pt = 12 pt — the same size as the previous absolute
+`:height 120'.  Expressing it as a float means `text-scale-mode' works:
+its multiplier on `default' propagates through `text-body' to all
+content faces.
 
-  (set-face-attribute \\='text-body nil :height 110)
+To change the body size, adjust the ratio:
 
-The `defface' defaults to `:height 120' (12 pt at standard DPI), which
-can be overridden via `set-face-attribute' or Customize."
+  (set-face-attribute \\='text-body nil :height 2.2)  ; ~13 pt at 6 pt floor"
   :group 'variable-spacing)
 
 (defcustom variable-spacing-floor-height 60

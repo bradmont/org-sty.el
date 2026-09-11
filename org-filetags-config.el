@@ -95,8 +95,18 @@
                    ;(lsp-ltex-plus-mode 1)
                    (org-block-appear-mode 1)
                    (variable-spacing-mode 1)
-                   (org-title-fold-mode 1)))
-       (wp-style `(:font "Times New Roman" :font-size 12
+                   (org-title-fold-mode 1)
+                   ;; Style heading numbers to match their heading level face.
+                   (setq-local org-num-format-function
+                               (lambda (numbering)
+                                 (propertize
+                                  (concat (mapconcat #'number-to-string numbering ".") " ")
+                                  'face (intern (format "org-level-%d"
+                                                        (min (length numbering) 8))))))
+                   (when (bound-and-true-p org-num-mode)
+                     (org-num-mode -1)
+                     (org-num-mode 1))))
+       (wp-style `(:font "Times New Roman"
                    :num-level 3 :indent nil :olivetti-width 68
                    :eval ,wp-eval)))
   (setq org-filetag-style-alist
