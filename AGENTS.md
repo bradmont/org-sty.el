@@ -293,6 +293,15 @@ that should have spacing.  Setting ratio 0 on a face already works to
 suppress spacing; the missing piece is propagation of non-nil ratios
 through the inheritance chain.
 
+**Config update required on implementation:** once ratio inheritance is
+working, block and quote faces in `org-filetags-config.el` (`org-block`,
+`org-quote`, `org-verse`, and similar) will begin inheriting the
+`text-body` ratio (1.6) through the content-face remap chain.  These
+faces should have no extra line spacing — they are block containers
+where spacing is already provided by surrounding paragraphs.  Add
+`:variable-spacing-ratio 0` to their `:faces` entries in the config to
+explicitly suppress the inherited ratio.
+
 **Implementation note:** `variable-spacing--face-with-ratio` is the
 function to update.  It currently uses `cl-some` over face lists and
 a direct `get` per face; it needs a recursive remap-chain walker.
