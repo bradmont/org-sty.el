@@ -136,6 +136,21 @@ validates this model interactively. It is not part of the library.
 
 ## Known planned work (not yet implemented)
 
+- **Generalise synthetic face attributes and `face-remap-add-extra`:**
+  `variable-spacing-ratio` is the first synthetic face attribute — a
+  property attached to a face symbol that drives a display effect
+  (pixel spacers) not expressible as a standard Emacs face attribute.
+  `variable-spacing-face-remap-add-extra` / `remove-extra` provides
+  the cookie-tracked API for one such property.  As more synthetic
+  attributes are added (spacing ratio, text alignment, space-before /
+  space-after paragraph spacing, first-line indent, left/right margin
+  indent via `line-prefix` / `wrap-prefix`), this mechanism should be
+  generalised: a single `face-remap-add-extra` API that accepts an
+  arbitrary property name and value, with a registry of known properties
+  mapping each to its apply/clear implementation.  This would allow
+  `:faces` and `org-filetag-style-remap` to dispatch any synthetic
+  attribute without per-property special-casing in the caller.
+
 - **Text alignment (`text-align` as a synthetic face property):** Following
   the same pattern as `variable-spacing-ratio`, text alignment (left, centre,
   right) could be implemented as a symbol property on faces, intercepted
