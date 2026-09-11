@@ -227,17 +227,13 @@ sentinel and so are not caught by `variable-spacing-clear`).
 
 ### Known remaining issues
 
-**Newline face propagation** — each `\n` should display at the same height
-as the character immediately before it (so inter-paragraph blank lines are
-body-sized, but newlines at the end of floor-sized structural lines stay
-small).  This was attempted by adding a `search-forward "\n"` loop as a
-third pass inside `variable-spacing--after-fontify`, but it caused Emacs to
-lock up on mode enable.  The loop fires on every `font-lock-fontify-keywords-
-region` call, which is extremely frequent; the approach needs rethinking.
-The fix should *not* use a linear character search inside a per-fontification
-callback.  One candidate: run the newline pass lazily via a separate
-`jit-lock-register`ed function so it is rate-limited by jit-lock's own
-scheduling.
+**Newline face propagation** — IMPLEMENTED.  A `\n` that opens a
+body-context span inherits the face of its preceding character (checked
+via `char-before` and `get-text-property` at span-start, inside the
+existing span loop — no separate pass).  Blank lines (preceding char is
+also `\n`) always receive `text-body` regardless of surrounding context;
+see the inline comment in `variable-spacing--after-fontify` for the known
+imperfection with blank lines inside LOGBOOK drawers.
 
 **`text-scale-mode` compatibility** — RESOLVED.  `text-body` `:height` is
 now expressed as a float `2.0` relative to `default`, so `text-scale-mode`'s

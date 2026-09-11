@@ -403,10 +403,14 @@ This function stamps `text-body' on the unstyled characters so they
 render at body-text size rather than falling through to the floor
 height of `default'.
 
-Bare newlines are excluded: a \\n with `text-body' would inflate the
-line height for blank lines and for small structural lines that contain
-only a newline.  Each unstyled span is walked with
-`skip-chars-forward' to stamp only non-newline runs.
+Newlines are handled within the span pass.  A `\\n' in the middle of
+a body-context span is stamped `text-body' along with the rest of
+that span, giving blank lines between body paragraphs body height.
+A `\\n' that opens a body-context span — meaning the preceding
+character is in a non-body span (heading, drawer, etc.) whose
+font-lock coverage stops before the newline — is instead stamped with
+the preceding character's face so it renders at the height of the
+line it terminates.
 
 Stale stamps from a previous fontification cycle are cleared first,
 so that spans which have since acquired an Org face (e.g. a quote
@@ -429,26 +433,48 @@ alongside their Org face."
             (when (and (null (get-text-property pos 'font-lock-face))
                        (not (variable-spacing--has-explicit-face-p
                              (get-text-property pos 'face))))
-              ;; No font-lock-face and no structural face in the `face'
-              ;; property: stamp text-body on non-newline runs.  This
-              ;; covers plain paragraph text (face nil), inline emphasis
-              ;; (italic, bold, underline), inline Org markup (org-code,
-              ;; org-link, org-footnote, org-cite, …), anonymous inline
-              ;; attributes ((:strike-through t)), and arbitrary
-              ;; font-lock faces applied by Org for syntax colouring
-              ;; (e.g. font-lock-function-name-face on footnote labels).
-              ;; Characters with a structural face in their list (e.g.
-              ;; `(italic org-level-2)') are skipped so the heading face
-              ;; supplies the height.
-              (save-excursion
-                (goto-char pos)
-                (while (< (point) next)
-                  (let ((run-start (point)))
-                    (skip-chars-forward "^\n" next)
-                    (when (> (point) run-start)
-                      (add-face-text-property run-start (point) 'text-body t))
-                    (when (and (< (point) next) (= (char-after) ?\n))
-                      (forward-char 1)))))) ; end save-excursion / when no structural face
+              ;; Body-context span: stamp text-body on the whole region.
+              ;; Covers plain paragraph text, inline emphasis, Org inline
+              ;; markup, anonymous attributes, and arbitrary font-lock
+              ;; colouring faces (e.g. font-lock-function-name-face).
+              ;; Characters with a structural face (e.g. `(italic
+              ;; org-level-2)') are excluded by the predicate above so
+              ;; the heading face supplies the height.
+              ;;
+              ;; Newline at span start: if this span opens with a \n
+              ;; whose preceding character belongs to a non-body span
+              ;; (e.g. a heading or drawer line whose font-lock coverage
+              ;; stops before the \n), stamp that preceding face on the
+              ;; \n so it renders at the same height as the line it
+              ;; terminates rather than at body height.  The rest of the
+              ;; span (if any) is stamped text-body as normal.
+              (let ((stamp-start pos))
+                (when (and (eq (char-after pos) ?\n)
+                           (> pos (point-min))
+                           ;; If the preceding character is also \n this
+                           ;; is a blank line — stamp text-body rather
+                           ;; than inheriting the previous line's face.
+                           ;; Blank lines are inter-element space and
+                           ;; should be body-height regardless of context.
+                           ;;
+                           ;; Known imperfection: blank lines inside
+                           ;; drawers (e.g. LOGBOOK clock entries) will
+                           ;; also render at body height rather than floor
+                           ;; height.  Distinguishing these cases cleanly
+                           ;; requires org-element-at-point, which is too
+                           ;; expensive inside a fontification callback.
+                           ;; In practice property drawers never have
+                           ;; blank lines; logbook drawers may, but they
+                           ;; are usually folded and the impact is minor.
+                           (not (eq (char-before pos) ?\n)))
+                  (let ((prev-face (or (get-text-property (1- pos) 'face)
+                                       (get-text-property (1- pos)
+                                                          'font-lock-face))))
+                    (when prev-face
+                      (add-face-text-property pos (1+ pos) prev-face t)
+                      (setq stamp-start (1+ pos)))))
+                (when (< stamp-start next)
+                  (add-face-text-property stamp-start next 'text-body t))))
             (setq pos next)))))))           ; end let* / while / let
 
 (defun variable-spacing--enable-after-fontify-advice ()
