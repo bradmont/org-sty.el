@@ -239,21 +239,21 @@ callback.  One candidate: run the newline pass lazily via a separate
 `jit-lock-register`ed function so it is rate-limited by jit-lock's own
 scheduling.
 
-**`text-scale-mode` compatibility** — `text-scale-mode` works by adding a
-float `:height` multiplier to `default`.  Float multipliers compose
-multiplicatively up the remap chain, but our integer heights (`text-body`
-`:height 120`, floor remap `:height 60`) are absolute overrides that ignore
-the float.  The fix requires expressing both as floats: the floor as
-`floor_pt / global_default_pt` computed at mode-enable time, and `text-body`
-as a float ratio (body / floor).  This was implemented and reverted because
-the interaction with `org-filetag-style--apply-font` (which strips all
-`default` remaps via `assq-delete-all` before installing its own) broke the
-floor.  The two modules need a coordination protocol before this can land.
+**`text-scale-mode` compatibility** — RESOLVED.  `text-body` `:height` is
+now expressed as a float `2.0` relative to `default`, so `text-scale-mode`'s
+float multiplier on `default` propagates through `text-body` to all content
+faces correctly.  The floor remap on `default` remains absolute
+(`variable-spacing-floor-height`), so metadata elements stay small
+regardless of text scale.
+
+**`#+TITLE:` keyword tag hiding** — IMPLEMENTED (in a separate session).
+The `#+TITLE:` keyword prefix is hidden in WP buffers so only the title
+value (`org-document-title` face) is visible.
 
 **Some faces not fontified correctly** — noted during testing but not yet
 diagnosed.  Likely candidates: faces applied by Org constructs not yet in
-`variable-spacing-body-faces`, or timing issues with the after-fontify pass
-on initial buffer load before the mode is enabled.
+`variable-spacing-content-faces`, or timing issues with the after-fontify
+pass on initial buffer load before the mode is enabled.
 
 ### Face-driven spacing — IMPLEMENTED
 
