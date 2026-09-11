@@ -61,25 +61,52 @@ is folded."
   :group 'org-title-fold)
 
 (defconst org-title-fold-spec 'org-title-fold
-  "Folding spec registered with `org-fold-core' for this package.")
+  "Folding spec registered with `org-fold-core' for the metadata body.
+This covers the #+KEYWORD: lines below #+TITLE:.")
+
+(defconst org-title-fold-tag-spec 'org-title-fold-tag
+  "Folding spec registered with `org-fold-core' for the #+TITLE: tag prefix.
+This covers the \"#+TITLE: \" text at the start of the title line,
+hiding the tag while leaving the title value visible.")
 
 (unless (org-fold-core-folding-spec-p org-title-fold-spec)
   (org-fold-core-add-folding-spec
    org-title-fold-spec
    `((:ellipsis . ,org-title-fold-ellipsis) (:isearch-open . t))))
 
-(defun org-title-fold--ensure-spec ()
-  "Ensure `org-title-fold-spec' is registered in the CURRENT buffer.
+(unless (org-fold-core-folding-spec-p org-title-fold-tag-spec)
+  (org-fold-core-add-folding-spec
+   org-title-fold-tag-spec
+   '((:ellipsis . "") (:isearch-open . t))))
 
-`org-fold-core--specs' is buffer-local, so registering the spec once
-at package-load time only makes it known in whichever buffer happened
+(defun org-title-fold--ensure-spec ()
+  "Ensure both fold specs are registered in the CURRENT buffer.
+
+`org-fold-core--specs' is buffer-local, so registering the specs once
+at package-load time only makes them known in whichever buffer happened
 to be current when the file was loaded (e.g. `*scratch*'), not in any
 Org buffer opened afterward. This must run in each buffer that
 actually wants to use the fold."
   (unless (org-fold-core-folding-spec-p org-title-fold-spec)
     (org-fold-core-add-folding-spec
      org-title-fold-spec
-     `((:ellipsis . ,org-title-fold-ellipsis) (:isearch-open . t)))))
+     `((:ellipsis . ,org-title-fold-ellipsis) (:isearch-open . t))))
+  (unless (org-fold-core-folding-spec-p org-title-fold-tag-spec)
+    (org-fold-core-add-folding-spec
+     org-title-fold-tag-spec
+     '((:ellipsis . "") (:isearch-open . t)))))
+
+(defun org-title-fold--tag-region-from (pos)
+  "If POS is on a #+TITLE: line, return (BEG . END) covering the tag prefix.
+The region spans from the start of the line up to and including the
+\"#+TITLE: \" prefix (colon and any following whitespace), so the
+title value text itself remains visible. Returns nil if POS isn't on
+a #+TITLE: line."
+  (save-excursion
+    (goto-char pos)
+    (beginning-of-line)
+    (when (looking-at "^\\([ \t]*#\\+title:[ \t]*\\)")
+      (cons (match-beginning 1) (match-end 1)))))
 
 (defun org-title-fold--region-from (pos)
   "If POS is on a #+TITLE: line, return (BEG . END) spanning the
@@ -104,43 +131,76 @@ convention."
           (when (> (point) body-start)
             (cons beg (point))))))))
 
+(defun org-title-fold--find-title-line ()
+  "Search the whole buffer for a #+TITLE: line and return its start position.
+Returns nil if no #+TITLE: line is found."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^[ \t]*#\\+title:" nil t)
+      (line-beginning-position))))
+
 (defun org-title-fold--find-title-region ()
   "Search the whole buffer for a #+TITLE: line and return its fold
 region via `org-title-fold--region-from', or nil if there's no
 #+TITLE: line or nothing below it to fold. Unlike
 `org-title-fold--region-from', this doesn't require point to already
 be on the line -- used when auto-folding on mode enable."
-  (save-excursion
-    (goto-char (point-min))
-    (when (re-search-forward "^[ \t]*#\\+title:" nil t)
-      (org-title-fold--region-from (line-beginning-position)))))
+  (let ((line-pos (org-title-fold--find-title-line)))
+    (when line-pos
+      (org-title-fold--region-from line-pos))))
+
+(defun org-title-fold--apply (folded line-pos body-region)
+  "Apply fold state FOLDED to both the tag prefix and the body.
+LINE-POS is the start of the #+TITLE: line.  BODY-REGION is (BEG . END)
+for the metadata body below, as returned by `org-title-fold--region-from'.
+The tag region is computed fresh from LINE-POS."
+  (let ((tag-region (org-title-fold--tag-region-from line-pos)))
+    (when tag-region
+      (org-fold-core-region (car tag-region) (cdr tag-region)
+                             folded org-title-fold-tag-spec))
+    (org-fold-core-region (car body-region) (cdr body-region)
+                           folded org-title-fold-spec)))
 
 (defun org-title-fold-toggle ()
   "Fold/unfold the #+KEYWORD: lines below #+TITLE:, like TAB on a
-headline folds its body.
+headline folds its body.  Also folds/unfolds the #+TITLE: tag prefix
+so only the title value remains visible when folded.
 
 Meant for a buffer-local `org-tab-first-hook': returns non-nil (which
 stops further `org-cycle' processing for this keypress) only when
 point is actually on the #+TITLE: line and there's something below it
 to fold; returns nil otherwise so normal TAB behavior proceeds."
-  (let ((region (org-title-fold--region-from (point))))
-    (when region
-      (let ((folded (org-fold-core-folded-p (car region) org-title-fold-spec)))
-        (org-fold-core-region (car region) (cdr region) (not folded)
-                               org-title-fold-spec))
-      t)))
+  (let ((line-pos (save-excursion
+                    (beginning-of-line)
+                    (and (looking-at "^[ \t]*#\\+title:")
+                         (point)))))
+    (when line-pos
+      (let ((region (org-title-fold--region-from line-pos)))
+        (when region
+          (let ((folded (org-fold-core-folded-p (car region) org-title-fold-spec)))
+            (org-title-fold--apply (not folded) line-pos region))
+          t)))))
 
 (defun org-title-fold--fold-now ()
-  "Fold the buffer's #+TITLE: metadata block right now, if present."
-  (let ((region (org-title-fold--find-title-region)))
-    (when region
-      (org-fold-core-region (car region) (cdr region) t org-title-fold-spec))))
+  "Fold the buffer's #+TITLE: tag prefix and metadata block, if present."
+  (let ((line-pos (org-title-fold--find-title-line)))
+    (when line-pos
+      (let ((region (org-title-fold--region-from line-pos)))
+        (when region
+          (org-title-fold--apply t line-pos region))))))
 
 (defun org-title-fold--unfold-now ()
-  "Unfold the buffer's #+TITLE: metadata block right now, if present."
-  (let ((region (org-title-fold--find-title-region)))
-    (when region
-      (org-fold-core-region (car region) (cdr region) nil org-title-fold-spec))))
+  "Unfold the buffer's #+TITLE: tag prefix and metadata block, if present."
+  (let ((line-pos (org-title-fold--find-title-line)))
+    (when line-pos
+      (let ((tag-region (org-title-fold--tag-region-from line-pos))
+            (region (org-title-fold--region-from line-pos)))
+        (when tag-region
+          (org-fold-core-region (car tag-region) (cdr tag-region)
+                                 nil org-title-fold-tag-spec))
+        (when region
+          (org-fold-core-region (car region) (cdr region)
+                                 nil org-title-fold-spec))))))
 
 ;;;###autoload
 (define-minor-mode org-title-fold-mode
