@@ -69,9 +69,21 @@ Recognized plist keys:
   :indent          t to enable `org-indent-mode', nil to disable it.
   :olivetti-width  Integer for `olivetti-body-width' (enables
                     `olivetti-mode' if it is installed).
+  :faces           An alist of (FACE . ATTRS-PLIST) pairs installed as
+                    buffer-local face remaps via `face-remap-add-relative'.
+                    The special pseudo-attribute `:variable-spacing-ratio'
+                    is routed to `variable-spacing-face-remap-add-extra'
+                    rather than the remap (requires `variable-spacing').
+                    All remaps are tracked and removed on re-apply, so
+                    re-applying a style is idempotent.  To perform face
+                    remaps with runtime values, call `org-filetag-style-remap'
+                    from `:eval' instead.
   :eval            A single form, or list of forms, run via `eval'
-                    after the other keys are applied -- an escape
-                    hatch for anything not covered above.
+                    after the other keys are applied.  Use this for mode
+                    toggles and runtime logic; use `:faces' for face
+                    attribute overrides.  Bare `set-face-attribute' calls
+                    in `:eval' are an anti-pattern -- they are global and
+                    not cleaned up on re-apply.
 
 Any key may be omitted; omitted keys are simply not touched for
 that tag (they neither turn a setting on nor off)."
@@ -128,6 +140,66 @@ apply to body text but not headings.")
   (dolist (cookie org-filetag-style--heading-remap-cookies)
     (face-remap-remove-relative cookie))
   (setq org-filetag-style--heading-remap-cookies nil))
+
+(defvar-local org-filetag-style--face-remap-cookies nil
+  "Tagged cookies for remaps installed by `:faces' or `org-filetag-style-remap'.
+
+Each element is a cons cell whose car is either:
+  `remap' — cdr is a cookie from `face-remap-add-relative',
+             removed via `face-remap-remove-relative'.
+  `extra'  — cdr is a cookie from
+             `variable-spacing-face-remap-add-extra', removed via
+             `variable-spacing-face-remap-remove-extra'.
+
+The list is cleared and rebuilt on each call to `org-filetag-style-apply'.")
+
+(defun org-filetag-style--clear-face-remaps ()
+  "Remove all face remaps tracked in `org-filetag-style--face-remap-cookies'."
+  (dolist (tagged org-filetag-style--face-remap-cookies)
+    (pcase (car tagged)
+      ('remap (face-remap-remove-relative (cdr tagged)))
+      ('extra (when (fboundp 'variable-spacing-face-remap-remove-extra)
+                (variable-spacing-face-remap-remove-extra (cdr tagged))))))
+  (setq org-filetag-style--face-remap-cookies nil))
+
+;;;###autoload
+(defun org-filetag-style-remap (face &rest attrs)
+  "Install a buffer-local face remap for FACE using ATTRS, tracking the cookie.
+
+ATTRS is a plist of face attributes and values, as accepted by
+`face-remap-add-relative'.  The special pseudo-attribute
+`:variable-spacing-ratio' is handled separately: it is stripped from
+ATTRS and routed to `variable-spacing-face-remap-add-extra' (if
+`variable-spacing' is loaded), so that spacing ratios are stored as
+symbol properties and cleaned up correctly on re-apply.
+
+All cookies are pushed onto `org-filetag-style--face-remap-cookies' and
+are removed automatically on the next `org-filetag-style-apply' call,
+making re-application idempotent.
+
+This function may also be called directly from an `:eval' block for
+cases requiring runtime values or conditional logic:
+
+  (org-filetag-style-remap \\='org-quote
+                           :slant \\='italic
+                           :variable-spacing-ratio 1.0)"
+  (let ((ratio (plist-get attrs :variable-spacing-ratio))
+        (rest  (cl-loop for (k v) on attrs by #'cddr
+                        unless (eq k :variable-spacing-ratio)
+                        append (list k v))))
+    (when rest
+      (push (cons 'remap (apply #'face-remap-add-relative face rest))
+            org-filetag-style--face-remap-cookies))
+    (when (and ratio (fboundp 'variable-spacing-face-remap-add-extra))
+      (push (cons 'extra
+                  (variable-spacing-face-remap-add-extra
+                   face 'variable-spacing-ratio ratio))
+            org-filetag-style--face-remap-cookies))))
+
+(defun org-filetag-style--apply-faces (plist)
+  "Apply the `:faces' alist from PLIST via `org-filetag-style-remap'."
+  (dolist (entry (plist-get plist :faces))
+    (apply #'org-filetag-style-remap (car entry) (cdr entry))))
 
 (defun org-filetag-style--apply-font (plist)
   "Apply :font / :font-size from PLIST by owning the `default' remap,
@@ -202,6 +274,8 @@ Intended for `org-mode-hook'; safe to call again any time to refresh."
     ;; and removes any dependency on hook ordering.
     (org-set-regexps-and-options)
     (let ((style (org-filetag-style--effective-style)))
+      ;; Clear tracked face remaps first so re-apply is idempotent.
+      (org-filetag-style--clear-face-remaps)
       ;; Order matters: org-num-mode / org-indent-mode / olivetti-mode
       ;; are toggled here, and at least Olivetti can apply its own font
       ;; styling via `buffer-face-mode' when it turns on (depending on
@@ -210,7 +284,13 @@ Intended for `org-mode-hook'; safe to call again any time to refresh."
       (org-filetag-style--apply-indent style)
       (org-filetag-style--apply-olivetti style)
       (org-filetag-style--apply-font style)
-      (org-filetag-style--apply-eval style))))
+      ;; :eval runs before :faces so that mode toggles (e.g.
+      ;; variable-spacing-mode) install their remaps first.  :faces
+      ;; remaps are prepended last and therefore have the highest
+      ;; priority, ensuring declared face attributes win over whatever
+      ;; the enabled modes install.
+      (org-filetag-style--apply-eval style)
+      (org-filetag-style--apply-faces style))))
 
 ;;;###autoload
 (defun org-filetag-style-debug ()

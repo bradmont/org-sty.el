@@ -35,7 +35,7 @@
 ;; The `default' face is remapped buffer-locally to a small floor height
 ;; (`variable-spacing-floor-height') so that structural/metadata
 ;; elements (drawers, keywords, property values) that carry no explicit
-;; face naturally render small.  Faces in `variable-spacing-body-faces'
+;; face naturally render small.  Faces in `variable-spacing-content-faces'
 ;; receive a buffer-local `(:inherit text-body)' remap so they track
 ;; the body-text size.
 
@@ -57,7 +57,7 @@
   '((t :inherit default :height 120))
   "Face for word-processor body text in `variable-spacing-mode' buffers.
 
-Faces in `variable-spacing-body-faces' receive a buffer-local
+Faces in `variable-spacing-content-faces' receive a buffer-local
 `(:inherit text-body)' remap so they track this face's height.
 
 Set the body height globally once:
@@ -83,10 +83,13 @@ The remap is strictly buffer-local and is removed on mode disable."
   :type 'integer
   :group 'variable-spacing)
 
-(defcustom variable-spacing-body-faces
-  '(;; Heading faces — sized at body scale so they remain visible.
-    ;; Their own relative :height multipliers still apply on top of
-    ;; text-body, so hierarchy is preserved.
+(defcustom variable-spacing-content-faces
+  '(;; Heading faces — sized at body scale.  Their own relative :height
+    ;; multipliers compose on top of text-body, preserving hierarchy.
+    ;; org-document-title is the face for the rendered title VALUE
+    ;; (the text following #+TITLE:).  It is content, not metadata.
+    ;; The #+TITLE: keyword tag itself gets org-document-info-keyword,
+    ;; which belongs in `variable-spacing-metadata-faces'.
     org-level-1
     org-level-2
     org-level-3
@@ -95,66 +98,74 @@ The remap is strictly buffer-local and is removed on mode disable."
     org-level-6
     org-level-7
     org-level-8
-    ;; Primitive Emacs emphasis faces — Org's anchor functions apply
-    ;; these directly (from org-emphasis-alist), so they need a remap
-    ;; rather than a text-property stamp to reach body size.
-    bold
-    italic
-    underline
-    ;; Content block faces — quote/verse/code blocks, tables, inline
-    ;; markup, links, footnotes, and list terms should all render at
-    ;; body size.  org-quote is intentionally included: quote blocks
-    ;; default to body size; users who want them smaller can remap
-    ;; the face independently.
+    org-document-title
+    ;; Block-content faces.  Block delimiter lines (#+begin_/#+end_)
+    ;; are metadata and belong in `variable-spacing-metadata-faces'.
     org-block
-    org-block-begin-line
-    org-block-end-line
     org-table
     org-formula
-    org-code
-    org-verbatim
-    org-link
-    org-link-id
-    org-cite
-    org-cite-key
-    org-footnote
     org-list-dt
     org-quote
     org-verse)
-  "Faces that should render at body-text size in `variable-spacing-mode' buffers.
+  "Document-content faces that track body-text size in `variable-spacing-mode'.
+
+The content/metadata distinction is functional: content faces cover the
+substance of the document (headings, body text, blocks, tables, quotes);
+metadata faces cover structural annotations (drawers, keyword tags,
+block delimiters).  See `variable-spacing-metadata-faces'.
 
 When the mode is enabled, each face in this list receives a buffer-local
 remap via `face-remap-add-relative' that injects `(:inherit text-body)'
-into its effective attribute chain.  This overrides the floor height
-installed on `default', so these faces render at whatever `:height'
-`text-body' carries.
+into its effective attribute chain, lifting it above the floor height on
+`default'.
 
-Three populations are covered:
+Inline faces (bold, italic, org-code, org-link, org-cite, org-footnote,
+etc.) are intentionally absent: they can appear as the leading face in a
+list alongside a structural face (e.g. `(italic org-level-2)'), and a
+remap would make body height dominate in that context.  Instead, the
+after-fontify pass stamps `text-body' directly on runs that carry no
+content or metadata face.
 
-  Heading faces (org-level-1…org-level-8): applied by Org's regexp
-  font-lock keywords as `font-lock-face'.  The after-fontify pass skips
-  them, so the remap is the only way to lift them above the floor.  Their
-  intrinsic relative `:height' multipliers still compose on top of
-  text-body, preserving heading hierarchy.
+This variable can be set buffer-locally (via `setq-local' in
+file-local or dir-local variables) to customise the face treatment for
+individual documents — the intended hook for the document portability
+feature."
+  :type '(repeat face)
+  :group 'variable-spacing)
 
-  Primitive emphasis faces (bold, italic, underline): applied directly by
-  `org-do-emphasis-faces' as a `face' text property.  The after-fontify
-  pass skips them because they are styled.  Without a remap they would
-  inherit from `default' and render at floor size.
+(defcustom variable-spacing-metadata-faces
+  '(;; Drawer structure.
+    org-drawer
+    org-special-keyword
+    org-property-value
+    ;; Block delimiter lines (#+begin_X / #+end_X).  These are
+    ;; structural markers, not block content.
+    org-block-begin-line
+    org-block-end-line
+    ;; File-level keyword lines and their values.
+    ;; org-document-info-keyword is the face for keyword tags such as
+    ;; #+TITLE: — it is metadata.  org-document-title (the rendered
+    ;; title value) is content and belongs in
+    ;; `variable-spacing-content-faces'.
+    org-meta-line
+    org-keyword
+    org-document-info-keyword
+    org-document-info)
+  "Metadata faces exempt from text-body stamping in `variable-spacing-mode'.
 
-  Content block / inline markup faces (org-quote, org-block, …): applied
-  by Org's anchor functions as a `face' property.  The after-fontify pass
-  skips them too.  The remap makes them track text-body by default.
-  Each face that Org stamps directly as a text property must be listed
-  explicitly — face remapping is not transitive through inheritance, so
-  remapping a parent face does not affect faces that merely inherit from
-  it in their global definition.
+Metadata faces cover structural annotations that are not part of the
+readable document content: drawers, property blocks, block delimiter
+lines, and file-level keyword lines (#+OPTIONS:, #+TITLE: tag, etc.).
+They are distinct from content faces (`variable-spacing-content-faces')
+which cover headings, blocks, tables, and quotes.
 
-Structural/metadata faces (drawers, property values, keywords, meta-lines)
-are intentionally absent — they fall through to the floor.
+Faces in this list do NOT receive a `(:inherit text-body)' remap.  They
+are also excluded from the text-body stamp applied by the after-fontify
+pass, so they inherit floor size from the `default' remap regardless of
+whether they arrive as `font-lock-face' or `face' text properties.
 
-Only faces that are already loaded (per `facep') at mode-enable time are
-remapped; faces loaded later are not affected until the mode is toggled."
+Like `variable-spacing-content-faces', this variable can be set
+buffer-locally for per-document customisation."
   :type '(repeat face)
   :group 'variable-spacing)
 
@@ -166,6 +177,41 @@ remapped; faces loaded later are not affected until the mode is toggled."
   'variable-spacing--spacing
   "Text property sentinel marking spans styled by `variable-spacing-mode'.
 Scoped so only our own properties are cleared without affecting others.")
+
+(defun variable-spacing--has-explicit-face-p (face)
+  "Return non-nil if FACE contains at least one content or metadata face.
+FACE may be a symbol, an anonymous attribute plist such as
+`(:strike-through t)', or a list thereof, as stored in the `face' text
+property.
+
+A face is explicit if it appears in `variable-spacing-content-faces'
+(document content: headings, blocks, tables — receive a text-body remap)
+or `variable-spacing-metadata-faces' (document metadata: drawers,
+keyword tags, block delimiters — floor-sized, exempt from stamping).
+
+Anonymous plists (cons whose car is a keyword) are never explicit: they
+carry only inline display attributes such as `:strike-through' and
+contribute no sizing context.
+
+The after-fontify pass stamps `text-body' on characters where this
+returns nil and no `font-lock-face' is present.  The blacklist design
+means arbitrary faces from Org or font-lock that belong to neither list
+— e.g. `font-lock-function-name-face' on footnote labels — are treated
+as non-explicit and do not block the stamp."
+  (cond
+   ((null face) nil)
+   ;; Anonymous plist — never explicit.
+   ((and (consp face) (keywordp (car face))) nil)
+   ((symbolp face)
+    (or (memq face variable-spacing-content-faces)
+        (memq face variable-spacing-metadata-faces)))
+   ((listp face)
+    (cl-some (lambda (f)
+               (and (symbolp f)
+                    (or (memq f variable-spacing-content-faces)
+                        (memq f variable-spacing-metadata-faces))))
+             face))
+   (t nil)))
 
 (defvar-local variable-spacing--body-remap-cookies nil
   "List of cookies from `face-remap-add-relative' for `text-body' injection.
@@ -246,6 +292,42 @@ when called interactively."
         (setq pos next)))))
 
 ;;;; ----------------------------------------------------------------
+;;;; Symbol-property face remapping (face-remap-extra API)
+;;;; ----------------------------------------------------------------
+
+;;;###autoload
+(defun variable-spacing-face-remap-add-extra (face property value)
+  "Set symbol PROPERTY on FACE to VALUE, returning a cookie for later removal.
+
+Mirrors the `face-remap-add-relative' / `face-remap-remove-relative'
+contract for symbol properties (such as `variable-spacing-ratio') that
+are not face attributes and cannot be passed to `face-remap-add-relative'.
+
+The returned cookie is an opaque list `(FACE PROPERTY OLD-VALUE)' where
+OLD-VALUE is the property's value before this call.  Pass the cookie to
+`variable-spacing-face-remap-remove-extra' to restore the previous value
+precisely — including restoring nil if the property was previously unset.
+
+Example:
+
+  (let ((cookie (variable-spacing-face-remap-add-extra
+                  \\='org-quote \\='variable-spacing-ratio 1.0)))
+    ;; … later …
+    (variable-spacing-face-remap-remove-extra cookie))"
+  (let ((old (get face property)))
+    (put face property value)
+    (list face property old)))
+
+;;;###autoload
+(defun variable-spacing-face-remap-remove-extra (cookie)
+  "Restore the symbol property saved by `variable-spacing-face-remap-add-extra'.
+
+COOKIE must be a value previously returned by
+`variable-spacing-face-remap-add-extra'.  The property is restored to
+the value it held before that call, including nil if it was unset."
+  (put (nth 0 cookie) (nth 1 cookie) (nth 2 cookie)))
+
+;;;; ----------------------------------------------------------------
 ;;;; Buffer-local text-body face injection
 ;;;; ----------------------------------------------------------------
 
@@ -259,7 +341,7 @@ Two things happen:
      (drawers, property values, keywords, etc.) render small without
      per-face configuration.
 
-  2. Each face in `variable-spacing-body-faces' receives a
+  2. Each face in `variable-spacing-content-faces' receives a
      `(:inherit text-body)' remap so it tracks `text-body' for sizing.
      The `facep' guard is omitted: faces not yet defined at enable time
      (e.g. `org-cite' from oc.el, which loads lazily) still get a remap
@@ -271,9 +353,20 @@ All remaps are buffer-local; cookies are stored in
   ;; 1. Floor on default.
   (push (face-remap-add-relative 'default :height variable-spacing-floor-height)
         variable-spacing--body-remap-cookies)
-  ;; 2. Body-size injection for curated content faces.
-  (dolist (face variable-spacing-body-faces)
+  ;; 2. Body-size injection for content faces.
+  (dolist (face variable-spacing-content-faces)
     (push (face-remap-add-relative face :inherit 'text-body)
+          variable-spacing--body-remap-cookies))
+  ;; 3. Anchor metadata faces to `default'.  Some metadata faces
+  ;;    (e.g. org-block-begin-line) globally inherit from a content
+  ;;    face (org-block) that now has a text-body remap.  Emacs follows
+  ;;    buffer-local remaps through inheritance chains, so without an
+  ;;    explicit anchor those faces would inherit body size.  Using
+  ;;    `(:inherit default)' makes them track `default' semantically —
+  ;;    when the floor remap on `default' is in effect they are
+  ;;    floor-sized, and they follow `default' if it ever changes.
+  (dolist (face variable-spacing-metadata-faces)
+    (push (face-remap-add-relative face :inherit 'default)
           variable-spacing--body-remap-cookies)))
 
 (defun variable-spacing--remove-body-remaps ()
@@ -328,9 +421,20 @@ alongside their Org face."
                  ;; Advance to whichever face boundary comes first.
                  (next         (min (or next-face end)
                                     (or next-fl-face end))))
-            (when (and (null (get-text-property pos 'face))
-                       (null (get-text-property pos 'font-lock-face)))
-              ;; Unstyled span: stamp text-body on non-newline runs only.
+            (when (and (null (get-text-property pos 'font-lock-face))
+                       (not (variable-spacing--has-explicit-face-p
+                             (get-text-property pos 'face))))
+              ;; No font-lock-face and no structural face in the `face'
+              ;; property: stamp text-body on non-newline runs.  This
+              ;; covers plain paragraph text (face nil), inline emphasis
+              ;; (italic, bold, underline), inline Org markup (org-code,
+              ;; org-link, org-footnote, org-cite, …), anonymous inline
+              ;; attributes ((:strike-through t)), and arbitrary
+              ;; font-lock faces applied by Org for syntax colouring
+              ;; (e.g. font-lock-function-name-face on footnote labels).
+              ;; Characters with a structural face in their list (e.g.
+              ;; `(italic org-level-2)') are skipped so the heading face
+              ;; supplies the height.
               (save-excursion
                 (goto-char pos)
                 (while (< (point) next)
@@ -339,7 +443,7 @@ alongside their Org face."
                     (when (> (point) run-start)
                       (add-face-text-property run-start (point) 'text-body t))
                     (when (and (< (point) next) (= (char-after) ?\n))
-                      (forward-char 1)))))) ; end save-excursion / when unstyled
+                      (forward-char 1)))))) ; end save-excursion / when no structural face
             (setq pos next)))))))           ; end let* / while / let
 
 (defun variable-spacing--enable-after-fontify-advice ()

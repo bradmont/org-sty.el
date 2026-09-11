@@ -136,6 +136,15 @@ validates this model interactively. It is not part of the library.
 
 ## Known planned work (not yet implemented)
 
+- **Document portability / style snapshots:** For a genuine WP workflow,
+  a document should be viewable identically by another user who does not
+  have the same `org-filetag-style-alist` configuration.  A function to
+  export or snapshot the fully-resolved style for the current buffer —
+  writing it as file-local variables or a portable header block — would
+  allow the style to travel with the file.  Not yet designed; note the
+  requirement here so the `:faces` / `org-filetag-style-remap` API is
+  kept serialisation-friendly.
+
 - **Global `default` face resize — implement as a library feature:** The
   approach has been validated interactively via `test-small-default.el`.
   See that file and the architecture notes below for the full design.
@@ -228,45 +237,185 @@ on initial buffer load before the mode is enabled.
 from `set-face-attribute` via `:around` advice) drives the spacing pass.
 See the current `variable-spacing.el` for the full implementation.
 
-### Next design direction: per-face styling in org-filetag-style
+### `variable-spacing-ratio` inheritance — NOT YET IMPLEMENTED
 
-The current `org-filetag-style-alist` plist mixes three concerns:
+**Known design gap:** `variable-spacing-ratio` is currently a bare symbol
+property and does not follow the face remap/inheritance chain.  This is
+inconsistent with how all other face attributes behave: `:inherit` in a
+face spec propagates all face attributes, but symbol properties are
+completely separate and are never inherited.
 
-  1. Settings for `default` (`:font`, `:font-size`) — handled by `--apply-font`
-  2. Document-wide mode toggles and spacing ratios — handled by `:eval`
-  3. Face-specific styling (heading heights, block backgrounds, etc.)
-     — currently done via `set-face-attribute` in `:eval`, which is global
-     and not cleaned up between style switches
+**Correct design:** the ratio lookup in `variable-spacing--face-with-ratio`
+should follow the `:inherit` key in remap specs recursively, for all
+faces.  The correct lookup order is:
 
-The goal is to split these cleanly and support face-specific remaps with
-automatic cookie tracking, including support for custom properties like
-`variable-spacing-ratio`.  Tentative design:
+  1. Check the direct symbol property on the face (`get face
+     'variable-spacing-ratio`).  A value of 0 means "explicitly no
+     spacing" and stops the search (analogous to `:slant normal`
+     cancelling an inherited slant).  A positive value is used as-is.
+  2. If nil (unspecified), scan the face's entry in `face-remapping-alist`
+     left-to-right.  For each spec that is a plist with `:inherit FACE`,
+     recursively apply this lookup to FACE.
+  3. If still nil after exhausting the remap chain, follow the face's
+     global `:inherit` attribute(s) the same way.
 
-  - Keep `:font` / `:font-size` for `default` (as now, already buffer-local)
-  - Add a `:faces` key (or similar) that maps face symbols to attribute
-    plists, installed via `face-remap-add-relative` and tracked in a new
-    buffer-local `org-filetag-style--eval-remap-cookies` list
-  - The library clears those cookies and re-applies on each call to
-    `org-filetag-style-apply`, so re-applying a style is idempotent
-  - A helper `org-filetag-style-remap` could be called from `:eval` for
-    ad-hoc face remaps that also get tracked and cleaned up
-  - This would let users write e.g.:
+**Universality:** the lookup must be universal — all faces, not just
+content faces.  The reason metadata faces naturally get no spacing is
+that their remap chains do not include any face with a ratio set, not
+because they are excluded from the lookup.  A user who wants spacing on
+a metadata face should be able to get it by setting the ratio explicitly.
 
-      ("thesis" . (:font "Times New Roman" :font-size 12
-                   :faces ((org-quote  . (:slant italic :variable-spacing-ratio 1.0))
-                           (org-level-1 . (:height 2.4)))
-                   :eval (progn
-                           (put 'text-body 'variable-spacing-ratio 1.6)
-                           (variable-spacing-mode 1))))
+**Practical consequence of the current gap:** `text-body` has ratio 1.6
+set in WP buffers, but `org-level-N`, `org-quote`, `org-block` etc. do
+not inherit it — each face with a ratio must have it set explicitly.
+Until this is fixed, the workaround is to `put` the ratio on each face
+that should have spacing.  Setting ratio 0 on a face already works to
+suppress spacing; the missing piece is propagation of non-nil ratios
+through the inheritance chain.
 
-  - Plist-of-plists syntax is verbose; alternatives worth considering:
-    a flat list of `(FACE ATTR VAL ATTR VAL …)` triples, or a dedicated
-    `(org-filetag-style-remap FACE &rest ATTRS)` call inside `:eval`
+**Implementation note:** `variable-spacing--face-with-ratio` is the
+function to update.  It currently uses `cl-some` over face lists and
+a direct `get` per face; it needs a recursive remap-chain walker.
+Guard against cycles (a face inheriting itself or a loop) with a
+visited set.
 
-  - The `:around` advice on `set-face-attribute` in `variable-spacing.el`
-    already intercepts `:variable-spacing-ratio`; the face-remap path in
-    org-filetag-style would need to call `put` directly (or go through the
-    same advice) for that property to work
+### Content and metadata face lists
+
+Two `defcustom` lists govern which faces receive the `text-body` remap
+and which are exempt from the after-fontify stamp:
+
+  - **`variable-spacing-content-faces`** — document content: headings,
+    body blocks, tables, quotes.  Receive a buffer-local
+    `(:inherit text-body)` remap on mode enable.  The after-fontify
+    pass also skips them (they are already sized).
+
+  - **`variable-spacing-metadata-faces`** — structural annotations:
+    drawers, property blocks, keyword tags, block delimiter lines.
+    Receive no remap.  Also excluded from the stamp so they inherit
+    floor size from the `default` remap.
+
+The distinction is functional, not visual: a user may style metadata
+faces at any size.  "Metadata" means the element is about the document
+rather than part of its readable content.
+
+**`org-document-title` vs `org-document-info-keyword`:** `org-document-title`
+is the face for the rendered title value — it is content.
+`org-document-info-keyword` is the face for the `#+TITLE:` tag itself — it
+is metadata.  Both are handled correctly by their respective lists.
+
+**Per-document customisability:** both lists are `defcustom` values and
+can be set buffer-locally via `setq-local` in file-local or dir-local
+variables.  This is the intended hook for the document portability /
+style-snapshot feature: the snapshot captures and restores these lists
+alongside the style plist so that another user's Emacs renders the
+document identically without requiring the same global configuration.
+
+### Per-face styling in org-filetag-style — settled design
+
+The current `org-filetag-style-alist` plist conflates three concerns:
+
+  1. **`default` remaps** (`:font`, `:font-size`) — already handled correctly
+     and buffer-locally by `--apply-font`.
+  2. **Document-wide mode toggles** (`variable-spacing-mode`, `hl-line-mode`,
+     etc.) — handled by `:eval`; idempotent and correct as-is.
+  3. **Face attribute overrides** (heading heights, block backgrounds, etc.)
+     — currently done via bare `set-face-attribute` calls inside `:eval`,
+     which is **global** (not buffer-local), **not tracked**, and therefore
+     not cleaned up when the style changes or the buffer is killed.
+
+The goal is to move concern 3 into a first-class, tracked, buffer-local
+mechanism.  The design uses two complementary mechanisms that share a single
+implementation path.
+
+#### Why `set-face-attribute` in `:eval` is wrong
+
+`set-face-attribute` with `frame = nil` mutates the global face definition.
+In a multi-buffer session this means face changes leak across all buffers and
+are never reversed when a style is re-applied, a tag is changed, or the
+buffer is killed.  `face-remap-add-relative`, by contrast, is buffer-local
+and fully reversible via `face-remap-remove-relative`.
+
+#### `org-filetag-style-default` is always the base layer
+
+`org-filetag-style-default` is applied to **every** Org buffer before any
+tag-specific style is layered on top.  It is not a fallback for untagged
+buffers — it is a permanent base.  Tag styles are additive layers over it,
+not replacements for it.  This is an explicit architectural norm, not an
+implementation accident.
+
+#### Two mechanisms, one implementation path
+
+**1. `:faces` declarative key**
+
+A `:faces` key in the style plist accepts an alist of `(FACE . ATTRS-PLIST)`
+pairs.  It is pure syntax sugar: `--apply-faces` iterates the alist and calls
+`org-filetag-style-remap` for each entry.  Example:
+
+    ("thesis" . (:font "Times New Roman" :font-size 12
+                 :num-level 3 :indent nil :olivetti-width 68
+                 :faces ((org-level-1 . (:height 2.4))
+                         (org-level-2 . (:height 2.2))
+                         (org-quote   . (:slant italic
+                                         :variable-spacing-ratio 1.0)))
+                 :eval (progn
+                         (put 'text-body 'variable-spacing-ratio 1.6)
+                         (variable-spacing-mode 1)
+                         (org-title-fold-mode 1))))
+
+**2. `org-filetag-style-remap` helper**
+
+For cases requiring runtime values or conditional logic, a public helper is
+available for use inside `:eval`:
+
+    (org-filetag-style-remap FACE &rest ATTRS)
+
+It installs a buffer-local face remap for FACE (handling
+`:variable-spacing-ratio` specially — see below) and records the cookie into
+the same tracked list as `:faces`.
+
+#### Stacked remaps — Emacs norms apply
+
+Remaps follow the standard Emacs `face-remap-add-relative` stacking model.
+The default style's remaps are installed first; tag-style remaps are
+installed on top and take priority on attributes they specify.  There is no
+deep per-face attribute merge and no nil-out mechanism.  To override an
+attribute set by the default style, supply an explicit value in the tag style
+(e.g. `:slant normal` to cancel `:slant italic`).  This matches how Emacs
+face remapping works everywhere else.
+
+#### Cookie tracking and idempotency
+
+A single buffer-local list `org-filetag-style--face-remap-cookies` holds all
+cookies from both `:faces` and `org-filetag-style-remap` calls.  On each
+call to `org-filetag-style-apply`, all cookies are removed via
+`face-remap-remove-relative` (and symbol-property side-effects reversed —
+see below) before the full style is re-applied.  Re-applying a style is
+therefore fully idempotent.
+
+#### `:variable-spacing-ratio` dispatch
+
+`:variable-spacing-ratio` is not a face attribute and cannot be passed to
+`face-remap-add-relative`.  Both `--apply-faces` and `org-filetag-style-remap`
+strip it from the attrs plist before calling `face-remap-add-relative`, and
+route it instead to `variable-spacing-face-remap-add-extra` (defined in
+`variable-spacing.el`), which stores the previous symbol property value as a
+cookie so it can be precisely restored on teardown.
+
+If `variable-spacing` is not loaded, `:variable-spacing-ratio` entries are
+silently skipped (guarded with `fboundp`), preserving the ability to use
+`org-filetag-style` without `variable-spacing`.
+
+#### What stays in `:eval`
+
+`:eval` remains correct for:
+
+  - Enabling/disabling minor modes (`variable-spacing-mode`, `org-title-fold-mode`, etc.)
+  - Setting symbol properties not tied to a specific face (`put 'text-body …`)
+  - Any logic requiring runtime conditions or imperative sequencing
+
+All face attribute changes should go through `:faces` or
+`org-filetag-style-remap` so they are tracked and cleaned up correctly.
+Bare `set-face-attribute` calls in `:eval` are now an anti-pattern.
 
 ## Emacs version requirement
 
