@@ -1,4 +1,4 @@
-#+TITLE: org-sty — Manage styling org-buffers by filetags
+#+TITLE: org-sty.el — Org Style your buffers. Build a Word Processor
 #+AUTHOR: Brad
 
 A collection of Emacs minor modes that together aim to emulate a
