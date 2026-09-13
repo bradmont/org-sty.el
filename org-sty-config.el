@@ -1,4 +1,4 @@
-;;; org-filetags-config.el --- Personal org-sty configuration -*- lexical-binding: t; -*-
+;;; org-sty-config.el --- Personal org-sty configuration -*- lexical-binding: t; -*-
 ;;
 ;; Author: Brad Stewart <brad@bradstewart.ca>
 ;; Created: September 10, 2026
@@ -113,5 +113,5 @@
         (mapcar (lambda (tag) (cons tag wp-style))
                 '("thesis" "book" "article" "sermon" "test" "chapter"))))
 
-(provide 'org-filetags-config)
-;;; org-filetags-config.el ends here
+(provide 'org-sty-config)
+;;; org-sty-config.el ends here

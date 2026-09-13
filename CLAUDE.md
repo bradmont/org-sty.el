@@ -15,7 +15,7 @@ keeping all of Org's structural power.
 | `variable-spacing.el` | Proportional line spacing + `text-body` face model via jit-lock |
 | `org-title-fold.el` | Folds `#+KEYWORD:` lines below `#+TITLE:` using `org-fold-core` |
 | `org-block-appear.el` | Hides `#+begin_`/`#+end_` delimiter lines; reveals near point |
-| `org-filetags-config.el` | Personal style configuration (not part of the library) |
+| `org-sty-config.el` | Personal style configuration (not part of the library) |
 
 These are deliberately independent. `org-sty` knows nothing about spacing,
 folding, or block appearance. The `:eval` key is the composition point —

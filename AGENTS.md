@@ -260,7 +260,7 @@ for each pass before moving to the next.
   The lookup must be universal — all faces.
 
   **Config update required on implementation:** `org-block`, `org-quote`,
-  and `org-verse` in `org-filetags-config.el` will begin inheriting the
+  and `org-verse` in `org-sty-config.el` will begin inheriting the
   `text-body` ratio (1.6) through the content-face remap chain.  Add
   `:variable-spacing-ratio 0` to their `:faces` entries to suppress it.
 
