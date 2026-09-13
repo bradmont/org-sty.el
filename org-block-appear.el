@@ -16,8 +16,7 @@
 ;; ------------
 ;;
 ;; HIDING rides on font-lock/jit-lock, the same way
-;; `org-filetag-style-hide-block-end-lines' already hides #+end_ lines
-;; elsewhere in this setup: a `font-lock-add-keywords' entry matches a
+;; a `font-lock-add-keywords' entry matches a
 ;; "^[ \t]*#+begin_...\n" / "^[ \t]*#+end_...\n" line (including its
 ;; trailing newline, so the whole line collapses to zero height) and
 ;; puts an `invisible' text property (symbol `org-block-appear') on it.
@@ -51,7 +50,7 @@
 ;;
 ;;   (add-hook 'org-mode-hook #'org-block-appear-mode)
 ;;
-;; or, from an `org-filetag-style-alist' entry's :eval:
+;; or, from an `org-sty-alist' entry's :eval:
 ;;
 ;;   (:eval (org-block-appear-mode 1))
 
@@ -140,7 +139,7 @@ without assuming every `invisible' property in the buffer is ours.")
 without touching any unrelated use of the `invisible' property (e.g.
 Org's own heading-folding, which uses that same property name with a
 different value) -- scoped via `org-block-appear--hidden-prop', the
-same pattern `org-filetag-style-clear-paragraph-line-spacing' uses."
+same pattern used by `variable-spacing-clear' for spacing properties."
   (with-silent-modifications
     (let ((pos beg))
       (while (< pos end)

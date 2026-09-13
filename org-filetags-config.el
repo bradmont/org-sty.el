@@ -1,4 +1,4 @@
-;;; org-filetags-config.el --- Personal org-filetag-style configuration -*- lexical-binding: t; -*-
+;;; org-filetags-config.el --- Personal org-sty configuration -*- lexical-binding: t; -*-
 ;;
 ;; Author: Brad Stewart <brad@bradstewart.ca>
 ;; Created: September 10, 2026
@@ -7,14 +7,14 @@
 ;;
 ;;; Commentary:
 ;;
-;; Personal configuration for org-filetag-style, variable-spacing-mode,
-;; and related minor modes.  Kept in the org-filetag-style repo so it
-;; can be updated alongside library changes.
+;; Personal configuration for org-sty, variable-spacing-mode, and
+;; related minor modes.  Kept in the org-sty repo so it can be updated
+;; alongside library changes.
 ;;
 ;; Face attributes are declared via the `:faces' key so they are
 ;; buffer-local and cleaned up automatically on re-apply.  Computed
 ;; values (e.g. background colours derived from the current theme) use
-;; `org-filetag-style-remap' from within `:eval'.
+;; `org-sty-remap' from within `:eval'.
 ;;
 ;; The default style :eval handles only mode toggles; the wp-style :eval
 ;; handles only mode enables and the text-body spacing ratio.
@@ -24,8 +24,8 @@
 ;; ---------------------------------------------------------------------------
 ;; Default style (applies to all Org buffers as a base layer)
 ;; ---------------------------------------------------------------------------
-;; `org-filetag-style-default' is always applied first; tag-specific styles
-;; stack on top.  It is not a fallback for untagged buffers only.
+;; `org-sty-default' is always applied first; tag-specific styles stack on
+;; top.  It is not a fallback for untagged buffers only.
 ;;
 ;; Note on heading heights: the float values (2.4, 2.2 …) are relative to
 ;; each face's effective parent at display time.  In WP buffers where
@@ -38,7 +38,7 @@
 ;; the default chain and override it.  If that happens, add an explicit
 ;; :slant override in the wp-style :faces below.
 
-(setq org-filetag-style-default
+(setq org-sty-default
       `(:font "Iosevka Aile"
         :faces
         (;; Headings: weight and scale only.  Font family is handled by
@@ -64,20 +64,20 @@
          (org-code            . (:inherit (shadow fixed-pitch)))
          (org-verbatim        . (:inherit (shadow fixed-pitch)))
          ;; Prose blocks: italic.  Background is theme-relative so it is
-         ;; set via `org-filetag-style-remap' in :eval below.
+         ;; set via `org-sty-remap' in :eval below.
          (org-quote           . (:slant italic ))
          (org-verse           . (:slant italic )))
         :eval
-        ((org-filetag-style-remap
+        ((org-sty-remap
           'org-block
           :inherit 'fixed-pitch
           :background (color-darken-name (face-background 'default) 15)
           :extend t)
-         (org-filetag-style-remap
+         (org-sty-remap
           'org-quote
           :background (color-darken-name (face-background 'default) 5)
           :extend t)
-         (org-filetag-style-remap
+         (org-sty-remap
           'org-verse
           :background (color-darken-name (face-background 'default) 5)
           :extend t)
@@ -109,7 +109,7 @@
        (wp-style `(:font "Times New Roman"
                    :num-level 3 :indent nil :olivetti-width 68
                    :eval ,wp-eval)))
-  (setq org-filetag-style-alist
+  (setq org-sty-alist
         (mapcar (lambda (tag) (cons tag wp-style))
                 '("thesis" "book" "article" "sermon" "test" "chapter"))))
 

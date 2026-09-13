@@ -1,0 +1,189 @@
+#+TITLE: org-sty — Manage styling org-buffers by filetags
+#+AUTHOR: Brad
+
+A collection of Emacs minor modes that together aim to emulate a
+word-processor interface inside Org mode. Each file is independently
+usable; they are wired together through =org-sty='s =:eval= escape hatch.
+
+* Files
+
+** =org-sty.el= — style dispatcher
+
+Applies a visual "profile" to an Org buffer based on its =#+FILETAGS=.
+Define styles per tag in =org-sty-alist=; when a tagged file opens, the
+matching style(s) are merged and applied.
+
+*** Recognised plist keys
+
+| Key              | Effect                                                  |
+|------------------+---------------------------------------------------------|
+| =:font=          | Font family name, e.g. ="Times New Roman"=              |
+| =:font-size=     | Point size, e.g. =12=                                   |
+| =:num-level=     | Heading depth for =org-num-mode=; =0= to disable        |
+| =:indent=        | =t=/=nil= to enable/disable =org-indent-mode=           |
+| =:olivetti-width=| Body width for =olivetti-mode=                          |
+| =:faces=         | Alist of =(FACE . ATTRS)= buffer-local face remaps      |
+| =:eval=          | A form or list of forms evaluated after all other keys  |
+
+=:eval= is the escape hatch for anything not covered above — including
+enabling the other modes in this collection. Line spacing, block
+appearance, and title folding are all wired in via =:eval=.
+
+*** Merge semantics
+
+If a buffer has multiple matching tags, their styles are merged in
+=org-sty-alist= order (later entries win). =org-sty-default= provides a
+baseline applied to every Org buffer before any tag-specific style.
+
+*** Font handling
+
+=:font= owns the =default= face remap outright (stripping any prior
+remap) so hook ordering doesn't matter. Heading faces
+(=org-level-1=…=org-document-title=) get a separate =:family=-only
+relative remap so their =:height=/:weight= set elsewhere is preserved.
+
+*** Setup
+
+#+begin_src emacs-lisp
+(add-hook 'org-mode-hook #'org-sty-mode)
+
+(setq org-sty-default
+      '(:font "Iosevka Aile"
+        :eval (...)))           ; baseline face setup for all Org buffers
+
+(setq org-sty-alist
+      '(("thesis" . (:font "Times New Roman" :font-size 12
+                     :num-level 3 :indent nil :olivetti-width 68
+                     :eval (progn
+                             (hl-line-mode 0)
+                             (variable-spacing-mode 1)
+                             (org-block-appear-mode 1)
+                             (org-title-fold-mode 1))))))
+#+end_src
+
+** =variable-spacing.el= — proportional line spacing via pluggable backends
+
+=variable-spacing-mode= applies proportional line spacing to buffer
+elements on a per-type basis.  The backend (element detection logic) is
+chosen automatically based on the major mode; two are bundled.
+
+Spacing is implemented as pixel-height =line-prefix=/=wrap-prefix=
+display properties (not the built-in =line-spacing= variable, which
+applies uniformly to every line).  The pixel height is computed from
+the live rendered font via =font-at=, so it tracks =text-scale-mode=
+correctly.  Work is done lazily via jit-lock.
+
+*** Usage
+
+#+begin_src emacs-lisp
+(setq-local variable-spacing-rules '(paragraph 1.6))
+(variable-spacing-mode 1)
+#+end_src
+
+Rules can cover multiple element types with individual ratios:
+
+#+begin_src emacs-lisp
+(setq-local variable-spacing-rules
+            '(paragraph   1.6
+              item        1.2
+              quote-block 1.3
+              src-block   nil))   ; nil = explicitly excluded
+#+end_src
+
+=variable-spacing-rules= is buffer-local with a default of ='(paragraph 1.5)=.
+
+*Parent wins:* any type present in the plist (even with =nil=) causes the
+walker to jump past the whole element and never visit its children.  A
+=nil= entry explicitly excludes that type and everything inside it.
+
+*Absent types:* a type not in the plist is entered transparently if the
+backend considers it a container (org backend: =org-element-greater-elements=)
+and jumped past otherwise.
+
+*** Backends
+
+The active backend is selected at mode-enable time from
+=variable-spacing-mode-backends= using =derived-mode-p=.
+
+| Backend | Active in | Element model |
+|---------+-----------+---------------|
+| =variable-spacing-org-backend= | =org-mode= | org-element cache; full type hierarchy |
+| =variable-spacing-text-backend= | everything else | one =line= element per physical line |
+
+A custom backend is a plist of functions.  Use =:parent= to inherit from
+an existing backend and override only what differs:
+
+#+begin_src emacs-lisp
+(defconst my-backend
+  (list :parent variable-spacing-org-backend
+        :element-type #'my-type-fn))
+
+(add-to-list 'variable-spacing-mode-backends '(my-mode . my-backend))
+#+end_src
+
+Interactive commands =variable-spacing-apply= and =variable-spacing-clear=
+are also available for manual use.
+
+** =org-title-fold.el= — fold =#+KEYWORD:= lines below =#+TITLE:=
+
+Treats =#+TITLE:= as a pseudo-headline: TAB on that line folds/unfolds
+the contiguous run of =#+KEYWORD:= lines immediately below it (down to
+the first blank line, heading, or non-keyword line). The ellipsis
+appears at the end of the =#+TITLE:= line, matching the drawer-fold
+convention.
+
+Built on =org-fold-core= (Org 9.6+), so the fold is first-class:
+participates in isearch, no overlay lifecycle to manage.
+
+=#+TITLE:= does not need to be the first line in the file.
+
+*** Usage
+
+#+begin_src emacs-lisp
+(org-title-fold-mode 1)
+#+end_src
+
+By default, enabling the mode immediately folds the metadata block.
+See =org-title-fold-fold-on-enable= to change this.
+
+** =org-block-appear.el= — hide block delimiters, reveal near point
+
+Hides =#+begin_=/=#+end_= block delimiter lines, revealing them only
+when point is inside the block — analogous to =org-appear= for emphasis
+markers, but for whole lines.
+
+- *Hiding* rides on font-lock/jit-lock: a font-lock keyword sets
+  =invisible= on each delimiter line. Re-hiding after edits is free.
+- *Revealing* is driven by =post-command-hook=, with a cheap numeric
+  range check to avoid calling =org-element-at-point= on every
+  keystroke. Only when point crosses a block boundary is
+  =org-element-at-point= called (backed by Org's incremental element
+  cache).
+
+Handles nested blocks correctly: the outer block's =#+end_= is always
+the last delimiter in its span, so revealing the innermost block never
+disturbs the outer one.
+
+*** Usage
+
+#+begin_src emacs-lisp
+(org-block-appear-mode 1)
+#+end_src
+
+* Design notes
+
+** Why =:eval= for spacing/folding/blocks?
+
+=org-sty= intentionally knows nothing about spacing, title-folding, or
+block appearance. Each of those concerns lives in its own file with its
+own minor mode. The =:eval= key is the composition point — it lets the
+style author wire up whatever combination of modes makes sense for a given
+tag, without =org-sty= needing to grow new keys for every feature.
+
+** Buffer-local floor height
+
+=variable-spacing-mode= remaps =default= to a small floor height
+(=variable-spacing-floor-height=, default 60 = 6pt) buffer-locally.
+Body text opts up via the =text-body= face (height 2.0 relative to
+=default=). The global =default= face is never touched; non-sty buffers
+are unaffected.

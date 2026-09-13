@@ -1,14 +1,14 @@
-# AGENTS.md — org-filetag-style
+# AGENTS.md — org-sty
 
 ## What this repo is
 
 Four independent Emacs Lisp minor modes that form a word-processor visual
 layer for Org mode. Each file is self-contained and loadable on its own;
-`org-filetag-style` is the only one that `require`s the others.
+`org-sty` is the only one that `require`s the others.
 
 | File | Purpose |
 |---|---|
-| `org-filetag-style.el` | Reads `#+FILETAGS`, merges style plists, applies them |
+| `org-sty.el` | Reads `#+FILETAGS`, merges style plists, applies them; provides `org-sty-mode` |
 | `variable-spacing.el` | Per-element proportional line spacing via jit-lock |
 | `org-title-fold.el` | Folds `#+KEYWORD:` lines below `#+TITLE:` |
 | `org-block-appear.el` | Hides `#+begin_`/`#+end_` lines; reveals near point |
@@ -35,25 +35,44 @@ layer for Org mode. Each file is self-contained and loadable on its own;
 - **`defcustom` for user-facing vars**, `defvar-local` for buffer-local
   internal state, `defconst` for fixed values.
 - **No global side-effects at load time** except the one `advice-add` in
-  `org-filetag-style.el` (which is intentional and documented). New global
-  hooks or advice must be scoped to the minor mode body (add on enable,
-  remove on disable).
+  `org-sty.el` (which is intentional and documented). New global hooks or
+  advice must be scoped to the minor mode body (add on enable, remove on
+  disable).
 - **All new features go through `:eval`**, not new plist keys, unless the
   feature is a genuine primitive that belongs in the style plist itself.
 
 ## Architecture constraints
 
+### Long-term file structure
+
+The planned post-v1 dependency graph is:
+
+```
+face-extra.el          ← generic core: registry, pass dispatcher, backend protocol
+    ↑                       (no deps beyond Emacs + cl-lib)
+variable-spacing.el    ← spacing/text-body impl; depends on face-extra; standalone useful
+org-title-fold.el      ← standalone; no new deps
+org-block-appear.el    ← standalone; no new deps
+    ↑
+org-sty.el             ← dispatcher
+```
+
+Pass 0 (face/font resolution) is the only mode-specific layer.  Passes 1–4
+are mode-agnostic — they operate on faces and geometry.  A backend for
+another major mode supplies pass 0 knowledge (face configuration + bare-text
+predicate) and the rest of the pipeline works unchanged.
+
 ### Independence of files
 The four files are deliberately decoupled. Do not add cross-`require`
 dependencies between `variable-spacing`, `org-title-fold`, or
-`org-block-appear`. `org-filetag-style.el` is the only allowed aggregator.
+`org-block-appear`. `org-sty.el` is the only allowed aggregator.
 
 ### `:eval` is the extension point
-`org-filetag-style` has no knowledge of spacing, folding, or block
-appearance. Wiring those modes in is done via `:eval` in the user's style
-plist, not by adding new plist keys to the dispatcher.
+`org-sty` has no knowledge of spacing, folding, or block appearance.
+Wiring those modes in is done via `:eval` in the user's style plist, not
+by adding new plist keys to the dispatcher.
 
-### Font remap ownership (`org-filetag-style`)
+### Font remap ownership (`org-sty`)
 `:font` uses `assq-delete-all` to strip any prior `default` face remap
 before installing its own. This is intentional — relative remaps stack and
 hook ordering is unreliable. Do not switch this to `face-remap-add-relative`
@@ -96,83 +115,209 @@ alongside `invisible`. This is intentional — it lets the mode clear exactly
 its own spans without touching Org's heading-folding or any other package's
 `invisible` uses. Do not collapse this into a plain `invisible`-only check.
 
-### Global small `default` face — the settled model
+### Buffer-local `default` floor (`variable-spacing`)
 
-The frame `default` face is set globally to a small size (the minimum line
-height wanted for WP body text, e.g. 6pt). This inverts the usual assumption:
-`default` is the **floor**, not the UI baseline.
+`variable-spacing-mode` installs a buffer-local remap on `default` to a
+small floor height (`variable-spacing-floor-height`, default 60 = 6pt).
+This makes `default` the **floor** for metadata/structural elements in that
+buffer, while body text opts up via `text-body`.  The global `default` face
+is never touched; non-WP buffers are entirely unaffected.
 
-Every non-WP buffer opts back up to the original size via a buffer-local
-`face-remapping-alist` entry for `default`, installed by
-`after-change-major-mode-hook`. Existing buffers get the remap applied
-retroactively when the feature is first enabled. WP-tagged Org buffers are
-exempt — `org-filetag-style--apply-font` already strips any prior `default`
-remap with `assq-delete-all` before installing its own `:font-size`, so they
-receive whatever size the style plist specifies.
+**`frame-char-height` as a fallback is wrong** in buffers where
+`variable-spacing-mode` is active, because the buffer-local floor remap
+makes it return the small floor value rather than the body text height.
+Code that uses `frame-char-height` as a proxy for line height in the current
+buffer (notably `variable-spacing--spacer`) will compute incorrect results
+for off-screen content.  The correct approach is to read the effective
+`:height` from `face-remapping-alist` for the current buffer and convert to
+pixels using the frame's pixels-per-point ratio.  Do not add new callers of
+`frame-char-height` for font-metric purposes; fix the existing one before
+implementing pagination.
 
-**Chrome faces bypass `face-remapping-alist`.** The header-line, mode-line,
-tab-bar, tab-line, and menu faces resolve `:height` at the frame level, not
-through any buffer's remap alist. They must be pinned with an explicit
-`set-face-attribute` call (to the pre-shrink size) so they no longer fall
-through to `default`. Restore their original values (which may be
-`unspecified`) on disable.
+### Rendering pipeline — passes and ordering
 
-**The minibuffer** is a real buffer and does receive face remapping, but
-`after-change-major-mode-hook` does not fire for it reliably.
-`minibuffer-setup-hook` is the correct hook — it fires inside the minibuffer
-buffer on every activation, which is when the remap needs to be in effect.
+Visual properties are applied in a fixed sequence of passes.  Dependencies
+between properties are shallow and map cleanly onto this sequence; no general
+dependency resolver is needed.  (The same fixed-pipeline approach underlies
+CSS's style → box-model → layout → paint sequence, which handles a far wider
+property vocabulary than ours.)
 
-**`frame-char-height` as a fallback is now wrong.** Once `default` is set to
-the small floor size, `frame-char-height` returns that small value. Code that
-uses it as a proxy for "the body text height in this buffer" (notably
-`variable-spacing--spacer`) will compute incorrect results for off-screen
-content. The correct approach is to read the effective `:height` from
-`face-remapping-alist` for the current buffer and convert to pixels using the
-frame's pixels-per-point ratio. Do not add new callers of `frame-char-height`
-for font-metric purposes; fix the existing one before implementing pagination.
+**Pass 0 — Face/font resolution** (Emacs `face-remapping-alist`; always first)
+Font family, size, height.  Resolved automatically by Emacs before any
+display properties are consulted.  All subsequent passes may read font metrics
+via `font-at` or `face-remapping-alist`.
 
-`test-small-default.el` is a standalone reversible test harness that
-validates this model interactively. It is not part of the library.
+**Pass 1 — Vertical metrics** (after-fontify; no line-breaking dependency)
+Line spacing ratio (`variable-spacing-ratio`), space-before/after paragraphs.
+These stamp `line-prefix`/`wrap-prefix` pixel spacers derived from font
+metrics.  They affect vertical rhythm but do not need to know where lines
+break.  Properties in this pass are independent of each other.
+
+**Pass 2 — Horizontal bounds** (after-fontify; *affects* subsequent
+line-breaking)
+Left/right margins, first-line indent, hanging indent, tab stops.  These
+stamp `line-prefix`/`wrap-prefix` to narrow the available text width.
+Intra-pass ordering: margins must be applied before first-line-indent and
+tab stops, since the latter are margin-relative.  Note: because these are
+applied in the after-fontify pass and the display engine re-breaks lines on
+the following render cycle, there is an inherent one-cycle lag between a
+margin change and any property in pass 3 seeing the updated line breaks.
+This is normally imperceptible.
+
+**Pass 3 — Line-break-dependent** (after-fontify; reads line geometry)
+Justification, centre alignment, right alignment.  These need to know where
+the display engine broke each visual line and how wide the text is.  They
+either read visual line boundaries from the display engine (window-dependent;
+same off-screen limitation as `variable-spacing--spacer`) or compute
+available-width = window-width − margins directly and measure non-space text
+width with `string-pixel-width`.  Intra-pass ordering: tab stop geometry must
+be resolved before justification, since justification distributes remaining
+space after tab-consumed space is accounted for.
+
+**Pass 4 — Page layout** (separate idle-timer pass; not fontification)
+Cumulative pixel heights, page breaks, page count.  Runs after jit-lock has
+settled for the visible region.  Needs reliable line heights for all buffer
+positions including off-screen content; blocked on the `variable-spacing--spacer`
+fallback fix.
+
+**Registry implication:** when the `face-remap-add-extra` API is generalised,
+each registered property should declare its pass number.  The after-fontify
+dispatcher iterates passes 1–3 in order, running all properties registered
+for each pass before moving to the next.
 
 ## Known planned work (not yet implemented)
 
-- **Generalise synthetic face attributes and `face-remap-add-extra`:**
-  `variable-spacing-ratio` is the first synthetic face attribute — a
-  property attached to a face symbol that drives a display effect
-  (pixel spacers) not expressible as a standard Emacs face attribute.
-  `variable-spacing-face-remap-add-extra` / `remove-extra` provides
-  the cookie-tracked API for one such property.  As more synthetic
-  attributes are added (spacing ratio, text alignment, space-before /
-  space-after paragraph spacing, first-line indent, left/right margin
-  indent via `line-prefix` / `wrap-prefix`), this mechanism should be
-  generalised: a single `face-remap-add-extra` API that accepts an
-  arbitrary property name and value, with a registry of known properties
-  mapping each to its apply/clear implementation.  This would allow
-  `:faces` and `org-filetag-style-remap` to dispatch any synthetic
-  attribute without per-property special-casing in the caller.
+### v1 release
 
-- **Text alignment (`text-align` as a synthetic face property):** Following
-  the same pattern as `variable-spacing-ratio`, text alignment (left, centre,
-  right) could be implemented as a symbol property on faces, intercepted
-  and applied as a `line-prefix` display property with a computed
-  `(space :align-to ...)` spec.  True centring requires measuring the
-  rendered pixel width of each line at fontification time.  This is
-  a natural next synthetic face attribute after spacing ratio is fully
+- **~~Rename `org-filetag-style` → `org-sty`~~** — DONE.
+- **~~`org-sty-mode` minor mode~~** — DONE.  `org-style-mode` is a
+  `defalias`.  Disable body tracks and reverses face remaps and `:eval`-
+  activated modes via `org-sty--eval-activated-modes`.
+- **Git tag `v1.0-beta`:** Tag the rename commit as `v1.0-beta`.
+
+### `face-extra` branch
+
+- **New file `face-extra.el` — generic synthetic attribute core:**
+  Extract and generalise the current `variable-spacing-face-remap-add-extra`
+  / `remove-extra` API into a standalone `face-extra.el`.  This becomes the
+  foundation for all synthetic face properties — attributes that drive display
+  effects not expressible as standard Emacs face attributes.
+
+  #### Registry API
+
+  Properties are registered once at load time:
+
+  ```elisp
+  (face-extra-define-property 'variable-spacing-ratio
+    :pass 1
+    :apply  (lambda (face value) ...)  ; installs the effect, returns a cookie
+    :clear  (lambda (cookie) ...))     ; reverses the effect from cookie
+  ```
+
+  `face-extra--registry` is an alist mapping property symbol → plist
+  (`(:pass N :apply FN :clear FN)`).
+
+  The public API for callers:
+
+  ```elisp
+  (face-extra-add  face property value) → cookie
+  (face-extra-remove cookie)
+  ```
+
+  Each cookie is an opaque value produced by the `:apply` function and
+  consumed by `:clear`.  The existing `(FACE PROPERTY OLD-VALUE)` triple
+  used by `variable-spacing-face-remap-add-extra` is the natural cookie
+  format for symbol-property-based effects.
+
+  #### Pass dispatcher
+
+  The after-fontify advice (currently in `variable-spacing.el`) moves to
+  `face-extra.el` and becomes a generic dispatcher:
+
+  1. Call the active backend's bare-text stamper (pass 0 completion;
+     mode-specific — see Backend protocol below).
+  2. Iterate passes 1, 2, 3 in order.  For each pass, scan the fontified
+     region for text positions carrying faces that have registered properties
+     at that pass level; call each property's `:apply` function.
+
+  `variable-spacing.el` registers its properties via
+  `face-extra-define-property` and no longer owns the dispatch loop.
+
+  #### Inheritance (subtask — implement within this work)
+
+  Each registered property's lookup must follow the face remap/inheritance
+  chain, consistent with standard Emacs face attribute inheritance.  Correct
+  lookup order (shown for `variable-spacing-ratio`; same pattern for every
+  registered property):
+
+  1. Check the direct symbol property (`get face 'property`).  Value 0 = 
+     explicitly suppressed (stops the search).
+  2. If nil, scan the face's `face-remapping-alist` entry left-to-right;
+     for each spec with `:inherit FACE`, recurse into FACE.
+  3. If still nil, follow the face's global `:inherit` attribute(s).
+
+  Guard the recursive walker against inheritance cycles with a visited set.
+  The lookup must be universal — all faces.
+
+  **Config update required on implementation:** `org-block`, `org-quote`,
+  and `org-verse` in `org-filetags-config.el` will begin inheriting the
+  `text-body` ratio (1.6) through the content-face remap chain.  Add
+  `:variable-spacing-ratio 0` to their `:faces` entries to suppress it.
+
+  #### `org-sty-remap` integration
+
+  `org-sty-remap` (in `org-sty.el`) currently has a hardcoded special case
+  for `:variable-spacing-ratio`.  After generalisation, it should:
+
+  1. Separate the attrs plist into standard face attributes and registered
+     extra properties (check each key against `face-extra--registry`).
+  2. Pass standard attrs to `face-remap-add-relative` as before.
+  3. Pass registered extra properties to `face-extra-add`, storing the
+     returned cookies in `org-sty--face-remap-cookies` alongside the
+     existing remap cookies.
+  4. Warn and skip unknown keys (keys that are neither standard face
+     attributes nor registered extra properties).
+
+  #### Backend protocol (deferred — specify before generalising beyond Org)
+
+  The pass dispatcher needs to call a mode-specific bare-text stamper to
+  complete pass 0 for the current major mode.  The backend interface should
+  provide at minimum:
+
+  - A bare-text predicate: given a buffer position, is this unattributed
+    body text that should receive the `text-body` stamp?  (For Org: no
+    `face` or `font-lock-face` present.  For other modes: TBD.)
+  - Face configuration: which faces should receive `(:inherit text-body)`
+    remaps on mode enable?
+
+  The backend is discovered via a variable (e.g.
+  `face-extra-backend-alist`, keyed by major mode symbol).  Specify the
+  full protocol before implementing support for any non-Org mode.
+
+- **Text alignment (`text-align` as a synthetic face property):** Left,
+  centre, right, and justify, implemented as a symbol property on faces.
+  Centre and right require measuring the rendered pixel width of each visual
+  line at fontification time (`string-pixel-width`); the measurement drives a
+  `line-prefix` `(space :align-to ...)` spec.  Justify stamps `(space :width
+  Npx)` on each interword space to fill the line to the window margin.  The
+  chicken-and-egg concern (justification changes word spacing, which could
+  cause the display engine to re-break lines) is manageable in practice:
+  justification only adds space within lines already broken by word-wrap, so
+  re-breaking is rare and can be guarded against.  jit-lock's incremental
+  invalidation means only edited regions are recalculated.  The open question
+  is whether `string-pixel-width` per visual line per fontified chunk is fast
+  enough during typing — this warrants an experiment before committing to the
+  design.  A natural next synthetic attribute after spacing ratio is fully
   working.
 
 - **Document portability / style snapshots:** For a genuine WP workflow,
   a document should be viewable identically by another user who does not
-  have the same `org-filetag-style-alist` configuration.  A function to
-  export or snapshot the fully-resolved style for the current buffer —
-  writing it as file-local variables or a portable header block — would
-  allow the style to travel with the file.  Not yet designed; note the
-  requirement here so the `:faces` / `org-filetag-style-remap` API is
-  kept serialisation-friendly.
+  have the same `org-sty-alist` configuration.  A function to export or
+  snapshot the fully-resolved style for the current buffer — writing it as
+  file-local variables or a portable header block — would allow the style to
+  travel with the file.  Not yet designed; note the requirement here so the
+  `:faces` / `org-sty-remap` API is kept serialisation-friendly.
 
-- **Global `default` face resize — implement as a library feature:** The
-  approach has been validated interactively via `test-small-default.el`.
-  See that file and the architecture notes below for the full design.
-  What remains is lifting it into a proper minor mode in this library.
 - **`variable-spacing--spacer` off-screen height (`variable-spacing`):**
   The `frame-char-height` fallback in `variable-spacing--spacer` will
   return the small floor size once the global default is shrunk.  For
@@ -188,14 +333,10 @@ validates this model interactively. It is not part of the library.
 - **Generalising `variable-spacing-mode`** beyond Org via pluggable backends
   is partially done (text backend exists) but not fully exercised outside Org.
 
-## Branch `text-body-face` — current state
+## Architecture notes — `text-body` face model
 
-This branch reworks body-text sizing so that `default` is a true floor
-(very small, e.g. 6pt) and body text opts in to a larger `text-body` face.
-
-### What is implemented and working
-
-**Two orthogonal mechanisms** give every character the right size:
+Body-text sizing uses `default` as a true floor (very small, e.g. 6pt);
+body text opts in to a larger `text-body` face via two orthogonal mechanisms:
 
 1. **Buffer-local face remaps** (`face-remap-add-relative`): a curated list
    of faces (`variable-spacing-body-faces`) each receive `(:inherit text-body)`
@@ -225,88 +366,11 @@ On mode **disable**: `variable-spacing--remove-body-face` is called over the
 full buffer to clean up stamps (which carry no `variable-spacing--prop`
 sentinel and so are not caught by `variable-spacing-clear`).
 
-### Known remaining issues
-
-**Newline face propagation** — IMPLEMENTED.  A `\n` that opens a
-body-context span inherits the face of its preceding character (checked
-via `char-before` and `get-text-property` at span-start, inside the
-existing span loop — no separate pass).  Blank lines (preceding char is
-also `\n`) always receive `text-body` regardless of surrounding context;
-see the inline comment in `variable-spacing--after-fontify` for the known
-imperfection with blank lines inside LOGBOOK drawers.
-
-**`text-scale-mode` compatibility** — RESOLVED.  `text-body` `:height` is
-now expressed as a float `2.0` relative to `default`, so `text-scale-mode`'s
-float multiplier on `default` propagates through `text-body` to all content
-faces correctly.  The floor remap on `default` remains absolute
-(`variable-spacing-floor-height`), so metadata elements stay small
-regardless of text scale.
-
-**`#+TITLE:` keyword tag hiding** — IMPLEMENTED (in a separate session).
-The `#+TITLE:` keyword prefix is hidden in WP buffers so only the title
-value (`org-document-title` face) is visible.
-
-**Some faces not fontified correctly** — noted during testing but not yet
-diagnosed.  Likely candidates: faces applied by Org constructs not yet in
-`variable-spacing-content-faces`, or timing issues with the after-fontify
-pass on initial buffer load before the mode is enabled.
-
-### Face-driven spacing — IMPLEMENTED
-
-`variable-spacing-ratio` symbol property (stored with `put`, intercepted
-from `set-face-attribute` via `:around` advice) drives the spacing pass.
-See the current `variable-spacing.el` for the full implementation.
-
-### `variable-spacing-ratio` inheritance — NOT YET IMPLEMENTED
-
-**Known design gap:** `variable-spacing-ratio` is currently a bare symbol
-property and does not follow the face remap/inheritance chain.  This is
-inconsistent with how all other face attributes behave: `:inherit` in a
-face spec propagates all face attributes, but symbol properties are
-completely separate and are never inherited.
-
-**Correct design:** the ratio lookup in `variable-spacing--face-with-ratio`
-should follow the `:inherit` key in remap specs recursively, for all
-faces.  The correct lookup order is:
-
-  1. Check the direct symbol property on the face (`get face
-     'variable-spacing-ratio`).  A value of 0 means "explicitly no
-     spacing" and stops the search (analogous to `:slant normal`
-     cancelling an inherited slant).  A positive value is used as-is.
-  2. If nil (unspecified), scan the face's entry in `face-remapping-alist`
-     left-to-right.  For each spec that is a plist with `:inherit FACE`,
-     recursively apply this lookup to FACE.
-  3. If still nil after exhausting the remap chain, follow the face's
-     global `:inherit` attribute(s) the same way.
-
-**Universality:** the lookup must be universal — all faces, not just
-content faces.  The reason metadata faces naturally get no spacing is
-that their remap chains do not include any face with a ratio set, not
-because they are excluded from the lookup.  A user who wants spacing on
-a metadata face should be able to get it by setting the ratio explicitly.
-
-**Practical consequence of the current gap:** `text-body` has ratio 1.6
-set in WP buffers, but `org-level-N`, `org-quote`, `org-block` etc. do
-not inherit it — each face with a ratio must have it set explicitly.
-Until this is fixed, the workaround is to `put` the ratio on each face
-that should have spacing.  Setting ratio 0 on a face already works to
-suppress spacing; the missing piece is propagation of non-nil ratios
-through the inheritance chain.
-
-**Config update required on implementation:** once ratio inheritance is
-working, block and quote faces in `org-filetags-config.el` (`org-block`,
-`org-quote`, `org-verse`, and similar) will begin inheriting the
-`text-body` ratio (1.6) through the content-face remap chain.  These
-faces should have no extra line spacing — they are block containers
-where spacing is already provided by surrounding paragraphs.  Add
-`:variable-spacing-ratio 0` to their `:faces` entries in the config to
-explicitly suppress the inherited ratio.
-
-**Implementation note:** `variable-spacing--face-with-ratio` is the
-function to update.  It currently uses `cl-some` over face lists and
-a direct `get` per face; it needs a recursive remap-chain walker.
-Guard against cycles (a face inheriting itself or a loop) with a
-visited set.
+`text-body` `:height` is expressed as a float `2.0` relative to `default`,
+so `text-scale-mode`'s float multiplier on `default` propagates through
+`text-body` to all content faces correctly.  The floor remap on `default`
+remains absolute (`variable-spacing-floor-height`), so metadata elements
+stay small regardless of text scale.
 
 ### Content and metadata face lists
 
@@ -339,22 +403,17 @@ style-snapshot feature: the snapshot captures and restores these lists
 alongside the style plist so that another user's Emacs renders the
 document identically without requiring the same global configuration.
 
-### Per-face styling in org-filetag-style — settled design
+### Per-face styling in org-sty
 
-The current `org-filetag-style-alist` plist conflates three concerns:
+The `org-sty-alist` plist separates three concerns:
 
-  1. **`default` remaps** (`:font`, `:font-size`) — already handled correctly
-     and buffer-locally by `--apply-font`.
+  1. **`default` remaps** (`:font`, `:font-size`) — handled buffer-locally
+     by `--apply-font`.
   2. **Document-wide mode toggles** (`variable-spacing-mode`, `hl-line-mode`,
-     etc.) — handled by `:eval`; idempotent and correct as-is.
+     etc.) — handled by `:eval`; idempotent.
   3. **Face attribute overrides** (heading heights, block backgrounds, etc.)
-     — currently done via bare `set-face-attribute` calls inside `:eval`,
-     which is **global** (not buffer-local), **not tracked**, and therefore
-     not cleaned up when the style changes or the buffer is killed.
-
-The goal is to move concern 3 into a first-class, tracked, buffer-local
-mechanism.  The design uses two complementary mechanisms that share a single
-implementation path.
+     — handled via `:faces` / `org-sty-remap`; buffer-local, tracked, and
+     cleaned up on style change or buffer kill.
 
 #### Why `set-face-attribute` in `:eval` is wrong
 
@@ -364,13 +423,12 @@ are never reversed when a style is re-applied, a tag is changed, or the
 buffer is killed.  `face-remap-add-relative`, by contrast, is buffer-local
 and fully reversible via `face-remap-remove-relative`.
 
-#### `org-filetag-style-default` is always the base layer
+#### `org-sty-default` is always the base layer
 
-`org-filetag-style-default` is applied to **every** Org buffer before any
-tag-specific style is layered on top.  It is not a fallback for untagged
-buffers — it is a permanent base.  Tag styles are additive layers over it,
-not replacements for it.  This is an explicit architectural norm, not an
-implementation accident.
+`org-sty-default` is applied to **every** Org buffer before any tag-specific
+style is layered on top.  It is not a fallback for untagged buffers — it is a
+permanent base.  Tag styles are additive layers over it, not replacements for
+it.  This is an explicit architectural norm, not an implementation accident.
 
 #### Two mechanisms, one implementation path
 
@@ -378,7 +436,7 @@ implementation accident.
 
 A `:faces` key in the style plist accepts an alist of `(FACE . ATTRS-PLIST)`
 pairs.  It is pure syntax sugar: `--apply-faces` iterates the alist and calls
-`org-filetag-style-remap` for each entry.  Example:
+`org-sty-remap` for each entry.  Example:
 
     ("thesis" . (:font "Times New Roman" :font-size 12
                  :num-level 3 :indent nil :olivetti-width 68
@@ -391,12 +449,12 @@ pairs.  It is pure syntax sugar: `--apply-faces` iterates the alist and calls
                          (variable-spacing-mode 1)
                          (org-title-fold-mode 1))))
 
-**2. `org-filetag-style-remap` helper**
+**2. `org-sty-remap` helper**
 
 For cases requiring runtime values or conditional logic, a public helper is
 available for use inside `:eval`:
 
-    (org-filetag-style-remap FACE &rest ATTRS)
+    (org-sty-remap FACE &rest ATTRS)
 
 It installs a buffer-local face remap for FACE (handling
 `:variable-spacing-ratio` specially — see below) and records the cookie into
@@ -414,25 +472,24 @@ face remapping works everywhere else.
 
 #### Cookie tracking and idempotency
 
-A single buffer-local list `org-filetag-style--face-remap-cookies` holds all
-cookies from both `:faces` and `org-filetag-style-remap` calls.  On each
-call to `org-filetag-style-apply`, all cookies are removed via
-`face-remap-remove-relative` (and symbol-property side-effects reversed —
-see below) before the full style is re-applied.  Re-applying a style is
-therefore fully idempotent.
+A single buffer-local list `org-sty--face-remap-cookies` holds all cookies
+from both `:faces` and `org-sty-remap` calls.  On each call to
+`org-sty-apply`, all cookies are removed via `face-remap-remove-relative`
+(and symbol-property side-effects reversed — see below) before the full
+style is re-applied.  Re-applying a style is therefore fully idempotent.
 
 #### `:variable-spacing-ratio` dispatch
 
 `:variable-spacing-ratio` is not a face attribute and cannot be passed to
-`face-remap-add-relative`.  Both `--apply-faces` and `org-filetag-style-remap`
-strip it from the attrs plist before calling `face-remap-add-relative`, and
-route it instead to `variable-spacing-face-remap-add-extra` (defined in
+`face-remap-add-relative`.  Both `--apply-faces` and `org-sty-remap` strip it
+from the attrs plist before calling `face-remap-add-relative`, and route it
+instead to `variable-spacing-face-remap-add-extra` (defined in
 `variable-spacing.el`), which stores the previous symbol property value as a
 cookie so it can be precisely restored on teardown.
 
 If `variable-spacing` is not loaded, `:variable-spacing-ratio` entries are
 silently skipped (guarded with `fboundp`), preserving the ability to use
-`org-filetag-style` without `variable-spacing`.
+`org-sty` without `variable-spacing`.
 
 #### What stays in `:eval`
 
@@ -442,9 +499,9 @@ silently skipped (guarded with `fboundp`), preserving the ability to use
   - Setting symbol properties not tied to a specific face (`put 'text-body …`)
   - Any logic requiring runtime conditions or imperative sequencing
 
-All face attribute changes should go through `:faces` or
-`org-filetag-style-remap` so they are tracked and cleaned up correctly.
-Bare `set-face-attribute` calls in `:eval` are now an anti-pattern.
+All face attribute changes should go through `:faces` or `org-sty-remap` so
+they are tracked and cleaned up correctly.  Bare `set-face-attribute` calls
+in `:eval` are now an anti-pattern.
 
 ## Emacs version requirement
 
