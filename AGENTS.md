@@ -209,36 +209,81 @@ for each pass before moving to the next.
 
   ```elisp
   (face-extra-define-property 'variable-spacing-ratio
-    :pass 1
-    :apply  (lambda (face value) ...)  ; installs the effect, returns a cookie
-    :clear  (lambda (cookie) ...))     ; reverses the effect from cookie
+    :pass  1
+    :after nil        ; other property symbols in the same pass that must
+                      ; run before this one — intra-pass ordering constraint
+    :apply (lambda (spans) ...)  ; SPANS is a list of (beg end value) triples
+    :clear (lambda (cookie) ...))
   ```
 
-  `face-extra--registry` is an alist mapping property symbol → plist
-  (`(:pass N :apply FN :clear FN)`).
+  `face-extra--registry` is a hash table mapping property symbol → plist.
+  `:after` may only name properties in the same pass; cross-pass references
+  are validated and rejected at registration time.  When a new property is
+  registered, the intra-pass order for its bucket is recomputed via
+  topological sort.
 
-  The public API for callers:
+  The public API for installing a property value on a face (used by
+  `org-sty-remap` and `variable-spacing` internals):
 
   ```elisp
-  (face-extra-add  face property value) → cookie
+  (face-extra-add    face property value) → cookie
   (face-extra-remove cookie)
   ```
 
-  Each cookie is an opaque value produced by the `:apply` function and
-  consumed by `:clear`.  The existing `(FACE PROPERTY OLD-VALUE)` triple
-  used by `variable-spacing-face-remap-add-extra` is the natural cookie
-  format for symbol-property-based effects.
+  Each cookie is an opaque value produced by the `:apply` machinery and
+  consumed by `:clear`.  The existing `(FACE PROPERTY OLD-VALUE)` triple is
+  the natural format for symbol-property-based effects.
+
+  #### Per-face dispatch cache
+
+  The central performance mechanism.  `face-extra--face-cache` is a
+  buffer-local hash table:
+
+  ```
+  face-symbol →
+    { pass1: [(property, value, apply-fn), ...],   ← pre-sorted
+      pass2: [...],
+      pass3: [...] }
+  ```
+
+  Built lazily the first time a face is encountered during a dispatch call.
+  Each entry encodes the fully-resolved property values for that face
+  (walking `face-remapping-alist` and global `:inherit` chains — see
+  Inheritance below) and the pre-sorted apply-fn list for each pass.
+
+  **Cache invalidation:**
+  - New property registered → clear entire cache (load-time only, rare)
+  - `face-remapping-alist` changes → clear buffer-local cache (happens on
+    `org-sty-apply`)
+  - Symbol property mutated (via `set-face-attribute` advice) → clear entry
+    for that face only
 
   #### Pass dispatcher
 
-  The after-fontify advice (currently in `variable-spacing.el`) moves to
-  `face-extra.el` and becomes a generic dispatcher:
+  The after-fontify advice moves from `variable-spacing.el` to
+  `face-extra.el`.  On each jit-lock chunk:
 
   1. Call the active backend's bare-text stamper (pass 0 completion;
      mode-specific — see Backend protocol below).
-  2. Iterate passes 1, 2, 3 in order.  For each pass, scan the fontified
-     region for text positions carrying faces that have registered properties
-     at that pass level; call each property's `:apply` function.
+  2. Scan the region once, building three pass-specific span lists:
+     ```
+     pass-N-spans: [(beg, end, face, apply-fns), ...]
+     ```
+     For each face boundary: look up the face in `face-extra--face-cache`
+     (populate lazily if absent); append the span to the appropriate
+     pass-specific lists.  Faces with no registered properties produce no
+     entries — they are never revisited.
+  3. Run pass-1-spans, pass-2-spans, pass-3-spans in order.  For each span,
+     call each apply-fn in the pre-sorted list.
+
+  Each property's `:apply` function receives `(spans)` — the full list of
+  `(beg end value)` triples collected for it across the region — called
+  once per dispatch.  This allows batched work (e.g. variable-spacing
+  applies all spacers in a single loop).
+
+  **Complexity:** O(region_size) for the scan with O(1) cache lookups; O(applicable_spans ×
+  properties_per_face_per_pass) for application.  Properties absent from
+  the region incur zero cost.
 
   `variable-spacing.el` registers its properties via
   `face-extra-define-property` and no longer owns the dispatch loop.
