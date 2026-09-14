@@ -222,17 +222,26 @@ for each pass before moving to the next.
   registered, the intra-pass order for its bucket is recomputed via
   topological sort.
 
-  The public API for installing a property value on a face (used by
-  `org-sty-remap` and `variable-spacing` internals):
+  The public API for installing a property value on a face:
 
   ```elisp
-  (face-extra-add    face property value) → cookie
-  (face-extra-remove cookie)
+  (face-extra-add          face property value) → cookie  ; global
+  (face-extra-add-relative face property value) → cookie  ; buffer-local
+  (face-extra-remove       cookie)                        ; works for both
   ```
 
-  Each cookie is an opaque value produced by the `:apply` machinery and
-  consumed by `:clear`.  The existing `(FACE PROPERTY OLD-VALUE)` triple is
-  the natural format for symbol-property-based effects.
+  `face-extra-add` sets the value globally via `(put face property value)`,
+  affecting all buffers.  `face-extra-add-relative` writes into
+  `face-extra--local-properties` (a buffer-local hash table keyed by
+  `(face . property)`), leaving the global symbol property untouched.
+  The cookie format encodes which mechanism was used so `face-extra-remove`
+  knows how to undo it.  The natural cookie format for symbol-property
+  effects is `(FACE PROPERTY OLD-VALUE)`.
+
+  `org-sty-remap` and `variable-spacing` internals use
+  `face-extra-add-relative` (buffer-local per-document styling).
+  `face-extra-add` is for library-level defaults that should apply in all
+  buffers.
 
   #### Per-face dispatch cache
 
@@ -247,16 +256,26 @@ for each pass before moving to the next.
   ```
 
   Built lazily the first time a face is encountered during a dispatch call.
-  Each entry encodes the fully-resolved property values for that face
-  (walking `face-remapping-alist` and global `:inherit` chains — see
-  Inheritance below) and the pre-sorted apply-fn list for each pass.
+  Each entry encodes the fully-resolved property values for that face and
+  the pre-sorted apply-fn list for each pass.  Resolution order when
+  building an entry (mirrors how `face-remapping-alist` relates to global
+  face definitions):
+
+  1. `face-extra--local-properties` buffer-local hash table `(face . property) → value`
+  2. Global symbol property `(get face property)`
+  3. `face-remapping-alist` `:inherit` chain
+  4. Global face `:inherit` attribute(s)
+
+  Cycle guard via visited set throughout.  Value 0 at any level means
+  explicitly suppressed — stops the search.
 
   **Cache invalidation:**
   - New property registered → clear entire cache (load-time only, rare)
   - `face-remapping-alist` changes → clear buffer-local cache (happens on
     `org-sty-apply`)
-  - Symbol property mutated (via `set-face-attribute` advice) → clear entry
-    for that face only
+  - `face-extra--local-properties` changes → clear buffer-local cache
+  - Global symbol property mutated (via `set-face-attribute` advice) →
+    clear entry for that face only
 
   #### Pass dispatcher
 
@@ -291,15 +310,10 @@ for each pass before moving to the next.
   #### Inheritance (subtask — implement within this work)
 
   Each registered property's lookup must follow the face remap/inheritance
-  chain, consistent with standard Emacs face attribute inheritance.  Correct
-  lookup order (shown for `variable-spacing-ratio`; same pattern for every
-  registered property):
-
-  1. Check the direct symbol property (`get face 'property`).  Value 0 = 
-     explicitly suppressed (stops the search).
-  2. If nil, scan the face's `face-remapping-alist` entry left-to-right;
-     for each spec with `:inherit FACE`, recurse into FACE.
-  3. If still nil, follow the face's global `:inherit` attribute(s).
+  chain, consistent with standard Emacs face attribute inheritance.  The
+  lookup order is the same as the cache resolution order defined above
+  (local-properties → global symbol property → remap :inherit chain →
+  global :inherit).
 
   Guard the recursive walker against inheritance cycles with a visited set.
   The lookup must be universal — all faces.
@@ -317,9 +331,9 @@ for each pass before moving to the next.
   1. Separate the attrs plist into standard face attributes and registered
      extra properties (check each key against `face-extra--registry`).
   2. Pass standard attrs to `face-remap-add-relative` as before.
-  3. Pass registered extra properties to `face-extra-add`, storing the
-     returned cookies in `org-sty--face-remap-cookies` alongside the
-     existing remap cookies.
+  3. Pass registered extra properties to `face-extra-add-relative` (buffer-local;
+     per-document styling), storing cookies in `org-sty--face-remap-cookies`
+     alongside the existing remap cookies.
   4. Warn and skip unknown keys (keys that are neither standard face
      attributes nor registered extra properties).
 
@@ -338,6 +352,102 @@ for each pass before moving to the next.
   The backend is discovered via a variable (e.g.
   `face-extra-backend-alist`, keyed by major mode symbol).  Specify the
   full protocol before implementing support for any non-Org mode.
+
+  #### File and function plan
+
+  **`face-extra.el`** — new; no deps beyond Emacs + cl-lib
+
+  ```
+  1. Registry
+     face-extra--registry            global hash table:
+                                       property-symbol → (:pass :after :apply :clear)
+     face-extra-define-property      validates :after are same-pass; re-sorts bucket
+     face-extra--validate-after      cross-pass reference check
+     face-extra--sort-pass           topological sort within a pass bucket
+
+  2. Per-face cache
+     face-extra--local-properties    buffer-local hash table: (face . property) → value
+     face-extra--face-cache          buffer-local hash table:
+                                       face → { pass1 pass2 pass3: [(prop val apply-fn)...] }
+                                       pre-sorted; built lazily
+     face-extra--resolve-property    inheritance walker (local → global put →
+                                       remap :inherit chain → global :inherit;
+                                       cycle guard via visited set)
+     face-extra--build-cache-entry
+     face-extra--invalidate-cache    clear entire buffer-local cache
+     face-extra--invalidate-face     clear single face entry
+
+  3. Public install API
+     face-extra-add           (face property value) → cookie   ; global via (put)
+     face-extra-add-relative  (face property value) → cookie   ; buffer-local
+     face-extra-remove        (cookie)                         ; works for both
+
+  4. Backend protocol
+     face-extra--backend-alist       major-mode → backend plist
+     face-extra-register-backend
+     face-extra--active-backend
+     backend key: :stamp-body-text (beg end)
+
+  5. Dispatch
+     face-extra--dispatch            after-fontify function:
+                                       1. call backend :stamp-body-text (pass 0)
+                                       2. scan region once → pass1/2/3-span lists
+                                          (face boundary → cache lookup → append;
+                                           faces with no properties skipped entirely)
+                                       3. run pass1, pass2, pass3 spans in order;
+                                          each :apply called once with full (spans) list
+     advice on font-lock-fontify-keywords-region
+  ```
+
+  **`variable-spacing.el`** — gains `(require 'face-extra)`; loses dispatch
+  loop, after-fontify advice, and `variable-spacing-face-remap-add-extra` /
+  `remove-extra` (dropped entirely — callers use `face-extra-add-relative`
+  and `face-extra-remove` directly)
+
+  ```
+  1. Customization
+     variable-spacing-floor-height
+     variable-spacing-content-faces
+     variable-spacing-metadata-faces
+     variable-spacing-rules          (kept; element-based config API)
+
+  2. Backend definitions
+     variable-spacing-org-backend    (org-element-at-point; Org bare-text stamper)
+     variable-spacing-text-backend   (one line per physical line; fallback)
+     variable-spacing-mode-backends  (alist for auto-detection)
+
+  3. Text-body face model
+     variable-spacing--install-body-remaps
+     variable-spacing--remove-body-remaps
+     variable-spacing--remove-body-face    (stamp cleanup on mode disable)
+
+  4. Spacer computation
+     variable-spacing--spacer              (pixel height from font metrics)
+     variable-spacing--apply-ratio         (:apply fn; receives (spans) list)
+     variable-spacing--clear-ratio         (:clear fn)
+
+  5. Minor mode
+     variable-spacing-mode                 (enable/disable; text-scale-mode advice)
+
+  6. Registration  (load time, after mode is defined)
+     (face-extra-define-property 'variable-spacing-ratio ...)
+     (face-extra-register-backend 'org-mode variable-spacing-org-backend)
+  ```
+
+  **`org-sty.el`** — minor updates only
+
+  ```
+  - add (require 'face-extra)
+  - org-sty-remap: replace hardcoded :variable-spacing-ratio special case
+      with face-extra--registry lookup; registered extra properties →
+      face-extra-add-relative; standard face attrs → face-remap-add-relative;
+      unknown keys → warn and skip
+  - org-sty--clear-face-remaps: 'extra teardown calls face-extra-remove
+      directly (no longer goes through variable-spacing wrapper)
+  ```
+
+  **`org-title-fold.el`**, **`org-block-appear.el`**, **`org-sty-config.el`**
+  — untouched.
 
 - **Text alignment (`text-align` as a synthetic face property):** Left,
   centre, right, and justify, implemented as a symbol property on faces.
