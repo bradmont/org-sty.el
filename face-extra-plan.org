@@ -1,0 +1,217 @@
+#+TITLE: face-extra branch — design and implementation plan
+#+AUTHOR: Brad
+
+* Overview
+
+This branch generalises the synthetic face attribute mechanism currently
+hardwired to =variable-spacing-ratio= into a reusable core, =face-extra.el=.
+Goal is feature parity with the current library; new synthetic properties
+(alignment, margins, etc.) are added afterward.
+
+The key architectural shifts:
+- =face-extra.el= owns the after-fontify dispatch loop and per-face cache
+- =variable-spacing.el= becomes a plugin that registers its property with face-extra
+- =org-sty.el= dispatches generic registered properties through =face-extra-add-relative=
+- =variable-spacing-face-remap-add-extra= / =remove-extra= are dropped entirely;
+  callers use the face-extra API directly
+
+* File and function plan
+
+** =face-extra.el= — new; no deps beyond Emacs + cl-lib
+
+*** 1. Registry
+- =face-extra--registry= :: global hash table: property-symbol → plist =(:pass :after :apply :clear)=
+- =face-extra-define-property= :: validates =:after= are same-pass only; re-sorts bucket on registration
+- =face-extra--validate-after= :: rejects cross-pass references at registration time
+- =face-extra--sort-pass= :: topological sort within a pass bucket; run at registration time, not fontify time
+
+*** 2. Per-face cache
+- =face-extra--local-properties= :: buffer-local hash table: =(face . property)= → value
+- =face-extra--face-cache= :: buffer-local hash table:
+  =face= → ={ pass1 pass2 pass3: [(prop val apply-fn) ...] }=
+  pre-sorted; built lazily on first encounter per face per buffer
+- =face-extra--resolve-property= :: inheritance walker; resolution order:
+  1. =face-extra--local-properties= (buffer-local)
+  2. global symbol property via =(get face property)=
+  3. =face-remapping-alist= =:inherit= chain
+  4. global face =:inherit= attribute(s)
+
+  Value 0 at any level = explicitly suppressed, stops search.
+  Cycle guard via visited set throughout.
+- =face-extra--build-cache-entry= :: resolves all registered properties for a face; stores per-pass sorted lists
+- =face-extra--invalidate-cache= :: clear entire buffer-local cache
+- =face-extra--invalidate-face= :: clear single face entry (on symbol property mutation)
+
+Cache invalidation triggers:
+- New property registered → clear entire cache (load-time only, rare)
+- =face-remapping-alist= changes → clear buffer-local cache (on =org-sty-apply=)
+- =face-extra--local-properties= changes → clear buffer-local cache
+- Global symbol property mutated (via =set-face-attribute= advice) → clear that face's entry only
+
+*** 3. Public install API
+- =face-extra-add           (face property value)= → cookie :: global; sets value via =(put face property value)=
+- =face-extra-add-relative  (face property value)= → cookie :: buffer-local; writes into =face-extra--local-properties=
+- =face-extra-remove        (cookie)= :: works for both; cookie format encodes which mechanism was used
+
+Natural cookie format for symbol-property effects: =(FACE PROPERTY OLD-VALUE)=.
+
+=face-extra-add= is for library-level defaults applying in all buffers.
+=face-extra-add-relative= is for per-buffer styling (used by =org-sty-remap=
+and =variable-spacing= internals).
+
+*** 4. Backend protocol
+- =face-extra--backend-alist= :: alist: major-mode → backend plist
+- =face-extra-register-backend= :: register a backend for a major mode
+- =face-extra--active-backend= :: returns active backend for current buffer
+
+Backend plist key:
+- =:stamp-body-text (beg end)= :: pass 0 completion; mode-specific bare-text stamper
+
+*** 5. Dispatch
+- =face-extra--dispatch= :: the after-fontify function:
+  1. Call backend =:stamp-body-text= (pass 0 completion)
+  2. Scan region once → build =pass1-spans=, =pass2-spans=, =pass3-spans=:
+     for each face boundary, cache lookup (lazy build);
+     append to pass-specific span lists;
+     faces with no registered properties are never revisited
+  3. Run pass-1, pass-2, pass-3 spans in order;
+     each property's =:apply= called once with full =(spans)= list
+     of =(beg end value)= triples — allows batched work
+- advice on =font-lock-fontify-keywords-region=
+
+Complexity: O(region_size) for the scan with O(1) cache lookups per face;
+O(applicable_spans × properties_per_face_per_pass) for application.
+Properties absent from the region incur zero cost.
+
+** =variable-spacing.el= — refactored as a plugin
+
+Gains: =(require 'face-extra)=
+Loses: dispatch loop, after-fontify advice (both move to face-extra),
+=variable-spacing-face-remap-add-extra= / =remove-extra= (dropped entirely)
+
+*** 1. Customization
+- =variable-spacing-floor-height=
+- =variable-spacing-content-faces=
+- =variable-spacing-metadata-faces=
+- =variable-spacing-rules= :: kept; element-based config API
+
+*** 2. Backend definitions
+- =variable-spacing-org-backend= :: =org-element-at-point=; Org bare-text stamper
+- =variable-spacing-text-backend= :: one line element per physical line; fallback
+- =variable-spacing-mode-backends= :: alist for auto-detection on mode enable
+
+*** 3. Text-body face model
+- =variable-spacing--install-body-remaps= :: installs =(:inherit text-body)= on content faces
+- =variable-spacing--remove-body-remaps=
+- =variable-spacing--remove-body-face= :: stamp cleanup on mode disable
+
+*** 4. Spacer computation
+- =variable-spacing--spacer= :: pixel height from font metrics
+- =variable-spacing--apply-ratio= :: =:apply= fn; receives =(spans)= list of =(beg end value)= triples
+- =variable-spacing--clear-ratio= :: =:clear= fn
+
+*** 5. Minor mode
+- =variable-spacing-mode= :: enable/disable; =text-scale-mode= advice
+
+*** 6. Registration (load time, after mode is defined)
+#+begin_src emacs-lisp
+(face-extra-define-property 'variable-spacing-ratio
+  :pass  1
+  :after nil
+  :apply #'variable-spacing--apply-ratio
+  :clear #'variable-spacing--clear-ratio)
+
+(face-extra-register-backend 'org-mode variable-spacing-org-backend)
+#+end_src
+
+** =org-sty.el= — minor updates only
+
+- Add =(require 'face-extra)=
+- =org-sty-remap=: replace hardcoded =:variable-spacing-ratio= special case with
+  generic =face-extra--registry= lookup:
+  - registered extra properties → =face-extra-add-relative=
+  - standard face attrs → =face-remap-add-relative=
+  - unknown keys → warn and skip
+- =org-sty--clear-face-remaps=: ='extra= teardown calls =face-extra-remove= directly
+
+** =org-title-fold.el=, =org-block-appear.el=, =org-sty-config.el=
+
+Untouched — except =org-sty-config.el= gains =:variable-spacing-ratio 0= on
+=org-block=, =org-quote=, =org-verse= once inheritance is implemented (Phase 4).
+
+* Implementation plan
+
+Each phase is a logical commit or small set of commits.
+Manual testing at each phase: load in a live Emacs session with a WP-tagged
+Org document; exercise spacing, style switching, =org-sty-mode= toggle,
+=org-sty-refresh=.
+
+** Phase 1 — Create =face-extra.el=: registry and install API only
+
+Build sections 1–3: registry, per-face cache data structures (stub — no
+dispatch yet), and public install API (=face-extra-add=,
+=face-extra-add-relative=, =face-extra-remove=). No after-fontify advice yet.
+
+=variable-spacing.el= and =org-sty.el= are completely unchanged.
+face-extra.el just exists and byte-compiles cleanly.
+
+*Verify:* loads without errors; byte-compiles with no warnings.
+
+** Phase 2 — Register =variable-spacing-ratio=; migrate install callers
+
+- Add =(require 'face-extra)= to =variable-spacing.el=
+- Register =variable-spacing-ratio= with =face-extra-define-property= at load time
+- Replace =variable-spacing-face-remap-add-extra= / =remove-extra= calls in
+  =org-sty.el= with =face-extra-add-relative= / =face-extra-remove= directly
+- =variable-spacing.el= still owns the dispatch loop — nothing changes there
+
+Side effect: fixes the subtle bug where two buffers with different ratios on
+the same face fight, since we move from global =put= to buffer-local
+=face-extra--local-properties=.
+
+*Verify:* existing WP functionality unchanged; style apply/clear/re-apply
+idempotent; cookie cleanup correct.
+
+** Phase 3 — Implement cache and dispatch; retire old loop
+
+- Implement =face-extra--resolve-property= — direct lookup only (local-properties
+  → global symbol property; no inheritance chain yet)
+- Implement =face-extra--build-cache-entry=, buffer-local cache, and invalidation
+- Implement =face-extra--dispatch= and wire up the after-fontify advice
+- Register the Org backend with face-extra for bare-text stamping
+- Remove dispatch loop and after-fontify advice from =variable-spacing.el=;
+  =variable-spacing--apply-ratio= now receives =(spans)= instead of =(beg end)=
+
+This is the riskiest phase — the dispatch handoff. Worth a dedicated test
+session before committing.
+
+*Verify:* spacing works as before; no regressions on WP documents.
+
+** Phase 4 — Full inheritance in the cache resolver
+
+- Extend =face-extra--resolve-property= to walk =face-remapping-alist= =:inherit=
+  chains and global =:inherit= attributes; add cycle guard via visited set
+- Update =org-sty-config.el=: add =:variable-spacing-ratio 0= to =org-block=,
+  =org-quote=, =org-verse= in =:faces= entries to suppress ratios inherited
+  from =text-body= through the content-face remap chain
+
+*Verify:* spacing propagates correctly through face inheritance;
+block/quote/verse faces do not pick up spurious spacing.
+
+** Phase 5 — Generalise =org-sty-remap=; update =org-sty--clear-face-remaps=
+
+- Add =(require 'face-extra)= to =org-sty.el=
+- Replace hardcoded =:variable-spacing-ratio= special case in =org-sty-remap=
+  with generic =face-extra--registry= lookup
+- =org-sty--clear-face-remaps=: ='extra= teardown calls =face-extra-remove= directly
+
+*Feature parity checkpoint — library behaviour fully equivalent to pre-branch.*
+
+*Verify:* all =:faces= entries work; style apply/refresh/disable fully idempotent.
+
+** Phase 6 — Drop =variable-spacing-face-remap-add-extra= / =remove-extra=
+
+Both functions should be unreferenced by this point. Remove them.
+Byte-compile all files and verify no warnings.
+
+*Verify:* clean byte-compile across all six files.
