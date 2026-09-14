@@ -40,6 +40,7 @@
 (require 'org)
 (require 'org-element)
 (require 'face-remap)
+(require 'face-extra)
 (require 'variable-spacing)
 
 (defgroup org-sty nil
@@ -63,9 +64,11 @@ Recognized plist keys:
                     `olivetti-mode' if it is installed).
   :faces           An alist of (FACE . ATTRS-PLIST) pairs installed as
                     buffer-local face remaps via `face-remap-add-relative'.
-                    The special pseudo-attribute `:variable-spacing-ratio'
-                    is routed to `variable-spacing-face-remap-add-extra'
-                    rather than the remap (requires `variable-spacing').
+                    Keys registered in `face-extra--registry' (e.g.
+                    `:variable-spacing-ratio') are automatically routed to
+                    `face-extra-add-relative' rather than the remap, so they
+                    are stored buffer-locally and cleaned up on re-apply.
+                    Unknown keys cause a warning and are skipped.
                     All remaps are tracked and removed on re-apply, so
                     re-applying a style is idempotent.  To perform face
                     remaps with runtime values, call `org-sty-remap'
@@ -142,9 +145,8 @@ apply to body text but not headings.")
 Each element is a cons cell whose car is either:
   `remap' — cdr is a cookie from `face-remap-add-relative',
              removed via `face-remap-remove-relative'.
-  `extra'  — cdr is a cookie from
-             `variable-spacing-face-remap-add-extra', removed via
-             `variable-spacing-face-remap-remove-extra'.
+  `extra'  — cdr is a cookie from `face-extra-add-relative',
+             removed via `face-extra-remove'.
 
 The list is cleared and rebuilt on each call to `org-sty-apply'.")
 
@@ -153,8 +155,7 @@ The list is cleared and rebuilt on each call to `org-sty-apply'.")
   (dolist (tagged org-sty--face-remap-cookies)
     (pcase (car tagged)
       ('remap (face-remap-remove-relative (cdr tagged)))
-      ('extra (when (fboundp 'variable-spacing-face-remap-remove-extra)
-                (variable-spacing-face-remap-remove-extra (cdr tagged))))))
+      ('extra (face-extra-remove (cdr tagged)))))
   (setq org-sty--face-remap-cookies nil))
 
 (defvar-local org-sty--eval-activated-modes nil
@@ -172,11 +173,14 @@ Recorded so `org-sty--disable' can turn them off cleanly.")
   "Install a buffer-local face remap for FACE using ATTRS, tracking the cookie.
 
 ATTRS is a plist of face attributes and values, as accepted by
-`face-remap-add-relative'.  The special pseudo-attribute
-`:variable-spacing-ratio' is handled separately: it is stripped from
-ATTRS and routed to `variable-spacing-face-remap-add-extra' (if
-`variable-spacing' is loaded), so that spacing ratios are stored as
-symbol properties and cleaned up correctly on re-apply.
+`face-remap-add-relative'.  Keys that are registered synthetic
+properties in `face-extra--registry' are stripped from ATTRS and
+routed to `face-extra-add-relative', so that their buffer-local values
+are stored in `face-extra--local-properties' and cleaned up correctly
+on re-apply.
+
+Unknown keys — those that are neither standard face attributes nor
+registered face-extra properties — cause a warning and are skipped.
 
 All cookies are pushed onto `org-sty--face-remap-cookies' and are
 removed automatically on the next `org-sty-apply' call, making
@@ -188,18 +192,40 @@ cases requiring runtime values or conditional logic:
   (org-sty-remap \\='org-quote
                  :slant \\='italic
                  :variable-spacing-ratio 1.0)"
-  (let ((ratio (plist-get attrs :variable-spacing-ratio))
-        (rest  (cl-loop for (k v) on attrs by #'cddr
-                        unless (eq k :variable-spacing-ratio)
-                        append (list k v))))
-    (when rest
-      (push (cons 'remap (apply #'face-remap-add-relative face rest))
+  ;; Partition ATTRS into:
+  ;;   extra-pairs  — keys registered in face-extra--registry
+  ;;   standard-attrs — all remaining keys (passed to face-remap-add-relative)
+  ;;
+  ;; Unknown keys (not a face attribute and not registered) are warned and
+  ;; dropped.  We accept all keywords as "standard" face attributes rather
+  ;; than maintaining a whitelist: face-remap-add-relative will signal its
+  ;; own error for truly invalid keys, which is a clearer error than ours.
+  (let ((extra-pairs nil)
+        (standard-attrs nil))
+    (cl-loop for (k v) on attrs by #'cddr
+             do (cond
+                 ((and (keywordp k)
+                       (gethash (intern (substring (symbol-name k) 1))
+                                face-extra--registry))
+                  ;; Registered face-extra property (the key is :foo, the
+                  ;; property symbol is foo).
+                  (push v extra-pairs)
+                  (push (intern (substring (symbol-name k) 1)) extra-pairs))
+                 ((keywordp k)
+                  ;; Treat as a standard face attribute.
+                  (push v standard-attrs)
+                  (push k standard-attrs))
+                 (t
+                  (message "org-sty-remap: unknown key %S for face %S — skipped"
+                           k face))))
+    (when standard-attrs
+      (push (cons 'remap
+                  (apply #'face-remap-add-relative face (nreverse standard-attrs)))
             org-sty--face-remap-cookies))
-    (when (and ratio (fboundp 'variable-spacing-face-remap-add-extra))
-      (push (cons 'extra
-                  (variable-spacing-face-remap-add-extra
-                   face 'variable-spacing-ratio ratio))
-            org-sty--face-remap-cookies))))
+    (cl-loop for (prop val) on (nreverse extra-pairs) by #'cddr
+             do (push (cons 'extra
+                            (face-extra-add-relative face prop val))
+                      org-sty--face-remap-cookies))))
 
 (defun org-sty--apply-faces (plist)
   "Apply the `:faces' alist from PLIST via `org-sty-remap'."

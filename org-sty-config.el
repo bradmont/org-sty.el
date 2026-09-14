@@ -65,8 +65,17 @@
          (org-verbatim        . (:inherit (shadow fixed-pitch)))
          ;; Prose blocks: italic.  Background is theme-relative so it is
          ;; set via `org-sty-remap' in :eval below.
-         (org-quote           . (:slant italic ))
-         (org-verse           . (:slant italic )))
+         ;;
+         ;; :variable-spacing-ratio 0 suppresses any ratio that would be
+         ;; picked up through face inheritance (e.g. org-block/org-quote/
+         ;; org-verse each receive a (:inherit text-body) remap in WP
+         ;; buffers, which would carry the text-body ratio through).  Using
+         ;; 0 as the explicit suppressor value stops the resolver at level 1
+         ;; (buffer-local face-extra--local-properties) before it reaches
+         ;; the inherited chain.
+         (org-quote           . (:slant italic :variable-spacing-ratio 0))
+         (org-verse           . (:slant italic :variable-spacing-ratio 0))
+         (org-block           . (:variable-spacing-ratio 0)))
         :eval
         ((org-sty-remap
           'org-block
