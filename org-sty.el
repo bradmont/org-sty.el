@@ -208,9 +208,11 @@ cases requiring runtime values or conditional logic:
                        (gethash (intern (substring (symbol-name k) 1))
                                 face-extra--registry))
                   ;; Registered face-extra property (the key is :foo, the
-                  ;; property symbol is foo).
-                  (push v extra-pairs)
-                  (push (intern (substring (symbol-name k) 1)) extra-pairs))
+                  ;; property symbol is foo).  Push prop then value so that
+                  ;; after nreverse the list is (prop val prop val ...) and
+                  ;; the cl-loop `for (prop val) on ...' destructures correctly.
+                  (push (intern (substring (symbol-name k) 1)) extra-pairs)
+                  (push v extra-pairs))
                  ((keywordp k)
                   ;; Treat as a standard face attribute.
                   (push v standard-attrs)

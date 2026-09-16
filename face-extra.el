@@ -389,7 +389,9 @@ VISITED is a hash table of already-examined face symbols."
               (when val
                 (cl-return-from face-extra--resolve-property-1 val)))))))
     ;; Level 4: global face :inherit attribute.
-    (let ((global-inherit (face-attribute face :inherit t)))
+    ;; Guard with facep: in batch mode or early init, unknown faces would
+    ;; signal "Invalid face" from face-attribute.
+    (let ((global-inherit (and (facep face) (face-attribute face :inherit t))))
       (when (and global-inherit (not (eq global-inherit 'unspecified)))
         (let ((ifaces (if (symbolp global-inherit)
                           (list global-inherit)
