@@ -441,7 +441,7 @@ Returns the entry plist, which is also stored in `face-extra--face-cache'."
 ;;;; ------ Dispatch ------
 
 (defun face-extra--collect-spans (beg end)
-  "Scan BEG..END and return a plist of per-property span lists.
+  "Scan BEG..END and return a hash table of per-property span lists.
 
 Returns a hash table mapping property-symbol → list of (beg end value)
 triples.  Only properties that appear at least once in the region are
@@ -449,7 +449,14 @@ present in the table.
 
 Scans by face-boundary steps (minimum of `face' and `font-lock-face'
 change points), looks up each leading face in the cache, and collects
-triples for any properties found."
+triples for any properties found.
+
+Suppressor-wins semantics: if ANY face in the face list at a position
+has an explicit local suppressor (value 0 in
+`face-extra--local-properties') for a property, that property is NOT
+collected from any face at that position.  This prevents a stale
+`text-body' stamp alongside a suppressed face (e.g. `org-quote') from
+leaking the `text-body' ratio through."
   (let ((spans (make-hash-table :test #'eq))
         (pos beg))
     (while (< pos end)
@@ -460,23 +467,36 @@ triples for any properties found."
              ;; fall back to face (set by Org anchor functions).
              (f            (or (get-text-property pos 'font-lock-face)
                                (get-text-property pos 'face))))
-        ;; For lists of faces use the first symbol that has any registered
-        ;; property.  For single-face spans resolve directly.
+        ;; For lists of faces use all symbols; for single-face spans wrap.
         (let ((faces (cond
                       ((null f)      nil)
                       ((symbolp f)   (list f))
                       ((and (consp f) (keywordp (car f))) nil) ; anon plist
-                      ((listp f)     f)
+                      ((listp f)     (cl-remove-if-not #'symbolp f))
                       (t             nil))))
-          (dolist (face faces)
-            (when (symbolp face)
-              (let ((entry (face-extra--get-cache-entry face)))
-                (dolist (pass-key '(:pass1 :pass2 :pass3))
-                  (dolist (triple (plist-get entry pass-key))
-                    (let ((prop     (nth 0 triple))
-                          (val      (nth 1 triple)))
-                      (push (list pos next val)
-                            (gethash prop spans)))))))))
+          (when faces
+            ;; Build a set of properties explicitly suppressed (value = 0 in
+            ;; local-properties) by ANY face in the list at this position.
+            ;; A suppressor on one face cancels contributions from all others.
+            (let ((suppressed
+                   (when face-extra--local-properties
+                     (let (supp)
+                       (dolist (face faces)
+                         (maphash
+                          (lambda (key val)
+                            (when (and (eq (car key) face) (eql val 0))
+                              (cl-pushnew (cdr key) supp)))
+                          face-extra--local-properties))
+                       supp))))
+              (dolist (face faces)
+                (let ((entry (face-extra--get-cache-entry face)))
+                  (dolist (pass-key '(:pass1 :pass2 :pass3))
+                    (dolist (triple (plist-get entry pass-key))
+                      (let ((prop (nth 0 triple))
+                            (val  (nth 1 triple)))
+                        (unless (memq prop suppressed)
+                          (push (list pos next val)
+                                (gethash prop spans)))))))))))
         (setq pos next)))
     spans))
 

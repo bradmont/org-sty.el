@@ -497,33 +497,36 @@ once per dispatch cycle with all collected triples; applies
 `variable-spacing--prop' text properties.
 
 Stale spacing from a previous cycle is cleared before application.
-Only active in buffers where `variable-spacing-mode' is on."
+Only active in buffers where `variable-spacing-mode' is on.
+
+The spacer pixel height is always measured from `text-body', not from
+the face at each span position.  In the old spacing pass the ratio was
+only ever set directly on `text-body', so measurement was always from
+`text-body'.  In the new dispatch, content faces like `org-level-1'
+and `org-cite' pick up the ratio via (:inherit text-body) remap
+chains, but the spacer should still reflect the canonical body-text
+line height so that visual rhythm is consistent across all elements."
   (when (bound-and-true-p variable-spacing-mode)
     (with-silent-modifications
-      ;; Compute the union of affected regions and clear stale spacers.
-      ;; (variable-spacing-clear over each triple's range is correct
-      ;; but may be called on overlapping ranges; that's harmless.)
+      ;; Clear stale spacers for every span first.
       (dolist (span spans)
         (variable-spacing-clear (nth 0 span) (nth 1 span)))
-      ;; Apply spacers.
-      (dolist (span spans)
-        (let* ((beg   (nth 0 span))
-               (end   (nth 1 span))
-               (ratio (nth 2 span)))
-          (when (and (numberp ratio) (> ratio 0))
-            ;; Determine the face at BEG for the spacer metric; fall back
-            ;; to text-body if nothing is set.
-            (let* ((f      (or (get-text-property beg 'font-lock-face)
-                               (get-text-property beg 'face)
-                               'text-body))
-                   (face   (if (symbolp f) f
-                             (if (and (listp f) (symbolp (car f)))
-                                 (car f)
-                               'text-body)))
-                   (spacer (variable-spacing--spacer ratio face)))
-              (put-text-property beg end 'line-prefix spacer)
-              (put-text-property beg end 'wrap-prefix spacer)
-              (put-text-property beg end variable-spacing--prop t))))))))
+      ;; Apply new spacers, always measuring height from `text-body'.
+      ;; Cache the spacer per distinct ratio to avoid redundant font queries.
+      (let ((cache nil))
+        (dolist (span spans)
+          (let ((beg   (nth 0 span))
+                (end   (nth 1 span))
+                (ratio (nth 2 span)))
+            (when (and (numberp ratio) (> ratio 0))
+              (let ((spacer (or (cdr (assoc ratio cache))
+                                (let ((s (variable-spacing--spacer
+                                          ratio 'text-body)))
+                                  (push (cons ratio s) cache)
+                                  s))))
+                (put-text-property beg end 'line-prefix spacer)
+                (put-text-property beg end 'wrap-prefix spacer)
+                (put-text-property beg end variable-spacing--prop t)))))))))
 
 (defun variable-spacing--clear-ratio (_cookie)
   "No-op :clear function for `variable-spacing-ratio' registration.

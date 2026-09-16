@@ -75,6 +75,31 @@
       (should-not (vs-test--has-spacer-p 6))  ; gap between spans
       (should-not (vs-test--has-spacer-p 12)))))
 
+(ert-deftest vs/apply-ratio/uses-text-body-for-measurement ()
+  "apply-ratio always measures spacer height from text-body, not the face
+at the span position.  This ensures consistent visual rhythm regardless
+of which face inherited the ratio.
+
+Regression test for: org-cite got 24px spacer while text-body got 30px,
+because the old code used the face at BEG (org-cite) to measure height."
+  (vs-test--with-buffer
+    ;; Two spans: one labelled with org-cite face, one with text-body.
+    ;; Even though the faces differ, both spans with the same ratio
+    ;; must produce the SAME line-prefix spec.
+    (insert "cite textbody")
+    (put-text-property 1 5 'face 'org-cite)
+    (put-text-property 6 14 'face 'text-body)
+    (let ((variable-spacing-mode t))
+      (variable-spacing--apply-ratio
+       (list (list 1 5 1.6)
+             (list 6 14 1.6)))
+      (let ((pfx-cite    (vs-test--line-prefix-at 1))
+            (pfx-body    (vs-test--line-prefix-at 6)))
+        (should pfx-cite)
+        (should pfx-body)
+        ;; Both specs are `(space :width 0 :height (N)) with the same N.
+        (should (equal pfx-cite pfx-body))))))
+
 (ert-deftest vs/apply-ratio/clears-stale-spacers ()
   "apply-ratio removes old spacers within given spans before re-applying.
 
