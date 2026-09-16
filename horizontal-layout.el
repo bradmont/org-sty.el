@@ -68,8 +68,12 @@ Used by `horizontal-layout-clear' to remove exactly this package's
 display properties without disturbing Org's or other packages' uses of
 `line-prefix'/`wrap-prefix'.")
 
-(defun horizontal-layout--compose-prefix (width-px existing-prefix)
-  "Return a display spec combining WIDTH-PX with EXISTING-PREFIX's :height.
+(defun horizontal-layout--compose-prefix (width existing-prefix)
+  "Return a display spec combining WIDTH with EXISTING-PREFIX's :height.
+
+WIDTH is the left margin in canonical character widths — a number N
+means N times the width of a space character in the current font.  This
+unit scales naturally with `text-scale-mode'.
 
 EXISTING-PREFIX is the current `line-prefix' text-property value at a
 position — expected to be a `(space ...)' spec written by
@@ -77,19 +81,39 @@ position — expected to be a `(space ...)' spec written by
 run at this position.
 
 If EXISTING-PREFIX carries a `:height' component it is preserved in the
-returned spec so that vertical rhythm is not disturbed.  If WIDTH-PX is
+returned spec so that vertical rhythm is not disturbed.  If WIDTH is
 0 or nil, returns nil (no prefix needed).
 
 This implements the pass-1/pass-2 composition contract:
   pass 1 writes  (space :width 0  :height (Npx))
-  pass 2 returns (space :width Mpx :height (Npx))  ; height unchanged"
-  (when (and (numberp width-px) (> width-px 0))
+  pass 2 returns (space :width W  :height (Npx))  ; height unchanged"
+  (when (and (numberp width) (> width 0))
     (let ((height (and (consp existing-prefix)
                        (eq (car existing-prefix) 'space)
                        (plist-get (cdr existing-prefix) :height))))
       (if height
-          `(space :width (,width-px) :height ,height)
-        `(space :width (,width-px))))))
+          `(space :width ,width :height ,height)
+        `(space :width ,width)))))
+
+(defun horizontal-layout--block-start-p (beg)
+  "Return non-nil if BEG is the first content character of a hidden block.
+
+`org-block-appear-mode' hides the #+begin_ delimiter line including its
+trailing \\n.  That \\n belongs to the `org-block-begin-line' face span,
+not to the content face span, so the content span starts at the first
+real content character (BEG).
+
+When that \\n is invisible the screen line technically starts at the
+hidden `#' of #+begin_, not at BEG.  BEG is not the screen-line-start
+character even though it is the first visible character on the line, so
+`line-prefix' on BEG does not fire.  An overlay `before-string' on BEG
+fires unconditionally and appears as the leading visible content on that
+screen line, providing the desired indent.
+
+Detection: the character immediately before BEG is an invisible \\n."
+  (and (> beg (point-min))
+       (eq (char-before beg) ?\n)
+       (get-text-property (1- beg) 'invisible)))
 
 (defun horizontal-layout--strip-width (prefix)
   "Return PREFIX with the `:width' component zeroed, or nil.
@@ -136,7 +160,11 @@ present."
                                                    wrap-prefix nil))))
             (remove-text-properties pos next
                                     (list horizontal-layout--prop nil)))
-          (setq pos next))))))
+          (setq pos next)))
+    ;; Remove block-start indent overlays in the range.
+    (dolist (ov (overlays-in beg end))
+      (when (overlay-get ov horizontal-layout--prop)
+        (delete-overlay ov))))))
 
 
 ;;;; ================================================================
@@ -144,16 +172,26 @@ present."
 ;;;; ================================================================
 
 (defun horizontal-layout--apply-margin-left (spans)
-  "Apply left-margin pixel spacers for SPANS collected by face-extra.
+  "Apply left-margin character-width spacers for SPANS collected by face-extra.
 
 SPANS is a list of (beg end value) triples where VALUE is the left
-margin width in pixels.  Called once per dispatch cycle with all
-collected triples for `horizontal-layout-margin-left'.
+margin width in canonical character widths (N = N × space-char width,
+scales with `text-scale-mode').  Called once per dispatch cycle.
 
 Stale margins are cleared before re-application.  For each character
 position in a span, the existing `line-prefix' (from pass 1) is read
 and its `:height' preserved in the composed spec.  See
 `horizontal-layout--compose-prefix'.
+
+Block-start detection: when the character immediately before the span's
+BEG is an invisible \\n (hidden by `org-block-appear-mode'), BEG is not
+at a screen-line start when the block is hidden, so `line-prefix' on BEG
+would not fire.  An overlay `before-string' is used instead: it fires
+unconditionally and appears as the leading visible content on the screen
+line.  BEG is excluded from the `line-prefix' loop to avoid double-indent
+when the block is revealed.  All other characters — including \\n
+characters that separate paragraphs within the block — receive
+`line-prefix' normally.
 
 Only runs when `horizontal-layout-mode' is active in the current buffer."
   (when (bound-and-true-p horizontal-layout-mode)
@@ -167,23 +205,38 @@ Only runs when `horizontal-layout-mode' is active in the current buffer."
               (end   (nth 1 span))
               (width (nth 2 span)))
           (when (and (numberp width) (> width 0))
-            ;; Walk by line-prefix change boundaries so we compose
-            ;; correctly at each distinct height-spacer run.
-            (let ((pos beg))
-              (while (< pos end)
-                (let* ((next     (min end
-                                      (or (next-single-property-change
-                                           pos 'line-prefix nil end)
-                                          end)))
-                       (existing (get-text-property pos 'line-prefix))
-                       (prefix   (horizontal-layout--compose-prefix
-                                  width existing)))
-                  (when prefix
-                    (put-text-property pos next 'line-prefix  prefix)
-                    (put-text-property pos next 'wrap-prefix  prefix)
-                    (put-text-property pos next
-                                       horizontal-layout--prop t))
-                  (setq pos next))))))))))
+            ;; Detect block-start: the char immediately before beg is an
+            ;; invisible \n (hidden by org-block-appear).  In that case beg
+            ;; is not at a screen-line start when the block is hidden, so
+            ;; line-prefix on beg would not fire.  Use an overlay
+            ;; before-string instead: it fires unconditionally and appears
+            ;; as the leading visible content on the screen line.  When the
+            ;; block is revealed the before-string still fires correctly, so
+            ;; we do NOT also set line-prefix on beg (that would
+            ;; double-indent when revealed).
+            (let ((block-start-p (horizontal-layout--block-start-p beg)))
+              (when (and block-start-p (< beg end))
+                (let ((ov (make-overlay beg (1+ beg))))
+                  (overlay-put ov horizontal-layout--prop t)
+                  (overlay-put ov 'before-string
+                               (propertize " " 'display
+                                           `(space :width ,width)))))
+              ;; Walk from beg+1 (block-start) or beg (regular span).
+              (let ((pos (if block-start-p (1+ beg) beg)))
+                (while (< pos end)
+                  (let* ((next     (min end
+                                        (or (next-single-property-change
+                                             pos 'line-prefix nil end)
+                                            end)))
+                         (existing (get-text-property pos 'line-prefix))
+                         (prefix   (horizontal-layout--compose-prefix
+                                    width existing)))
+                    (when prefix
+                      (put-text-property pos next 'line-prefix  prefix)
+                      (put-text-property pos next 'wrap-prefix  prefix)
+                      (put-text-property pos next
+                                         horizontal-layout--prop t))
+                    (setq pos next)))))))))))
 
 (defun horizontal-layout--clear-margin-left (_cookie)
   "No-op `:clear' callback for `horizontal-layout-margin-left'.

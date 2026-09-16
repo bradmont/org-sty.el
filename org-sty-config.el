@@ -74,9 +74,9 @@
          ;; (buffer-local face-extra--local-properties) before it reaches
          ;; the inherited chain.
          (org-quote           . (:slant italic :variable-spacing-ratio 0
-                                 :horizontal-layout-margin-left 40))
+                                 :horizontal-layout-margin-left 4))
          (org-verse           . (:slant italic :variable-spacing-ratio 0
-                                 :horizontal-layout-margin-left 40))
+                                 :horizontal-layout-margin-left 4))
          (org-block           . (:variable-spacing-ratio 0)))
         :eval
         ((org-sty-remap

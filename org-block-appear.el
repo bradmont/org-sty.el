@@ -75,18 +75,8 @@ which uses a different, colon-terminated header syntax that the
 regexps below don't match.")
 
 (defconst org-block-appear--begin-re
-  "^[ \t]*#\\+begin_[a-zA-Z_-]+.*"
-  "Matches a #+begin_ delimiter line, not including its trailing newline.
-
-The trailing newline is intentionally excluded so that it remains
-visible and Emacs treats it as a normal screen-line break.  This
-ensures that any `line-prefix' display property set on the first
-content character (e.g. a left margin from `horizontal-layout-mode')
-is shown correctly: `line-prefix' only fires at the start of a screen
-line, and an invisible \\n does not end a display line.
-
-Contrast with `org-block-appear--end-re', which uses \\n? for the
-end-of-file case where the last line may have no newline.")
+  "^[ \t]*#\\+begin_[a-zA-Z_-]+.*\n"
+  "Matches a #+begin_ delimiter line, including its trailing newline.")
 
 (defconst org-block-appear--end-re
   "^[ \t]*#\\+end_[a-zA-Z_-]+.*\n?"
