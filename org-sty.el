@@ -214,9 +214,11 @@ cases requiring runtime values or conditional logic:
                   (push (intern (substring (symbol-name k) 1)) extra-pairs)
                   (push v extra-pairs))
                  ((keywordp k)
-                  ;; Treat as a standard face attribute.
-                  (push v standard-attrs)
-                  (push k standard-attrs))
+                  ;; Treat as a standard face attribute.  Push k then v
+                  ;; so that after nreverse the list is (k v k v ...) —
+                  ;; the correct plist order for face-remap-add-relative.
+                  (push k standard-attrs)
+                  (push v standard-attrs))
                  (t
                   (message "org-sty-remap: unknown key %S for face %S — skipped"
                            k face))))

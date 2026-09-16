@@ -43,6 +43,30 @@
     ;; Clean up.
     (org-sty--clear-face-remaps)))
 
+(ert-deftest os/remap/standard-attrs-plist-order-correct ()
+  "Standard face attributes must be passed to face-remap-add-relative in
+correct plist order (k v k v ...), not reversed (v k v k ...).
+
+Regression test for: org-level-1 got remap spec (bold :weight 1.4 :height)
+instead of (:weight bold :height 1.4), causing headings to display at
+floor height with no theme colours."
+  (os-test--with-buffer
+    ;; Remap with TWO standard attributes.
+    (org-sty-remap 'os-test-face-a :weight 'bold :height 1.4)
+    (should (= 1 (length org-sty--face-remap-cookies)))
+    ;; Inspect the face-remapping-alist entry for os-test-face-a.
+    (let* ((entry    (assq 'os-test-face-a face-remapping-alist))
+           ;; The remap list has the form (FACE SPEC ... ORIG-FACE).
+           ;; Our spec is the first entry after the face symbol.
+           (spec     (cadr entry)))
+      ;; The spec must be a plist starting with a keyword, not a symbol.
+      (should (keywordp (car spec)))
+      ;; :weight must map to the symbol bold, not a number.
+      (should (eq 'bold (plist-get spec :weight)))
+      ;; :height must be the float 1.4.
+      (should (eql 1.4 (plist-get spec :height))))
+    (org-sty--clear-face-remaps)))
+
 (ert-deftest os/remap/registered-property-produces-extra-cookie ()
   "A registered face-extra property (:variable-spacing-ratio) produces an 'extra cookie."
   (os-test--with-buffer
