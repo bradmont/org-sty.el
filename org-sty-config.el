@@ -73,8 +73,10 @@
          ;; 0 as the explicit suppressor value stops the resolver at level 1
          ;; (buffer-local face-extra--local-properties) before it reaches
          ;; the inherited chain.
-         (org-quote           . (:slant italic :variable-spacing-ratio 0))
-         (org-verse           . (:slant italic :variable-spacing-ratio 0))
+         (org-quote           . (:slant italic :variable-spacing-ratio 0
+                                 :horizontal-layout-margin-left 40))
+         (org-verse           . (:slant italic :variable-spacing-ratio 0
+                                 :horizontal-layout-margin-left 40))
          (org-block           . (:variable-spacing-ratio 0)))
         :eval
         ((org-sty-remap
@@ -104,6 +106,7 @@
                    ;(lsp-ltex-plus-mode 1)
                    (org-block-appear-mode 1)
                    (variable-spacing-mode 1)
+                   (horizontal-layout-mode 1)
                    (org-title-fold-mode 1)
                    ;; Style heading numbers to match their heading level face.
                    (setq-local org-num-format-function

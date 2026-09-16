@@ -18,6 +18,7 @@ SUITES=(
     test/test-face-extra.el
     test/test-variable-spacing.el
     test/test-org-sty.el
+    test/test-horizontal-layout.el
 )
 
 FAILED=0
