@@ -123,18 +123,48 @@ for a single global override, or to an alist of (FRAME . FLOAT) for
 per-frame overrides when multiple monitors with different densities are
 in use.")
 
+(defcustom page-metrics-fallback-dpi 96.0
+  "Fallback screen DPI when monitor geometry cannot be determined.
+Applied when `frame-monitor-attributes' returns no usable mm-size, or
+when the derived ratio exceeds a sanity ceiling (20 px/mm = 508 dpi).
+96 dpi is a conservative default for typical screens.  Adjust to match
+your actual display if physical measurement accuracy matters, or set
+`page-metrics-dpi-override' for per-frame calibration."
+  :type 'float
+  :group 'page-metrics)
+
 (defun page-metrics--px-per-mm (&optional frame)
   "Return pixels per millimetre for FRAME.
-Consults `page-metrics-dpi-override' before falling back to the display
-geometry reported by the system."
-  (or (cond
-       ((null page-metrics-dpi-override) nil)
-       ((listp page-metrics-dpi-override)
-        (cdr (assq (or frame (selected-frame))
-                   page-metrics-dpi-override)))
-       (t page-metrics-dpi-override))
-      (/ (float (display-pixel-width  frame))
-         (display-mm-width frame))))
+Resolution order:
+  1. `page-metrics-dpi-override' — a float or (FRAME . FLOAT) alist.
+  2. Per-monitor geometry from `frame-monitor-attributes': the logical
+     pixel width of the monitor containing FRAME divided by its physical
+     mm width.  More reliable than `display-pixel-width'/`display-mm-width'
+     on multi-monitor setups where the display-level functions conflate
+     all monitors (total pixel width vs. one panel's mm width).
+  3. `page-metrics-fallback-dpi' converted to px/mm.
+
+A sanity ceiling of 20 px/mm (≈508 dpi) is applied to the auto-detected
+value; anything above it falls through to the next source.  This catches
+cases where the compositor reports 0 mm or an implausibly small value."
+  (let ((f (or frame (selected-frame))))
+    (or (cond
+         ((null page-metrics-dpi-override) nil)
+         ((listp page-metrics-dpi-override)
+          (cdr (assq f page-metrics-dpi-override)))
+         (t page-metrics-dpi-override))
+        ;; Per-monitor: geometry gives logical px for this monitor only;
+        ;; mm-size gives the physical dimensions of this monitor only.
+        (let* ((attrs  (frame-monitor-attributes f))
+               (geo    (alist-get 'geometry attrs)) ; (x y w h) logical px
+               (mm     (alist-get 'mm-size  attrs)) ; (w-mm h-mm)
+               (px-w   (and geo (nth 2 geo)))
+               (mm-w   (and mm  (car mm)))
+               (ratio  (and px-w mm-w (> mm-w 0)
+                            (/ (float px-w) mm-w))))
+          (and ratio (< ratio 20.0) ratio))
+        ;; Fallback.
+        (/ page-metrics-fallback-dpi 25.4))))
 
 
 ;;;; ================================================================
