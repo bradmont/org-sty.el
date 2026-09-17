@@ -21,6 +21,8 @@
 
 ;;; Code:
 
+(require 'page-metrics)
+
 ;; ---------------------------------------------------------------------------
 ;; Default style (applies to all Org buffers as a base layer)
 ;; ---------------------------------------------------------------------------
@@ -101,6 +103,18 @@
 ;; it over the tag list.
 
 (let* ((wp-eval '(progn
+                   ;; ── Page geometry ───────────────────────────────────────
+                   ;; Buffer-local; page-metrics-apply reads these when
+                   ;; page-metrics-mode is enabled below.
+                   (setq-local page-metrics-page-size      'a4)
+                   (setq-local page-metrics-margin-top     25.0)
+                   (setq-local page-metrics-margin-bottom  25.0)
+                   (setq-local page-metrics-margin-left    30.0)
+                   (setq-local page-metrics-margin-right   25.0)
+                   ;; Fancy olivetti: fringes for the desktop area,
+                   ;; margins for the in-page left/right gutter.
+                   (setq-local olivetti-style 'fancy)
+                   ;; ── Mode enables ────────────────────────────────────────
                    (put 'text-body 'variable-spacing-ratio 1.6)
                    (hl-line-mode 0)
                    ;(lsp-ltex-plus-mode 1)
@@ -108,7 +122,13 @@
                    (variable-spacing-mode 1)
                    (horizontal-layout-mode 1)
                    (org-title-fold-mode 1)
-                   ;; Style heading numbers to match their heading level face.
+                   ;; page-metrics-mode enables olivetti-mode and calls
+                   ;; page-metrics-apply, which derives olivetti-body-width
+                   ;; and olivetti-margin-width from the physical page model
+                   ;; above.  Must come after variable-spacing-mode so the
+                   ;; font remap is in place and frame-char-width is correct.
+                   (page-metrics-mode 1)
+                   ;; ── Heading numbers ─────────────────────────────────────
                    (setq-local org-num-format-function
                                (lambda (numbering)
                                  (propertize
@@ -119,7 +139,7 @@
                      (org-num-mode -1)
                      (org-num-mode 1))))
        (wp-style `(:font "Times New Roman"
-                   :num-level 3 :indent nil :olivetti-width 68
+                   :num-level 3 :indent nil
                    :eval ,wp-eval)))
   (setq org-sty-alist
         (mapcar (lambda (tag) (cons tag wp-style))
