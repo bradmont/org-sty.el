@@ -665,3 +665,191 @@ in `:eval` are now an anti-pattern.
   requires a recent Org (9.5+ for reliable cache behaviour).
 - All files use `lexical-binding` and standard `cl-lib`; no Emacs version
   below 27 is supported.
+
+---
+
+## Page layout — design decisions
+
+Decisions recorded from design session. Not yet implemented.
+
+### Physical measurements (`page-metrics.el`)
+
+All user-facing measurements are expressed in **mm, pt, or inches**.  Pixels
+are an internal derived quantity.  A new `page-metrics.el` module is the
+single source of truth for all physical → pixel conversions; no other module
+does raw DPI arithmetic.
+
+```elisp
+(page-metrics-mm-to-px mm &optional frame)
+(page-metrics-pt-to-px pt &optional frame)   ; face :height = (* 10 pt)
+(page-metrics-in-to-px in &optional frame)
+(page-metrics-px-to-mm px &optional frame)
+(page-metrics-char-width-px &optional frame) ; default face char width in px
+```
+
+All functions accept an optional `frame` argument so they work correctly on
+multi-monitor setups where DPI varies per display.  Measurements are
+recomputed on `move-frame-functions` (monitor change) and
+`window-size-change-functions` (geometry change).
+
+**DPI source:** `(/ (display-pixel-width frame) (display-mm-width frame))`.
+This is unreliable on X11 (often reports 96 dpi regardless of actual
+screen).  A user-overridable `page-metrics-dpi-override` per frame should be
+provided so the user can supply the real physical DPI.
+
+**Char-width rounding:** fill-column and character-column measurements are
+derived from pixels by dividing by `(frame-char-width frame)`.  All rounding
+happens at the conversion boundary inside `page-metrics.el`; internal
+calculations stay in pixels as long as possible.
+
+### Page width and wrapping
+
+**Foundation: `olivetti-mode`.**  Olivetti already handles centering a
+fixed-width body in the window and degrades gracefully when the window is
+narrower than the body.  It is the foundation for page-width control rather
+than a replacement.  The page-layout layer feeds Olivetti a body width
+derived from physical measurements:
+
+```elisp
+(setq olivetti-body-width
+      (page-metrics-mm-to-cols text-area-mm frame))
+; where mm-to-cols = (round (/ (mm-to-px mm frame) (char-width-px frame)))
+```
+
+When the declared font size or zoom level changes, `olivetti-body-width` is
+recomputed and reapplied.  The `text-scale-mode` advice already present in
+`variable-spacing-mode` is the natural hook for this recalculation.
+
+If Olivetti's character-column approach proves too coarse for the required
+physical precision, the option is to **fork Olivetti** to accept a pixel
+width directly rather than a column count, eliminating the char-width
+rounding.  Prefer using Olivetti as-is first.
+
+**Do not replace `right-margin-width` / `set-window-margins` with a
+from-scratch implementation** when Olivetti already handles centering,
+margin maintenance, and window-resize behaviour correctly.
+
+### Window narrower than the page
+
+**First choice — revert to non-paginated view.**  When
+`window-pixel-width < page-pixel-width` (i.e. Olivetti cannot maintain the
+declared body width), pagination is disabled for that window and a
+mode-line indicator or message informs the user.  The document remains fully
+editable; only the page-break overlay and footnote-zone rendering are
+suppressed.  Non-paginated view is the same as the current `variable-spacing`
++ `horizontal-layout` baseline.
+
+**Re-enabling pagination.**  The user controls zoom via `text-scale-mode`
+(decreasing zoom reduces the effective pixel width of the body).  After each
+`text-scale-mode` change the page-layout layer checks whether the window is
+now wide enough for the current body width and, if so, automatically
+re-enables pagination without prompting.  The check also fires on
+`window-size-change-functions`.
+
+**Second choice — auto-fit zoom.**  If it becomes desirable to stay in
+paginated view at all times, zoom can be computed as
+`window-pixel-width / page-pixel-width` and applied as a buffer-local face
+height multiplier on `default`.  Because scaling is uniform, fill-column in
+characters is invariant (the zoom factor cancels in
+`text-area-px / char-width-px`), so line breaks do not change.  This is
+complex to wire correctly and is deferred until the first choice proves
+insufficient.
+
+**Horizontal scroll is not an option.**  Emacs's `word-wrap` always fires at
+the window text-area boundary.  There is no mechanism to make it wrap at a
+column wider than the window.  `truncate-lines t` removes wrapping entirely
+and does not provide a fixed wider wrap point.  This was investigated and
+confirmed at the C display-engine level (`it->last_visible_x` in `xdisp.c`).
+
+### Page background and chrome
+
+**Desktop / page separation.**  `default` face is remapped buffer-locally to
+the desktop colour (gray).  A low-priority buffer-spanning overlay with
+`:extend t` paints the text area page-white.  Fringe face is remapped
+buffer-locally to the desktop colour.  Margin areas inherit from `default`
+and therefore show the desktop colour without additional work.
+
+**Left border.**  `line-prefix` and `wrap-prefix` are set to a propertized
+border character (e.g. `▏`) appearing at the left edge of the text area on
+every screen line, including continuations.
+
+**Right border.**  No clean solution: Emacs has no `line-suffix` text
+property.  Deferred.  Options when revisited: fringe bitmap at the inner
+edge of the right fringe, or per-line `after-string` overlays (expensive).
+
+**Document zoom** is separate from `text-scale-mode`.  `text-scale-mode`
+remains the user's accessibility/preference control.  Document zoom is a
+multiplier on the style's declared font size, either auto-computed (auto-fit)
+or user-pinned (100% view).
+
+### Pagination — prerequisite
+
+**Fix `variable-spacing--spacer` off-screen height before implementing
+pagination.**  Replace the `frame-char-height` fallback with: effective face
+`:height` resolved from `face-remapping-alist` → converted to px via frame
+DPI × `variable-spacing-ratio`.  This must work for arbitrary buffer
+positions with no window.  Pagination requires reliable cumulative line
+heights across the entire buffer, including off-screen content.
+
+### Page break and footnote zone rendering
+
+**First choice — monolithic overlays + `pixel-scroll-precision-mode`.**
+Page breaks are thin overlays (a few display lines) at the break position in
+the buffer.  The footnote zone is a single `before-string` overlay containing
+all footnote content for that page.  `pixel-scroll-precision-mode` (Emacs
+29+) scrolls through large display elements incrementally and resolves the
+scroll-jerk issue that monolithic overlays otherwise cause.  This is the
+lowest-complexity approach and the correct starting point.
+
+**Second choice — ephemeral anchor characters.**  If `pixel-scroll-precision-mode`
+is insufficient (e.g. Emacs < 29, or very dense footnote pages), insert N
+characters from the Unicode private-use area (U+E000–U+F8FF) just before the
+page break — one per footnote display line.  Each character:
+
+- Has `(display "")` — invisible in the buffer
+- Is inserted with `(let ((buffer-undo-list t) (inhibit-modification-hooks t)) ...)`
+  so it is absent from undo history and does not trigger Org's change hooks
+- Carries a single-line `before-string` overlay with one line of footnote content
+- Is marked with an `org-sty-ephemeral` text property
+
+N independent one-line overlays at N distinct buffer positions scroll
+smoothly because the display engine handles each as a separate display line.
+
+**Ephemeral characters must never reach disk.**  A `write-file-functions`
+hook collects the buffer string, strips all characters bearing the
+`org-sty-ephemeral` property, and writes the stripped content to disk,
+returning `t` to suppress the normal save.  Autosave is disabled
+buffer-locally (`(setq-local auto-save-default nil)`) to avoid the autosave
+path bypassing the hook.
+
+Use **non-newline** private-use characters, not `\n`.  Org's parser treats
+extra `\n` characters as paragraph separators; private-use characters in a
+text run are ignored by Org's structural parser.
+
+**Footnote side window (UX fallback).**  If overlay-based footnote rendering
+proves unworkable, a dedicated split window below the body window shows the
+current page's footnotes in a separate buffer updated by a
+`window-scroll-functions` hook.  This gives correct scrolling performance at
+the cost of showing only one page's footnotes at a time, with a visible snap
+at page boundaries.
+
+**Child frame per page (long-term / exploratory).**  Each page is a child
+frame of fixed pixel dimensions, split into header / body / footnote /
+footer windows.  A pool of ~3 frames is recycled as the user scrolls (virtual
+scroll view).  Correct scrolling and footnote placement at no overlay cost.
+Requires: pagination as a prerequisite, a custom scroll-event model
+(replacing Emacs's built-in), and careful focus/input routing.  Not planned
+for near-term implementation; noted here so the architecture is not designed
+in a way that forecloses it.
+
+### Implementation order
+
+1. `page-metrics.el` — physical unit conversions, frame-aware DPI
+2. `variable-spacing--spacer` off-screen fix — face metrics + frame DPI,
+   no `frame-char-height`
+3. Olivetti integration — feed `olivetti-body-width` from page-metrics;
+   hook `text-scale-mode` to recompute; detect narrow-window condition and
+   revert/restore paginated view
+4. Page break overlays — thin separator with header/footer chrome
+5. Footnote zone — monolithic overlay first; ephemeral anchors if needed
+6. Page background and chrome — desktop colour, page-white overlay, border
