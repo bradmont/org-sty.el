@@ -861,14 +861,46 @@ Requires: pagination as a prerequisite, a custom scroll-event model
 for near-term implementation; noted here so the architecture is not designed
 in a way that forecloses it.
 
+### Print correspondence (long-term goal)
+
+The ultimate goal of the page layout system is **pixel-perfect
+screen/print correspondence**: a document that looks identical on screen
+and on paper, with line breaks, page breaks, and element positions
+matching between the two renderings.
+
+This requires two things to be true simultaneously:
+
+1. **Screen geometry is physically accurate.**  The body width in pixels
+   must equal `text-area-mm × px/mm` with no rounding error.  The current
+   column-based approach introduces up to `frame-char-width / 2` (~4–5 px)
+   of error per edge.  The fix is to express all geometry through
+   `set-window-fringes` (pixel-accurate) rather than `set-window-margins`
+   (column-quantized); see the "Page width and wrapping" section above.
+
+2. **Print output uses the same metrics.**  When printing via
+   `ps-print`, `htmlize` + browser, or an Org export backend, the
+   rendered widths, spacings, and page breaks must be computed from
+   the same physical measurements (`page-metrics-*` vars) that drive
+   the screen layout — not re-derived independently from the export
+   backend's own defaults.  This means org-sty must either hook into
+   the export pipeline to inject the correct page geometry, or produce
+   output (e.g. CSS/PostScript) that encodes those measurements
+   directly.
+
+These two are independent prerequisites: screen accuracy can be
+implemented without touching export, and export integration does not
+require screen accuracy.  Both are long-term work; neither is planned
+for the near term.  Do not design the `page-metrics` API in a way that
+forecloses either path — keep physical measurements as first-class
+values rather than deriving everything through Emacs pixel coordinates.
+
 ### Implementation order
 
-1. `page-metrics.el` — physical unit conversions, frame-aware DPI
+1. ~~`page-metrics.el` — physical unit conversions, font-metric px/pt~~  DONE
 2. `variable-spacing--spacer` off-screen fix — face metrics + frame DPI,
    no `frame-char-height`
-3. Olivetti integration — feed `olivetti-body-width` from page-metrics;
-   hook `text-scale-mode` to recompute; detect narrow-window condition and
-   revert/restore paginated view
-4. Page break overlays — thin separator with header/footer chrome
-5. Footnote zone — monolithic overlay first; ephemeral anchors if needed
-6. Page background and chrome — desktop colour, page-white overlay, border
+3. Page break overlays — thin separator with header/footer chrome
+4. Footnote zone — monolithic overlay first; ephemeral anchors if needed
+5. Page background and chrome — desktop colour, page-white overlay, border
+6. Pixel-accurate geometry — fringe-based layout, fork/override
+   `olivetti-set-window`; prerequisite for print correspondence
