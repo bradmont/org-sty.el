@@ -707,27 +707,46 @@ calculations stay in pixels as long as possible.
 **Foundation: `olivetti-mode`.**  Olivetti already handles centering a
 fixed-width body in the window and degrades gracefully when the window is
 narrower than the body.  It is the foundation for page-width control rather
-than a replacement.  The page-layout layer feeds Olivetti a body width
-derived from physical measurements:
+than a replacement.  `page-metrics-apply` feeds Olivetti an integer body
+width derived from physical measurements:
 
 ```elisp
-(setq olivetti-body-width
-      (page-metrics-mm-to-cols text-area-mm frame))
-; where mm-to-cols = (round (/ (mm-to-px mm frame) (char-width-px frame)))
+(setq olivetti-body-width body-cols)
+; body-cols = round(body-px / frame-char-width)
+; body-px   = body-pt × font-info[2] × 10 / face-default-height-tenths
 ```
 
-When the declared font size or zoom level changes, `olivetti-body-width` is
-recomputed and reapplied.  The `text-scale-mode` advice already present in
-`variable-spacing-mode` is the natural hook for this recalculation.
+**`text-scale-mode` is handled by Olivetti internally** via
+`olivetti-scale-width`, which reads the `:height` factor from
+`face-remapping-alist` and scales the pixel body width accordingly.
+`page-metrics-apply` does NOT need to be called on text-scale changes;
+the integer `olivetti-body-width` stays constant and Olivetti zooms the
+page correctly on its own.
 
-If Olivetti's character-column approach proves too coarse for the required
-physical precision, the option is to **fork Olivetti** to accept a pixel
-width directly rather than a column count, eliminating the char-width
-rounding.  Prefer using Olivetti as-is first.
+**Column round-trip and print correspondence.**  The current approach
+converts physical mm → px → integer columns, then Olivetti converts
+columns → px again internally (`olivetti-normalize-width` multiplies by
+`frame-char-width`).  The `round()` in both directions introduces up to
+`frame-char-width / 2` pixels (~4–5 px) of error — acceptable for screen
+display but not for pixel-perfect screen/print correspondence.
 
-**Do not replace `right-margin-width` / `set-window-margins` with a
-from-scratch implementation** when Olivetti already handles centering,
-margin maintenance, and window-resize behaviour correctly.
+The correct long-term path is to **bypass the column round-trip entirely**
+and drive Olivetti's layout with pixels throughout.  Olivetti's internal
+layout already operates in pixels; the only lossy step is `set-window-margins`,
+which only accepts integer column counts.  The pixel-precise alternative is
+to express all page geometry through **fringes** (`set-window-fringes` takes
+integer pixels):
+
+- Outer fringe = desktop colour, sized to centre the page in the window
+- Inner fringe = physical page margin (left/right gutter)
+- Zero character margins
+
+This eliminates `set-window-margins` entirely.  The body width the display
+engine renders into becomes `window-pixel-width − 2×outer-fringe −
+2×inner-fringe` in exact pixels, and word-wrap fires at the correct physical
+boundary.  Implementing this requires overriding or forking
+`olivetti-set-window`; the rest of Olivetti (window-resize hooks, split-window
+handling, mode-line) can be reused.
 
 ### Window narrower than the page
 
