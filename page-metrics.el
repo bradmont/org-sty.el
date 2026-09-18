@@ -21,38 +21,29 @@
 ;; ────────────────────
 ;; Olivetti is used as-is; we configure it rather than modifying it.
 ;;
-;; `olivetti-body-width' is set as a *float* (fraction of window width).
-;; Olivetti's float branch in `olivetti-normalize-width' multiplies the
-;; window pixel width by the fraction directly, bypassing `olivetti-scale-width'
-;; entirely.  This means the body's pixel width stays fixed at `text-area-px'
-;; regardless of `text-scale-mode', which is the correct behaviour for a
-;; fixed physical page: zooming changes how many characters fit per line, not
-;; the physical width of the page.
+;; `olivetti-body-width' is set as an *integer* column count — the text-area
+;; width in units of the default face character width.  Integer mode is
+;; stable under `text-scale-mode': zooming changes how many characters fit
+;; per line, not the declared column count that defines the page boundary.
+;; When the window is narrower than the requested body width, Olivetti
+;; degrades gracefully on its own; no special handling is needed here.
 ;;
-;; `olivetti-margin-width' is made buffer-local at load time so different
-;; documents can have different physical margins without interfering.  It is
-;; set to the average of the declared left and right margin column counts,
-;; which positions the fringes correctly for centering the full page in the
-;; window.  A buffer-local `page-metrics--margin-delta' holds the asymmetry
-;; correction (left − right) / 2; this is applied by an :after advice on
-;; `olivetti-set-window' once Olivetti has finished its symmetric layout.
+;; `olivetti-margin-width' is made buffer-local so different documents with
+;; different physical margins don't interfere.  It is set to the average of
+;; the left and right margin column counts to centre the page in the window.
+;; A buffer-local `page-metrics--margin-delta' holds (left − right) / 2;
+;; this is applied by an :after advice on `olivetti-set-window' to correct
+;; Olivetti's symmetric layout for asymmetric page margins.
 ;;
-;; Narrow-window handling
-;; ──────────────────────
-;; When the window is narrower than the page, `olivetti-body-width' is
-;; clamped to 1.0 (Olivetti fills the window).  `page-metrics-mode' detects
-;; this and runs `page-metrics-width-change-functions' so the pagination
-;; layer can revert to non-paginated view and alert the user.  Pagination is
-;; automatically re-enabled when the window becomes wide enough again (e.g.
-;; after the user decreases zoom or widens the frame).
-;;
-;; DPI accuracy
-;; ────────────
-;; `display-mm-width' is unreliable on X11 (almost always 96 dpi regardless
-;; of the actual screen).  Set `page-metrics-dpi-override' to the real
-;; pixels-per-mm for the monitor if physical accuracy matters.  For typical
-;; use the proportional relationships between page elements are correct even
-;; with wrong DPI; only the absolute on-screen physical size is affected.
+;; Column width derivation (no screen DPI)
+;; ────────────────────────────────────────
+;; All measurements start in mm, are converted to typographic points
+;; (1 pt = 25.4/72 mm — a pure constant), then to pixels via the ratio of
+;; frame-char-height (px) to the default face :height (1/10-pt units).
+;; Because frame-char-height and frame-char-width live in the same Emacs
+;; pixel coordinate space, their ratio to each other is inherently correct
+;; regardless of monitor DPI, HiDPI scaling, or Wayland reporting quirks.
+;; Screen DPI is never consulted.
 
 ;;; Code:
 
@@ -83,88 +74,147 @@
   "Standard page sizes in mm.
 Keys are symbols; values are plists with :width and :height in millimetres.")
 
+(defconst page-metrics-size-margins
+  ;; letter/legal: 1 inch (25.4 mm) all around — Word 2007+ default.
+  ;; a4/a5:        20 mm all around — LibreOffice/OpenOffice default.
+  '((letter . (:top 25.4 :bottom 25.4 :left 25.4 :right 25.4))
+    (a4     . (:top 20.0 :bottom 20.0 :left 20.0 :right 20.0))
+    (legal  . (:top 25.4 :bottom 25.4 :left 25.4 :right 25.4))
+    (a5     . (:top 20.0 :bottom 20.0 :left 20.0 :right 20.0)))
+  "Default margins in mm for each standard page size.
+Values are sourced from widely-used word processor defaults:
+letter/legal use Word 2007+ (1 inch = 25.4 mm all around);
+a4/a5 use LibreOffice Writer (20 mm all around).
+These are the starting point used by `page-metrics-set-page'; override
+individual margin vars afterwards for non-standard margins.")
+
 
 ;;;; ================================================================
 ;;;; Section 2 — Buffer-local page parameters
 ;;;; ================================================================
 
-(defvar-local page-metrics-page-size 'a4
+(defvar-local page-metrics-page-size 'letter
   "Page size for this buffer.
 Either a symbol from `page-metrics-page-sizes' (e.g. \\='a4, \\='letter)
-or a custom plist (:width MM :height MM).  Set by `org-sty-apply' from
-the style plist; can also be set buffer-locally via file- or dir-local
-variables.")
+or a custom plist (:width MM :height MM).
 
-(defvar-local page-metrics-margin-top    25.0
+Do not set this directly when also changing margins; use
+`page-metrics-set-page' instead, which sets the size and resets all
+four margin vars from `page-metrics-size-margins' in one step.
+Intended to be called from an org-sty style plist `:eval' block.")
+
+;; Margin defaults match the letter entry in `page-metrics-size-margins'
+;; (Word 2007+ standard: 1 inch = 25.4 mm all around).
+(defvar-local page-metrics-margin-top    25.4
   "Top margin in millimetres.")
 
-(defvar-local page-metrics-margin-bottom 25.0
+(defvar-local page-metrics-margin-bottom 25.4
   "Bottom margin in millimetres.")
 
-(defvar-local page-metrics-margin-left   30.0
+(defvar-local page-metrics-margin-left   25.4
   "Left margin in millimetres.")
 
-(defvar-local page-metrics-margin-right  25.0
+(defvar-local page-metrics-margin-right  25.4
   "Right margin in millimetres.")
 
+(defun page-metrics-set-page (size)
+  "Set page SIZE and reset margins from `page-metrics-size-margins'.
+SIZE is a symbol from `page-metrics-page-sizes' (e.g. \\='letter, \\='a4).
+The four margin buffer-locals are overwritten with the values from
+`page-metrics-size-margins'; call this before any per-document margin
+overrides.  Intended for use in an org-sty style plist `:eval' block:
+
+  (page-metrics-set-page \\='letter)
+
+After the call, individual margins can be further adjusted:
+
+  (setq-local page-metrics-margin-left 31.75)"
+  (unless (assq size page-metrics-page-sizes)
+    (error "page-metrics-set-page: unknown page size `%s'" size))
+  (setq-local page-metrics-page-size size)
+  (let ((m (cdr (assq size page-metrics-size-margins))))
+    (when m
+      (setq-local page-metrics-margin-top    (plist-get m :top))
+      (setq-local page-metrics-margin-bottom (plist-get m :bottom))
+      (setq-local page-metrics-margin-left   (plist-get m :left))
+      (setq-local page-metrics-margin-right  (plist-get m :right)))))
+
 
 ;;;; ================================================================
-;;;; Section 3 — DPI
+;;;; Section 3 — Unit conversion
 ;;;; ================================================================
 
-(defvar page-metrics-dpi-override nil
-  "Override the automatic pixels-per-mm ratio.
-Nil means derive from `display-pixel-width' / `display-mm-width'
-(unreliable on X11, which typically reports 96 dpi regardless of the
-actual screen).
+;; Screen DPI is not used anywhere in this module.  Physical page
+;; dimensions (mm) are first converted to typographic points — a purely
+;; typographic constant (1 pt = 25.4/72 mm) with no screen involvement.
+;; Points are then converted to Emacs pixels via the ratio of the
+;; typographic em (ascent+descent from `font-info', in pixels) to the
+;; default face :height (in 1/10-pt units).  `frame-char-height' is NOT
+;; used: it returns the cell height (em + line-gap/leading), which inflates
+;; the px/pt ratio by ~1.3–1.5× and produces incorrect column counts.
+;;
+;; All metrics must be read at the frame level.  `face-font' (even called
+;; with a frame argument) consults `face-remapping-alist' in the current
+;; buffer, so in a `variable-spacing-mode' buffer it returns the 6pt floor
+;; font rather than the frame default, mixing two different faces' metrics
+;; and producing a wrong px/pt.  `frame-parameter' \\='font bypasses face
+;; resolution entirely and is the correct source for font-px.
+;; `face-attribute' \\='default :height FRAME correctly reads the frame-level
+;; height (unaffected by buffer-local remaps).  `frame-char-width' is also
+;; frame-level and is the right column unit because it is exactly what
+;; Olivetti uses when it interprets an integer `olivetti-body-width'.
 
-Set to a float (pixels per mm, e.g. 3.78 for 96 dpi, 5.51 for 140 dpi)
-for a single global override, or to an alist of (FRAME . FLOAT) for
-per-frame overrides when multiple monitors with different densities are
-in use.")
+(defconst page-metrics--pt-per-mm (/ 72.0 25.4)
+  "Typographic points per millimetre.  1 pt = 25.4/72 mm ≈ 0.353 mm.")
 
-(defcustom page-metrics-fallback-dpi 96.0
-  "Fallback screen DPI when monitor geometry cannot be determined.
-Applied when `frame-monitor-attributes' returns no usable mm-size, or
-when the derived ratio exceeds a sanity ceiling (20 px/mm = 508 dpi).
-96 dpi is a conservative default for typical screens.  Adjust to match
-your actual display if physical measurement accuracy matters, or set
-`page-metrics-dpi-override' for per-frame calibration."
-  :type 'float
-  :group 'page-metrics)
+(defun page-metrics--mm-to-pts (mm)
+  "Convert MM millimetres to typographic points.
+This is a pure typographic constant; no screen metrics are involved."
+  (* mm page-metrics--pt-per-mm))
 
-(defun page-metrics--px-per-mm (&optional frame)
-  "Return pixels per millimetre for FRAME.
-Resolution order:
-  1. `page-metrics-dpi-override' — a float or (FRAME . FLOAT) alist.
-  2. Per-monitor geometry from `frame-monitor-attributes': the logical
-     pixel width of the monitor containing FRAME divided by its physical
-     mm width.  More reliable than `display-pixel-width'/`display-mm-width'
-     on multi-monitor setups where the display-level functions conflate
-     all monitors (total pixel width vs. one panel's mm width).
-  3. `page-metrics-fallback-dpi' converted to px/mm.
+(defun page-metrics--font-px (&optional frame)
+  "Return the rendered pixel size of the frame default font.
 
-A sanity ceiling of 20 px/mm (≈508 dpi) is applied to the auto-detected
-value; anything above it falls through to the next source.  This catches
-cases where the compositor reports 0 mm or an implausibly small value."
-  (let ((f (or frame (selected-frame))))
-    (or (cond
-         ((null page-metrics-dpi-override) nil)
-         ((listp page-metrics-dpi-override)
-          (cdr (assq f page-metrics-dpi-override)))
-         (t page-metrics-dpi-override))
-        ;; Per-monitor: geometry gives logical px for this monitor only;
-        ;; mm-size gives the physical dimensions of this monitor only.
-        (let* ((attrs  (frame-monitor-attributes f))
-               (geo    (alist-get 'geometry attrs)) ; (x y w h) logical px
-               (mm     (alist-get 'mm-size  attrs)) ; (w-mm h-mm)
-               (px-w   (and geo (nth 2 geo)))
-               (mm-w   (and mm  (car mm)))
-               (ratio  (and px-w mm-w (> mm-w 0)
-                            (/ (float px-w) mm-w))))
-          (and ratio (< ratio 20.0) ratio))
-        ;; Fallback.
-        (/ page-metrics-fallback-dpi 25.4))))
+Uses `frame-parameter' \\='font and `font-info' index 2 (pixel-size).
+This is the size the font was requested at (e.g. 15px for an 11.3pt
+font at 96 dpi) and is the correct numerator for the px/pt ratio.
+
+font-info indices 8+9 (ascent+descent) are NOT used: they measure the
+typographic bounding box, which for fonts with generous metrics (e.g.
+Hack, where ascent+descent = cell height = 18 for a 15px font) exceeds
+the nominal pixel size and inflates the px/pt ratio.  index 3 (cell
+height) has the same problem for the same reason.
+
+`face-font' (even with a frame argument) consults `face-remapping-alist'
+and can return a buffer-local remapped font.  `frame-parameter' \\='font
+bypasses all face resolution and always returns the true frame font."
+  (let* ((f    (or frame (selected-frame)))
+         (font (frame-parameter f 'font))
+         (fi   (and font (font-info font))))
+    (when (and fi (> (aref fi 2) 0))
+      (aref fi 2))))   ; ascent + descent
+
+(defun page-metrics--pts-to-px (pts &optional frame)
+  "Convert PTS typographic points to Emacs pixels using frame font metrics.
+
+Derivation (no screen DPI):
+  face-h   = (face-attribute \\='default :height frame) — 1/10-pt, e.g. 113
+  font-px  = page-metrics--font-px FRAME  — font-info index 2 (pixel-size),
+                                            the size the font was requested at
+  px/pt    = font-px × 10 / face-h
+  result   = pts × px/pt
+
+Both face-h and font-px are read at the frame level, bypassing any
+buffer-local face remaps (e.g. the variable-spacing floor remap on
+`default').  `frame-char-height' and font-info ascent+descent are NOT
+used: for fonts like Hack, both equal the cell height (18px for a 15px
+font), inflating px/pt and producing column counts that are too high.
+font-info index 2 (pixel-size = 15px) is the correct numerator."
+  (let* ((f       (or frame (selected-frame)))
+         (face-h  (face-attribute 'default :height f))
+         (font-px (page-metrics--font-px f)))
+    (when (and (integerp face-h) (> face-h 0) font-px)
+      (/ (* pts font-px 10.0) face-h))))
 
 
 ;;;; ================================================================
@@ -190,26 +240,26 @@ add it to `page-metrics-page-sizes' or use a (:width MM :height MM) plist"
   (plist-get (page-metrics--size-plist) :height))
 
 (defun page-metrics-mm-to-px (mm &optional frame)
-  "Convert MM millimetres to pixels on FRAME."
-  (* mm (page-metrics--px-per-mm frame)))
+  "Convert MM millimetres to Emacs pixels using frame font metrics."
+  (page-metrics--pts-to-px (page-metrics--mm-to-pts mm) frame))
 
 (defun page-metrics-page-width-px (&optional frame)
-  "Full page width in pixels on FRAME."
+  "Full page width in pixels."
   (page-metrics-mm-to-px (page-metrics-page-width-mm) frame))
 
 (defun page-metrics-page-height-px (&optional frame)
-  "Full page height in pixels on FRAME."
+  "Full page height in pixels."
   (page-metrics-mm-to-px (page-metrics-page-height-mm) frame))
 
 (defun page-metrics-text-area-width-px (&optional frame)
-  "Text area width in pixels on FRAME (page width minus left and right margins)."
+  "Text area width in pixels (page width minus left and right margins)."
   (page-metrics-mm-to-px (- (page-metrics-page-width-mm)
                              page-metrics-margin-left
                              page-metrics-margin-right)
                           frame))
 
 (defun page-metrics-text-area-height-px (&optional frame)
-  "Text area height in pixels on FRAME (page height minus top and bottom margins)."
+  "Text area height in pixels (page height minus top and bottom margins)."
   (page-metrics-mm-to-px (- (page-metrics-page-height-mm)
                              page-metrics-margin-top
                              page-metrics-margin-bottom)
@@ -230,65 +280,59 @@ Added to the left window margin and subtracted from the right after
 Olivetti sets its symmetric margins.  Positive when the left page margin
 is wider than the right.  Computed by `page-metrics-apply'.")
 
-(defvar-local page-metrics--was-narrow nil
-  "Non-nil if the window was last known to be narrower than the page.
-Used to detect transitions and only fire `page-metrics-width-change-functions'
-on changes, not on every resize event.")
+(defun page-metrics--mm-to-cols (mm &optional frame)
+  "Convert MM millimetres to a column count in the default face character width.
 
-(defun page-metrics--narrow-p (&optional frame)
-  "Return non-nil if the current window is narrower than the declared page."
-  (< (window-pixel-width)
-     (page-metrics-page-width-px frame)))
+Derivation (no screen DPI):
+  px  = page-metrics-mm-to-px MM FRAME   — pts × px/pt via frame font metrics
+  col = frame-char-width FRAME            — px per column, frame default face
+  result = round (px / col)
+
+`frame-char-width' is the frame-level default face character width,
+unaffected by buffer-local face remaps.  Because both px values are in
+the same Emacs pixel coordinate space their ratio is DPI-independent."
+  (let* ((f   (or frame (selected-frame)))
+         (px  (page-metrics-mm-to-px mm f))
+         (col (float (frame-char-width f))))
+    (and px (> col 0) (round (/ px col)))))
 
 (defun page-metrics-apply (&optional frame)
   "Compute and apply Olivetti parameters from the buffer-local page model.
 
-Derives `olivetti-body-width' (as a pixel-precise float fraction of the
-window width), `olivetti-margin-width' (average of left/right margin
-column counts), and `page-metrics--margin-delta' (asymmetry correction).
+Sets `olivetti-body-width' to the text-area width in character columns
+(an integer), `olivetti-margin-width' to the average of the left and
+right margin column counts, and `page-metrics--margin-delta' to the
+asymmetry correction (left − right) / 2.
+
+Olivetti accepts an integer `olivetti-body-width' as an absolute column
+count, which is stable under `text-scale-mode' — zooming changes how
+many characters fit per line, not the declared column width.  When the
+window is narrower than the requested body width Olivetti degrades
+gracefully without any special handling here.
 
 Call this after the font face remap has been applied so `frame-char-width'
-reflects the actual rendered character width, and whenever the window or
-frame geometry changes.
-
-Runs `page-metrics-width-change-functions' if the narrow-window state
-has changed since the last call."
-  (let* ((px/mm      (page-metrics--px-per-mm frame))
-         (text-px    (page-metrics-text-area-width-px frame))
-         (left-px    (* page-metrics-margin-left  px/mm))
-         (right-px   (* page-metrics-margin-right px/mm))
-         ;; Use the window displaying this buffer if one exists, otherwise
-         ;; fall back to the selected window.
-         (win        (or (get-buffer-window (current-buffer) frame)
-                         (selected-window)))
-         (win-px     (float (window-body-width win t)))
-         ;; Float fraction: Olivetti's float branch does window-px × fraction
-         ;; directly, bypassing olivetti-scale-width.  This keeps the body
-         ;; pixel-width stable under text-scale-mode.  Clamped to 1.0 when
-         ;; the window is narrower than the page.
-         (body-frac  (min 1.0 (/ text-px win-px)))
-         ;; Column widths in frame-char-width units — the same unit Olivetti
-         ;; passes to set-window-margins.  No floor-pt needed; we use
-         ;; frame-char-width directly (the frame default, unaffected by
-         ;; buffer-local face remaps).
-         (col-px     (float (frame-char-width frame)))
-         (left-cols  (round (/ left-px  col-px)))
-         (right-cols (round (/ right-px col-px)))
-         (avg-cols   (max 1 (round (/ (+ left-cols right-cols) 2.0))))
-         (now-narrow (< win-px (page-metrics-page-width-px frame))))
-    ;; Feed Olivetti.
-    (setq olivetti-body-width   body-frac
-          olivetti-margin-width avg-cols)
-    ;; Store the asymmetry correction for the advice on olivetti-set-window.
-    (setq page-metrics--margin-delta
-          (round (/ (float (- left-cols right-cols)) 2)))
-    ;; Notify listeners if the narrow-window state has changed.
-    (unless (eq now-narrow page-metrics--was-narrow)
-      (setq page-metrics--was-narrow now-narrow)
-      (run-hook-with-args 'page-metrics-width-change-functions now-narrow))
-    ;; Ask Olivetti to recompute and redisplay.
-    (when (bound-and-true-p olivetti-mode)
-      (olivetti-set-buffer-windows))))
+reflects the actual rendered character width."
+  (let* ((f           (or frame (selected-frame)))
+         (body-cols   (page-metrics--mm-to-cols
+                       (- (page-metrics-page-width-mm)
+                          page-metrics-margin-left
+                          page-metrics-margin-right)
+                       f))
+         (left-cols   (page-metrics--mm-to-cols page-metrics-margin-left  f))
+         (right-cols  (page-metrics--mm-to-cols page-metrics-margin-right f))
+         (avg-cols    (max 1 (round (/ (+ (or left-cols 0)
+                                          (or right-cols 0))
+                                       2.0)))))
+    (when body-cols
+      ;; Feed Olivetti integer column widths.
+      (setq olivetti-body-width   body-cols
+            olivetti-margin-width avg-cols)
+      ;; Store the asymmetry correction for the advice on olivetti-set-window.
+      (setq page-metrics--margin-delta
+            (round (/ (float (- (or left-cols 0) (or right-cols 0))) 2)))
+      ;; Ask Olivetti to recompute and redisplay.
+      (when (bound-and-true-p olivetti-mode)
+        (olivetti-set-buffer-windows)))))
 
 
 ;;;; ================================================================
@@ -328,13 +372,20 @@ margins are already equal."
 Each function receives one argument: non-nil if the window is now too
 narrow for the page, nil if it has become wide enough again.
 
-The pagination layer hooks here to revert to / restore paginated view.")
+Reserved for the future pagination layer.  Not triggered by
+`page-metrics-apply' in the current implementation; Olivetti already
+degrades gracefully when the window is narrower than `olivetti-body-width'.")
 
-(defun page-metrics--on-size-change (frame)
-  "Recompute page metrics when a window on FRAME changes size."
-  (when (and (bound-and-true-p page-metrics-mode)
-             (get-buffer-window (current-buffer) frame))
-    (page-metrics-apply frame)))
+(defun page-metrics--on-size-change (window-or-frame)
+  "Recompute page metrics when a window or frame changes size.
+`window-size-change-functions' passes a window on some Emacs versions
+and a frame on others; handle both, as Olivetti does."
+  (when (bound-and-true-p page-metrics-mode)
+    (let ((frame (if (framep window-or-frame)
+                     window-or-frame
+                   (window-frame window-or-frame))))
+      (when (get-buffer-window (current-buffer) frame)
+        (page-metrics-apply frame)))))
 
 ;;;###autoload
 (define-minor-mode page-metrics-mode
@@ -360,7 +411,6 @@ Can also be enabled interactively for testing."
     (remove-hook 'window-size-change-functions
                  #'page-metrics--on-size-change t)
     (kill-local-variable 'page-metrics--margin-delta)
-    (kill-local-variable 'page-metrics--was-narrow)
     (kill-local-variable 'olivetti-margin-width)))
 
 

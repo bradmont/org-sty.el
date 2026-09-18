@@ -104,13 +104,10 @@
 
 (let* ((wp-eval '(progn
                    ;; ── Page geometry ───────────────────────────────────────
-                   ;; Buffer-local; page-metrics-apply reads these when
-                   ;; page-metrics-mode is enabled below.
-                   (setq-local page-metrics-page-size      'a4)
-                   (setq-local page-metrics-margin-top     25.0)
-                   (setq-local page-metrics-margin-bottom  25.0)
-                   (setq-local page-metrics-margin-left    30.0)
-                   (setq-local page-metrics-margin-right   25.0)
+                   ;; Sets page-metrics-page-size and all four margin vars
+                   ;; atomically from page-metrics-size-margins.  Must come
+                   ;; before page-metrics-mode is enabled below.
+                   (page-metrics-set-page 'letter)
                    ;; Fancy olivetti: fringes for the desktop area,
                    ;; margins for the in-page left/right gutter.
                    (setq-local olivetti-style 'fancy)
