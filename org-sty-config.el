@@ -119,6 +119,8 @@
                    (variable-spacing-mode 1)
                    (horizontal-layout-mode 1)
                    (org-title-fold-mode 1)
+                   (auto-save-mode)
+                   (guillemet-nbsp-mode 1)
                    ;; page-metrics-mode enables olivetti-mode and calls
                    ;; page-metrics-apply, which derives olivetti-body-width
                    ;; and olivetti-margin-width from the physical page model
