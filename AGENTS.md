@@ -164,21 +164,52 @@ the following render cycle, there is an inherent one-cycle lag between a
 margin change and any property in pass 3 seeing the updated line breaks.
 This is normally imperceptible.
 
-**Pass 3 — Line-break-dependent** (after-fontify; reads line geometry)
-Justification, centre alignment, right alignment.  These need to know where
-the display engine broke each visual line and how wide the text is.  They
-either read visual line boundaries from the display engine (window-dependent;
-same off-screen limitation as `variable-spacing--spacer`) or compute
-available-width = window-width − margins directly and measure non-space text
-width with `string-pixel-width`.  Intra-pass ordering: tab stop geometry must
-be resolved before justification, since justification distributes remaining
-space after tab-consumed space is accounted for.
+**Pass 3 — Line-break-dependent** (after-fontify; inline, linewise)
+Justification, centre alignment, right alignment.  Unlike passes 1–2 which
+operate chunkwise, Pass 3 is **linewise**: it expands the jit-lock chunk to
+full line boundaries before processing, then walks line by line.
+
+**Chunk expansion rule:** extend `beg` backwards to BOL and `end` forwards to
+EOL, but only as far as the text is already fontified — check the `fontified`
+text property before extending in either direction.  Drop partial lines at
+unfontified boundaries; they will be processed when their own chunk fires and
+extends back to BOL.  Re-processing an already-correct line is idempotent
+(same inputs, same stamp overwritten).
+
+**Geometry source:** Pass 3 reads margin and indent geometry from the
+`line-prefix`/`wrap-prefix` display properties stamped in the buffer by
+Pass 2, and measures text widths with `string-pixel-width` on
+`buffer-substring`.  Both require the text to be fontified — the `fontified`
+expansion check is necessary for face-metric accuracy and for geometry
+accuracy equally.  Pass 3 must not derive geometry from the face-extra
+registry or local-properties table; those give unresolved values, not the
+pixel widths that Pass 2 has computed and stamped.
+
+**No deferral for centre/right:** these have no feedback loop — a `line-prefix`
+alignment spacer shifts text rightward but does not change where lines wrap —
+so they run inline and give live visual updates as the user types.
+
+**Justification — deferred decision:** justify mutates interword space widths,
+which changes line breaking and risks a jit-lock feedback loop.  Whether
+justify should use a deferred execution path (e.g. `jit-lock-register` with
+`defer=t`) is an open decision to be made when justify is implemented.
+Justify must also clear its old interword-space stamps before re-measuring,
+because stale stamps inflate `string-pixel-width` results.
+
+**Window resize:** when the window width changes, all Pass 3 stamps are stale.
+A `window-size-change-functions` hook must call `font-lock-flush` to trigger
+a full re-fontification.
+
+Intra-pass ordering: tab stop geometry must be resolved before justification,
+since justification distributes remaining space after tab-consumed space is
+accounted for.
 
 **Pass 4 — Page layout** (separate idle-timer pass; not fontification)
-Cumulative pixel heights, page breaks, page count.  Runs after jit-lock has
-settled for the visible region.  Needs reliable line heights for all buffer
-positions including off-screen content; blocked on the `variable-spacing--spacer`
-fallback fix.
+Cumulative pixel heights, page breaks, page count.  Like Pass 3, Pass 4 is
+**linewise** — it operates on complete lines, not jit-lock chunks.  Runs
+after jit-lock has settled for the visible region.  Needs reliable line
+heights for all buffer positions including off-screen content; blocked on
+the `variable-spacing--spacer` fallback fix.
 
 **Registry implication:** when the `face-remap-add-extra` API is generalised,
 each registered property should declare its pass number.  The after-fontify
@@ -451,19 +482,34 @@ for each pass before moving to the next.
 
 - **Text alignment (`text-align` as a synthetic face property):** Left,
   centre, right, and justify, implemented as a symbol property on faces.
-  Centre and right require measuring the rendered pixel width of each visual
-  line at fontification time (`string-pixel-width`); the measurement drives a
-  `line-prefix` `(space :align-to ...)` spec.  Justify stamps `(space :width
-  Npx)` on each interword space to fill the line to the window margin.  The
-  chicken-and-egg concern (justification changes word spacing, which could
-  cause the display engine to re-break lines) is manageable in practice:
-  justification only adds space within lines already broken by word-wrap, so
-  re-breaking is rare and can be guarded against.  jit-lock's incremental
-  invalidation means only edited regions are recalculated.  The open question
-  is whether `string-pixel-width` per visual line per fontified chunk is fast
-  enough during typing — this warrants an experiment before committing to the
-  design.  A natural next synthetic attribute after spacing ratio is fully
-  working.
+  Registered at pass 3.  Implementation order: centre first (simplest; used
+  to build and validate the linewise Pass 3 infrastructure), then right, then
+  justify.
+
+  **Centre alignment** (`text-align = center`): for each visual line, compute
+  `offset = (available-px - text-px) / 2` and stamp a `line-prefix`
+  `(space :align-to offset-px)` spec at BOL.  `available-px` is derived from
+  the window pixel width minus the left and right margin values read from the
+  `line-prefix`/`wrap-prefix` display properties stamped by Pass 2.
+  `text-px` is `string-pixel-width` of the line's `buffer-substring`.
+  Re-processing is idempotent (overwrites the same stamp).  Stale stamps from
+  a previous window width are cleared by the `window-size-change-functions`
+  hook that calls `font-lock-flush`.
+
+  **Pass 0 font-lock keyword (future refactor):** body-text stamping in Pass 0
+  is currently done via `:after` advice on `font-lock-fontify-keywords-region`.
+  The natural long-term home is a font-lock keyword appended to
+  `font-lock-keywords`, which would integrate with Org's own keyword list and
+  give guaranteed ordering without advice.  Not a blocker for any current work;
+  mark for refactoring after the Pass 3 infrastructure is stable.
+
+  **Justify** (`text-align = justify`): stamps `(space :width Npx)` on each
+  interword space to distribute slack across the line.  Unlike centre/right,
+  justify mutates character display widths, which risks re-triggering
+  line-breaking and a jit-lock feedback loop.  Whether to use a deferred
+  execution path (`jit-lock-register` with `defer=t`) is an open decision.
+  Justify must clear old interword-space stamps before re-measuring (stale
+  stamps inflate `string-pixel-width`).
 
 - **Document portability / style snapshots:** For a genuine WP workflow,
   a document should be viewable identically by another user who does not
