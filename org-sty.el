@@ -308,6 +308,39 @@ want to preserve whatever :height/:weight is already set on them."
                                  (not (memq m before))))
                           org-sty--known-eval-modes))))))
 
+;;; Style selection
+
+(defun org-sty--prompt-style ()
+  "Prompt the user to choose a style and return its plist.
+
+Completion candidates are the keys of `org-sty-alist' plus
+\"(default)\", which resolves to `org-sty-default' alone (no tag
+overlay).  Returns the merged plist for the chosen style, or nil if
+the user aborts."
+  (when org-sty-alist
+    (let* ((names   (mapcar #'car org-sty-alist))
+           (choice  (completing-read
+                     "Apply org-sty style: "
+                     (cons "(default)" names)
+                     nil t)))
+      (if (equal choice "(default)")
+          (or org-sty-default '())
+        (org-sty--merge (or org-sty-default '())
+                        (cdr (assoc choice org-sty-alist)))))))
+
+(defun org-sty--apply-style (style)
+  "Apply STYLE plist directly, bypassing filetag resolution.
+Used by interactive selection to override whatever filetags say."
+  (when (derived-mode-p 'org-mode)
+    (org-sty--clear-face-remaps)
+    (org-sty--apply-num style)
+    (org-sty--apply-indent style)
+    (org-sty--apply-olivetti style)
+    (org-sty--apply-font style)
+    (org-sty--apply-eval style)
+    (org-sty--apply-faces style)
+    (font-lock-flush)))
+
 ;;; Public API
 
 ;;;###autoload
@@ -336,7 +369,8 @@ Intended for use via `org-sty-mode'; safe to call directly to refresh."
       ;; priority, ensuring declared face attributes win over whatever
       ;; the enabled modes install.
       (org-sty--apply-eval style)
-      (org-sty--apply-faces style))))
+      (org-sty--apply-faces style)
+      (font-lock-flush))))
 
 (defun org-sty--disable ()
   "Reverse all styling applied by `org-sty-mode' in this buffer."
@@ -374,6 +408,31 @@ Use this after editing #+FILETAGS by hand or via
   (org-set-regexps-and-options)
   (org-sty-apply))
 
+;;;###autoload
+(defun org-sty-select ()
+  "Interactively choose a style and apply it to this buffer.
+
+Presents a completing-read prompt with the names from `org-sty-alist'
+and a \"(default)\" option that applies `org-sty-default' alone.
+
+If `org-sty-mode' is not already active in this buffer, it is enabled
+first.  The selected style is applied regardless of the buffer's
+filetags; subsequent calls to `org-sty-refresh' will revert to the
+filetag-driven style."
+  (interactive)
+  (unless (derived-mode-p 'org-mode)
+    (user-error "org-sty-select: not in an Org buffer"))
+  (unless org-sty-alist
+    (user-error "org-sty-select: org-sty-alist is empty — no styles to choose from"))
+  (let ((style (org-sty--prompt-style)))
+    (when style
+      (unless (bound-and-true-p org-sty-mode)
+        ;; Enable the mode non-interactively: called-interactively-p
+        ;; will be nil inside the mode body, so it takes the normal
+        ;; filetag path.  We immediately override with the chosen style.
+        (org-sty-mode 1))
+      (org-sty--apply-style style))))
+
 ;;; Minor mode
 
 ;;;###autoload
@@ -392,7 +451,23 @@ To enable for all Org buffers add to your init file:
   :group 'org-sty
   (if org-sty-mode
       (when (derived-mode-p 'org-mode)
-        (org-sty-apply))
+        ;; When turned on interactively with no filetag matching any
+        ;; defined style, offer the user a completing-read prompt so
+        ;; they can pick a style directly rather than getting only the
+        ;; default.  In non-interactive calls (e.g. from org-mode-hook)
+        ;; just apply the filetag-derived style as normal.
+        (if (and (called-interactively-p 'interactive)
+                 org-sty-alist
+                 (null (cl-some (lambda (tag)
+                                  (assoc tag org-sty-alist))
+                                (org-sty--current-tags))))
+            (let ((style (org-sty--prompt-style)))
+              (if style
+                  (org-sty--apply-style style)
+                ;; User aborted the prompt — apply the default style
+                ;; rather than enabling the mode with nothing applied.
+                (org-sty-apply)))
+          (org-sty-apply)))
     (org-sty--disable)))
 
 ;;;###autoload
