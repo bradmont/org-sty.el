@@ -534,11 +534,12 @@ Steps:
         (let ((stamp-fn (plist-get backend :stamp-body-text)))
           (when stamp-fn
             (funcall stamp-fn beg end))))
-      ;; Passes 1–3: scan once, then dispatch.
+      ;; Passes 1–2: scan once, then dispatch.
+      ;; Pass 3 runs separately via jit-lock-register (face-extra--dispatch-pass3)
+      ;; after the display engine has settled, so vertical-motion is safe there.
       (let ((spans-table (face-extra--collect-spans beg end)))
         (face-extra--run-pass 1 spans-table)
-        (face-extra--run-pass 2 spans-table)
-        (face-extra--run-pass 3 spans-table)))))
+        (face-extra--run-pass 2 spans-table)))))
 
 ;;;; ------ Advice wiring ------
 
@@ -567,6 +568,110 @@ backend matches any live buffer's major mode."
     (unless still-needed
       (advice-remove 'font-lock-fontify-keywords-region
                      #'face-extra--dispatch))))
+
+;;;; ------ Pass-3 jit-lock dispatch ------
+
+(defun face-extra--expand-to-lines (beg end)
+  "Expand BEG..END to logical-line boundaries within already-fontified text.
+
+Extends BEG backward to `line-beginning-position' and END forward to
+`line-end-position', but only if the gap region is entirely fontified.
+Drops partial lines at unfontified boundaries — they will be processed
+when their own jit-lock chunk fires.
+
+Returns a (BEG . END) cons, or nil if the region is empty after clipping."
+  (let* ((lbeg (save-excursion (goto-char beg) (line-beginning-position)))
+         (lend (save-excursion (goto-char end) (line-end-position))))
+    ;; Extend backward only if [lbeg, beg) is entirely fontified.
+    (when (and (< lbeg beg)
+               (not (text-property-any lbeg beg 'fontified nil)))
+      (setq beg lbeg))
+    ;; Extend forward only if [end, lend) is entirely fontified.
+    (when (and (> lend end)
+               (not (text-property-any end lend 'fontified nil)))
+      (setq end lend))
+    (when (< beg end)
+      (cons beg end))))
+
+(defun face-extra--dispatch-pass3 (beg end)
+  "jit-lock-register pass-3 dispatch: one visual-line walk, not spanwise.
+
+Registered via `face-extra--enable-dispatch-pass3'; fires after
+`face-extra--dispatch' (passes 1 and 2) has stamped line-prefix/
+wrap-prefix spacers and margins.
+
+Pass 3 is fundamentally linewise, not spanwise.  A typical visible
+window produces O(face_boundaries) spans from `face-extra--collect-spans'
+— potentially hundreds per screen on cite-heavy documents — but only
+O(visual_lines) lines need to be processed.  Using `collect-spans' then
+iterating spans with `vertical-motion' per span would be O(spans) walks;
+this function does one O(lines) walk and resolves properties at the BOL
+of each visual line via the face cache.
+
+The per-pass-3-property span lists passed to `:apply' functions contain
+one (lbeg lend value) triple per visual line where the property is active.
+Apply functions must not call `vertical-motion' themselves.
+
+`vertical-motion' is safe here because jit-lock-register functions fire
+after the display engine has settled for the chunk.  It would deadlock
+inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
+  (when (and (or face-extra--local-properties
+                 (face-extra--active-backend))
+             (gethash 3 face-extra--pass-order))
+    (let ((region (face-extra--expand-to-lines beg end)))
+      (when region
+        (let ((rbeg (car region))
+              (rend (cdr region))
+              ;; line-spans: property → list of (lbeg lend value) triples,
+              ;; one per visual line.  Same hash format as spans-table so
+              ;; face-extra--run-pass can be reused unchanged.
+              (line-spans (make-hash-table :test #'eq)))
+          (save-excursion
+            (goto-char rbeg)
+            (while (< (point) rend)
+              (let* ((lbeg  (point))
+                     (moved (vertical-motion 1))
+                     (lend  (min rend (point)))
+                     ;; Face at visual-line BOL.  font-lock-face takes
+                     ;; priority (Org regexp keywords); fall back to face
+                     ;; (Org anchor functions, text-body stamp).
+                     (f     (or (get-text-property lbeg 'font-lock-face)
+                                (get-text-property lbeg 'face)))
+                     (faces (cond
+                              ((null f)                          nil)
+                              ((symbolp f)                       (list f))
+                              ((and (consp f) (keywordp (car f))) nil)
+                              ((listp f) (cl-remove-if-not #'symbolp f))
+                              (t                                 nil))))
+                (when faces
+                  ;; Resolve pass-3 properties from the face cache.
+                  ;; Use a per-line alist to take the first (highest-priority)
+                  ;; value when multiple faces on the same BOL carry the same
+                  ;; property (e.g. text-body + org-cite both have text-align).
+                  (let ((line-props nil))
+                    (dolist (face faces)
+                      (let ((entry (face-extra--get-cache-entry face)))
+                        (dolist (triple (plist-get entry :pass3))
+                          (let ((prop (nth 0 triple))
+                                (val  (nth 1 triple)))
+                            (unless (assq prop line-props)
+                              (push (cons prop val) line-props))))))
+                    (dolist (pair line-props)
+                      (push (list lbeg lend (cdr pair))
+                            (gethash (car pair) line-spans)))))
+                (when (zerop moved)
+                  (goto-char rend)))))
+          (face-extra--run-pass 3 line-spans))))))
+
+(defun face-extra--enable-dispatch-pass3 ()
+  "Register `face-extra--dispatch-pass3' as a jit-lock function.
+`jit-lock-register' is buffer-local; this must be called in each buffer
+that requires pass-3 dispatch.  Idempotent."
+  (jit-lock-register #'face-extra--dispatch-pass3))
+
+(defun face-extra--disable-dispatch-pass3 ()
+  "Unregister `face-extra--dispatch-pass3' from jit-lock in the current buffer."
+  (jit-lock-unregister #'face-extra--dispatch-pass3))
 
 
 (provide 'face-extra)

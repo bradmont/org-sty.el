@@ -280,5 +280,121 @@ is active and handles cleanup on disable."
   :apply  #'horizontal-layout--apply-margin-left
   :clear  #'horizontal-layout--clear-margin-left)
 
+
+;;;; ================================================================
+;;;; Section 6 — text-align: pass-3 line-break-dependent alignment
+;;;; ================================================================
+;;
+;; `text-align' is a synthetic face property (pass 3) that controls
+;; text alignment per face.  The `:apply' function receives a list of
+;; (beg end value) spans and walks them visual-line by visual-line
+;; using `vertical-motion', which is safe in jit-lock-register context
+;; but would deadlock inside `:after' advice.
+;;
+;; Current implementation: test stub.
+;; For each visual line whose face carries `text-align = center', the
+;; character at the midpoint of the line is highlighted with a
+;; conspicuous face.  This exercises the full linewise infrastructure
+;; (jit-lock-register firing, vertical-motion, span collection) without
+;; changing line metrics.  Replace the body of `text-align--apply' with
+;; real alignment stamps once the infrastructure is confirmed working.
+
+(defconst text-align--prop 'text-align--marker
+  "Sentinel text property marking spans styled by `text-align-mode'.
+Used by `text-align-clear' to remove exactly this package's properties.")
+
+;;;###autoload
+(defun text-align-clear (&optional beg end)
+  "Remove text-align marker properties from BEG..END.
+Defaults to the whole buffer."
+  (interactive (if (use-region-p)
+                   (list (region-beginning) (region-end))
+                 (list nil nil)))
+  (let* ((beg (or beg (point-min)))
+         (end (or end (point-max)))
+         (pos beg))
+    (with-silent-modifications
+      (while (< pos end)
+        (let ((next (or (next-single-property-change
+                         pos text-align--prop nil end)
+                        end)))
+          (when (get-text-property pos text-align--prop)
+            (remove-text-properties pos next
+                                    (list text-align--prop nil
+                                          'face nil)))
+          (setq pos next))))))
+
+(defun text-align--apply (spans)
+  "TEST STUB: highlight the midpoint char of each visual line.
+
+SPANS is a list of (lbeg lend value) triples, one per visual line
+as delivered by `face-extra--dispatch-pass3'.  Pass-3 apply functions
+must NOT call `vertical-motion' themselves — the linewise walk happens
+in the dispatcher, and each triple already represents exactly one
+visual line.
+
+For real centering, replace the stub body with: compute
+  offset = (available-px - text-px) / 2
+and stamp a `line-prefix' `(space :align-to offset-px)' at lbeg."
+  (when (bound-and-true-p text-align-mode)
+    (with-silent-modifications
+      (dolist (span spans)
+        (when (eq (nth 2 span) 'center)
+          (let* ((lbeg (nth 0 span))
+                 (lend (nth 1 span))
+                 (mid  (/ (+ lbeg lend) 2)))
+            (when (and (> lend lbeg)
+                       (< mid lend)
+                       (not (eq (char-after mid) ?\n)))
+              (put-text-property mid (1+ mid)
+                                 'face '( :background "#ff0066"
+                                          :foreground "white"
+                                          :weight bold))
+              (put-text-property mid (1+ mid) text-align--prop t))))))))
+
+(defun text-align--clear-marker (_cookie)
+  "No-op `:clear' callback for `text-align' registration.
+Per-buffer text properties are cleaned up by `text-align-clear'
+on mode disable or the next dispatch cycle."
+  nil)
+
+
+;;;; ================================================================
+;;;; Section 7 — text-align-mode minor mode
+;;;; ================================================================
+
+;;;###autoload
+(define-minor-mode text-align-mode
+  "Apply pass-3 text alignment to faces in this buffer.
+
+Alignment values are configured via `face-extra-add-relative' (buffer-local)
+or `face-extra-add' (global):
+
+  (face-extra-add-relative \\='text-body \\='text-align \\='center)
+
+`face-extra--dispatch-pass3' owns the apply loop; this mode ensures it
+is registered and handles cleanup on disable."
+  :lighter " TAlign"
+  (if text-align-mode
+      (progn
+        (face-extra--enable-dispatch)
+        (face-extra--enable-dispatch-pass3)
+        (face-extra--invalidate-cache)
+        (font-lock-flush))
+    (text-align-clear)
+    (face-extra--disable-dispatch-pass3)
+    (face-extra--disable-dispatch)))
+
+
+;;;; ================================================================
+;;;; Section 8 — face-extra registration (load time)
+;;;; ================================================================
+
+(face-extra-define-property 'text-align
+  :pass  3
+  :after nil
+  :apply  #'text-align--apply
+  :clear  #'text-align--clear-marker)
+
 (provide 'horizontal-layout)
 ;;; horizontal-layout.el ends here

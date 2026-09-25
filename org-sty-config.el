@@ -118,6 +118,13 @@
                    (org-block-appear-mode 1)
                    (variable-spacing-mode 1)
                    (horizontal-layout-mode 1)
+                   ;; ── Pass 3 test: midpoint marker ─────────────────────────
+                   ;; text-align-mode wires face-extra--dispatch-pass3 via
+                   ;; jit-lock-register.  The test stub highlights the char at
+                   ;; the midpoint of each visual line in hot pink to confirm
+                   ;; the linewise pass fires.  Remove once centering is real.
+                   (text-align-mode 1)
+                   (face-extra-add-relative 'text-body 'text-align 'center)
                    (org-title-fold-mode 1)
                    (auto-save-mode)
                    (guillemet-nbsp-mode 1)
