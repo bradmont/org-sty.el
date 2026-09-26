@@ -205,8 +205,8 @@ cases requiring runtime values or conditional logic:
     (cl-loop for (k v) on attrs by #'cddr
              do (cond
                  ((and (keywordp k)
-                       (gethash (intern (substring (symbol-name k) 1))
-                                face-extra--registry))
+                       (face-extra-registered-p
+                        (intern (substring (symbol-name k) 1))))
                   ;; Registered face-extra property (the key is :foo, the
                   ;; property symbol is foo).  Push prop then value so that
                   ;; after nreverse the list is (prop val prop val ...) and

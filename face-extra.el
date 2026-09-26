@@ -45,8 +45,12 @@
 ;;;; Section 1 — Registry
 ;;;; ================================================================
 
-(defvar face-extra--registry (make-hash-table :test #'eq)
-  "Global hash table mapping property symbol → registration plist.
+(defvar face-extra--registry (make-hash-table :test #'equal)
+  "Global hash table mapping (property . pass) → registration plist.
+
+The key is a cons `(PROPERTY . PASS)' so that the same property symbol
+may be registered independently at multiple passes (e.g. a property
+that does pass-2 narrowing and pass-3 expansion).
 
 Each entry has the form:
   (:pass PASS :after AFTER-LIST :apply APPLY-FN :clear CLEAR-FN)
@@ -62,17 +66,18 @@ is called with a cookie to undo a global installation.")
 Entries are recomputed by `face-extra--sort-pass' whenever a new
 property is registered for that pass.")
 
+(defun face-extra-registered-p (property)
+  "Return non-nil if PROPERTY is registered in any pass."
+  (or (gethash (cons property 1) face-extra--registry)
+      (gethash (cons property 2) face-extra--registry)
+      (gethash (cons property 3) face-extra--registry)))
+
 (defun face-extra--validate-after (property after pass)
-  "Signal an error if any symbol in AFTER is not in PASS or is unknown."
+  "Signal an error if any symbol in AFTER is not registered in PASS."
   (dolist (dep after)
-    (let ((dep-entry (gethash dep face-extra--registry)))
-      (unless dep-entry
-        (error "face-extra: :after dependency `%s' for `%s' is not registered"
-               dep property))
-      (let ((dep-pass (plist-get dep-entry :pass)))
-        (unless (eql dep-pass pass)
-          (error "face-extra: `%s' (pass %d) has cross-pass :after dep `%s' (pass %d)"
-                 property pass dep dep-pass))))))
+    (unless (gethash (cons dep pass) face-extra--registry)
+      (error "face-extra: :after dependency `%s' for `%s' is not registered in pass %d"
+             dep property pass))))
 
 (defun face-extra--sort-pass (pass)
   "Compute the topological sort order for all properties in PASS.
@@ -85,9 +90,10 @@ build an in-degree map from the :after constraints, and iteratively
 remove zero-in-degree nodes."
   (let ((props-in-pass nil))
     ;; Collect all properties registered for this pass.
-    (maphash (lambda (sym entry)
-               (when (eql (plist-get entry :pass) pass)
-                 (push sym props-in-pass)))
+    ;; Registry keys are (property . pass) cons cells; filter by cdr.
+    (maphash (lambda (key _entry)
+               (when (eql (cdr key) pass)
+                 (push (car key) props-in-pass)))
              face-extra--registry)
     (if (null props-in-pass)
         (puthash pass nil face-extra--pass-order)
@@ -97,7 +103,7 @@ remove zero-in-degree nodes."
         (dolist (sym props-in-pass)
           (puthash sym 0 in-degree))
         (dolist (sym props-in-pass)
-          (let ((after (plist-get (gethash sym face-extra--registry) :after)))
+          (let ((after (plist-get (gethash (cons sym pass) face-extra--registry) :after)))
             (dolist (dep after)
               ;; dep must run before sym → dep → sym edge.
               (push sym (gethash dep dependents))
@@ -148,7 +154,8 @@ entries may be stale.  At load time this is inexpensive and rare."
     ;; We validate lazily (after registration) so that forward-declarations
     ;; are impossible; :after must only name already-registered symbols.
     (face-extra--validate-after property after pass)
-    (puthash property (list :pass pass :after after :apply apply-fn :clear clear-fn)
+    (puthash (cons property pass)
+             (list :pass pass :after after :apply apply-fn :clear clear-fn)
              face-extra--registry)
     ;; Re-sort the affected pass bucket.
     (face-extra--sort-pass pass)
@@ -419,7 +426,7 @@ Returns the entry plist, which is also stored in `face-extra--face-cache'."
       (dolist (prop (gethash pass-num face-extra--pass-order))
         (let ((val (face-extra--resolve-property face prop)))
           (when val
-            (let* ((entry   (gethash prop face-extra--registry))
+            (let* ((entry    (gethash (cons prop pass-num) face-extra--registry))
                    (apply-fn (plist-get entry :apply))
                    (triple   (list prop val apply-fn)))
               (pcase pass-num
@@ -510,7 +517,7 @@ with zero overhead."
   (dolist (prop (gethash pass-num face-extra--pass-order))
     (let ((spans (gethash prop spans-table)))
       (when spans
-        (let* ((entry    (gethash prop face-extra--registry))
+        (let* ((entry    (gethash (cons prop pass-num) face-extra--registry))
                (apply-fn (plist-get entry :apply)))
           (funcall apply-fn (nreverse spans)))))))
 
