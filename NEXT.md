@@ -21,17 +21,56 @@ implemented and verified:
 `window-text-pixel-size` dominates scroll time (~26% of jit-lock
 samples) because it forces a layout pass for each newly-visible visual
 line.  jit-lock caching already handles the "already-seen" case, so a
-content-keyed cache adds nothing.
+content-keyed cache adds nothing — jit-lock simply does not re-fontify
+already-fontified regions.
 
 This is acceptable for centering (few lines in a document are centred).
 For **justification** the same cost applies per-line and is not
 acceptable.
 
-**Planned hybrid approach (deferred):**
+**Window resize:** with olivetti fancy mode (fringe-based desktop), the
+text body width is held constant by the fringes — `window-body-width`
+(text area) does not change when the window widens above page width.
+`available-px` and `text-px` are both unchanged, so centering stamps
+remain valid.  No font-lock flush is needed on window resize as long as
+the window stays above page width.
+
+**Planned: incremental idle look-ahead pre-render**
+
+An idle timer crawls forward from the current viewport frontier,
+pre-fontifying and pre-computing pass-3 stamps 2–3 screens at a time:
+
+  1. `(jit-lock-fontify-now frontier-beg frontier-end)` — runs passes
+     0–2 for the look-ahead region.
+  2. `(face-extra--dispatch-pass3 frontier-beg frontier-end)` — runs
+     pass 3 on the now-fontified region.
+  3. Advance the frontier; reschedule.
+
+When the user scrolls into pre-rendered territory, jit-lock finds it
+already fontified and does nothing — zero measurement cost at scroll
+time.  Crawling in small increments keeps individual idle slices short.
+Large jumps (dozens of pages) land on pre-rendered territory more often
+as the frontier advances.
+
+**This is also the prerequisite infrastructure for pagination.**
+Pagination requires cumulative pixel heights from `point-min` to the
+current viewport — the entire document above the visible window must be
+measured before page N can be computed.  The look-ahead pre-render and
+the pagination height accumulator are the same idle pass and should be
+designed together when pagination work begins.
+
+**Planned hybrid measurement approach (for justification in particular):**
 1. Quick first pass using `font-get-glyphs` advance widths (fast, ~90%
    accurate, misses mixed-face lines with different font sizes).
-2. Deferred second pass via idle timer using `window-text-pixel-size`
+2. Deferred refinement via the idle look-ahead using `window-text-pixel-size`
    (accurate).  May produce a brief jitter on mixed-face lines.
+
+**Also noted:** `org-cite-activate` / citar takes ~21% of jit-lock scroll
+time independently of our code and produces many face-boundary spans per
+citation.  Folding citations behind a single display character (analogous
+to `org-appear` hiding emphasis markers) would collapse that span
+explosion and reduce `face-extra--collect-spans` cost proportionally.
+A prerequisite for correct justification on cite-heavy documents.
 
 ## Known performance note — org-cite-activate
 
