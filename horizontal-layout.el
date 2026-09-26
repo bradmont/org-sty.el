@@ -286,18 +286,14 @@ is active and handles cleanup on disable."
 ;;;; ================================================================
 ;;
 ;; `text-align' is a synthetic face property (pass 3) that controls
-;; text alignment per face.  The `:apply' function receives a list of
-;; (beg end value) spans and walks them visual-line by visual-line
-;; using `vertical-motion', which is safe in jit-lock-register context
-;; but would deadlock inside `:after' advice.
+;; text alignment per face.  SPANS received by the :apply function are
+;; one (lbeg lend value) triple per visual line, as built by the
+;; linewise walk in `face-extra--dispatch-pass3'.  Apply functions must
+;; NOT call `vertical-motion' themselves.
 ;;
-;; Current implementation: test stub.
-;; For each visual line whose face carries `text-align = center', the
-;; character at the midpoint of the line is highlighted with a
-;; conspicuous face.  This exercises the full linewise infrastructure
-;; (jit-lock-register firing, vertical-motion, span collection) without
-;; changing line metrics.  Replace the body of `text-align--apply' with
-;; real alignment stamps once the infrastructure is confirmed working.
+;; Supported values:
+;;   `center'      — real centering via line-prefix align-to offset
+;;   `test-marker' — dev stub: highlights char at character-midpoint
 
 (defconst text-align--prop 'text-align--marker
   "Sentinel text property marking spans styled by `text-align-mode'.
@@ -305,8 +301,13 @@ Used by `text-align-clear' to remove exactly this package's properties.")
 
 ;;;###autoload
 (defun text-align-clear (&optional beg end)
-  "Remove text-align marker properties from BEG..END.
-Defaults to the whole buffer."
+  "Remove text-align display properties from BEG..END.
+Defaults to the whole buffer.
+
+For centering stamps, restores `line-prefix' to the height-only pass-1
+spacer form `(space :width 0 :height H)' rather than removing it
+entirely, preserving vertical rhythm.  For test-marker stamps, which do
+not modify `line-prefix', this restoration is a no-op."
   (interactive (if (use-region-p)
                    (list (region-beginning) (region-end))
                  (list nil nil)))
@@ -319,38 +320,109 @@ Defaults to the whole buffer."
                          pos text-align--prop nil end)
                         end)))
           (when (get-text-property pos text-align--prop)
+            ;; Restore line-prefix or wrap-prefix if we modified it.
+            ;; Logical BOL positions have a centering line-prefix;
+            ;; continuation positions have a centering wrap-prefix.
+            ;; Check both: exactly one will have :align-to.
+            (dolist (prop '(line-prefix wrap-prefix))
+              (let* ((val    (get-text-property pos prop))
+                     (height (and (consp val)
+                                  (eq (car val) 'space)
+                                  (plist-get (cdr val) :height))))
+                (when (and (consp val) (plist-get (cdr val) :align-to))
+                  (if height
+                      (put-text-property pos next prop
+                                         `(space :width 0 :height ,height))
+                    (remove-text-properties pos next (list prop nil))))))
             (remove-text-properties pos next
                                     (list text-align--prop nil
                                           'face nil)))
           (setq pos next))))))
 
+(defun text-align--stamp-center (lbeg lend)
+  "Stamp a centering prefix for the visual line LBEG..LEND.
+
+Each visual line gets its own centering offset, computed individually
+from `window-text-pixel-size' in the current window — no temp buffer,
+no `string-pixel-width'.  Measuring from the live window is essential
+because `face-remapping-alist' entries from `variable-spacing-mode'
+affect character widths for proportional fonts and are absent in a
+temp buffer.
+
+`line-prefix' fires at the start of the first visual line of a logical
+line; `wrap-prefix' fires at the start of each continuation visual line.
+Both are looked up from the character at each visual-line start, so
+each can carry a unique centering offset.  This function stamps the
+appropriate property depending on whether LBEG is a logical BOL.
+
+Preserves the `:height' component already present (written by pass 1)
+so vertical rhythm is not disturbed.
+
+On re-fontification, pass 1 overwrites the relevant prefix property
+with a fresh neutral spacer before pass 3 runs, giving a clean
+measurement.  Any prior centering prefix that was not overwritten is
+explicitly neutralised before measuring."
+  (let* ((win          (get-buffer-window (current-buffer)))
+         (avail        (and win (window-body-width win t))))
+    (when avail
+      (let* (;; line-prefix fires at logical BOL; wrap-prefix fires at
+             ;; continuation visual-line starts.
+             (logical-bol-p (= lbeg (save-excursion
+                                      (goto-char lbeg)
+                                      (line-beginning-position))))
+             (prefix-prop   (if logical-bol-p 'line-prefix 'wrap-prefix))
+             (existing      (get-text-property lbeg prefix-prop))
+             (height        (and (consp existing)
+                                 (eq (car existing) 'space)
+                                 (plist-get (cdr existing) :height)))
+             ;; Restore neutral state if we previously stamped here and
+             ;; pass 1 did not overwrite it, so the measurement is clean.
+             (_ (when (get-text-property lbeg text-align--prop)
+                  (if height
+                      (put-text-property lbeg (1+ lbeg) prefix-prop
+                                         `(space :width 0 :height ,height))
+                    (remove-text-properties lbeg (1+ lbeg)
+                                            (list prefix-prop nil)))))
+             (text-px (car (window-text-pixel-size
+                            win lbeg lend (* 2 avail)))))
+        (when (> avail text-px)
+          (let* ((offset (/ (- avail text-px) 2))
+                 (prefix (if height
+                             `(space :align-to (,offset) :height ,height)
+                           `(space :align-to (,offset)))))
+            (put-text-property lbeg (1+ lbeg) prefix-prop prefix)
+            (put-text-property lbeg (1+ lbeg) text-align--prop t)))))))
+
 (defun text-align--apply (spans)
-  "TEST STUB: highlight the midpoint char of each visual line.
+  "Apply text alignment for SPANS from `face-extra--dispatch-pass3'.
 
-SPANS is a list of (lbeg lend value) triples, one per visual line
-as delivered by `face-extra--dispatch-pass3'.  Pass-3 apply functions
-must NOT call `vertical-motion' themselves — the linewise walk happens
-in the dispatcher, and each triple already represents exactly one
-visual line.
+SPANS is a list of (lbeg lend value) triples, one per visual line.
+Apply functions must NOT call `vertical-motion'.
 
-For real centering, replace the stub body with: compute
-  offset = (available-px - text-px) / 2
-and stamp a `line-prefix' `(space :align-to offset-px)' at lbeg."
+Dispatches on value:
+  `center'      — stamps a centering `line-prefix' at lbeg.
+  `test-marker' — dev stub: highlights the character-position midpoint
+                  in hot pink; use `face-extra-add-relative' with value
+                  `test-marker' to activate."
   (when (bound-and-true-p text-align-mode)
     (with-silent-modifications
       (dolist (span spans)
-        (when (eq (nth 2 span) 'center)
-          (let* ((lbeg (nth 0 span))
-                 (lend (nth 1 span))
-                 (mid  (/ (+ lbeg lend) 2)))
-            (when (and (> lend lbeg)
-                       (< mid lend)
-                       (not (eq (char-after mid) ?\n)))
-              (put-text-property mid (1+ mid)
-                                 'face '( :background "#ff0066"
-                                          :foreground "white"
-                                          :weight bold))
-              (put-text-property mid (1+ mid) text-align--prop t))))))))
+        (let ((lbeg  (nth 0 span))
+              (lend  (nth 1 span))
+              (value (nth 2 span)))
+          (pcase value
+            ('center
+             (text-align--stamp-center lbeg lend))
+            ('test-marker
+             (let ((mid (/ (+ lbeg lend) 2)))
+               (when (and (> lend lbeg)
+                          (< mid lend)
+                          (not (eq (char-after mid) ?\n)))
+                 (put-text-property mid (1+ mid)
+                                    'face '( :background "#ff0066"
+                                             :foreground "white"
+                                             :weight bold))
+                 (put-text-property mid (1+ mid) text-align--prop t))))))))))
 
 (defun text-align--clear-marker (_cookie)
   "No-op `:clear' callback for `text-align' registration.
