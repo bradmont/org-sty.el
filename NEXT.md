@@ -86,40 +86,50 @@ justification on cite-heavy documents.
 
 ## Next work
 
-### Right margin — prerequisite for full text-align correctness
+### Right margin — via atomic trailing-character expansion
 
-There is no `line-suffix' text property in Emacs, so a per-face right
-margin cannot be implemented via text properties alone.  Constraining
-word-wrap to a narrower width requires a window-level operation (the
-same fringe/margin mechanism olivetti uses for the page body).
+There is no `line-suffix' text property in Emacs.  Right margin is
+instead implemented by an atomic pair of operations on each visual line,
+both within one `with-silent-modifications' call so `vertical-motion'
+never sees an intermediate state.
 
-This is a prerequisite for text-align on margined content (quote blocks,
-verse blocks) because:
+**Pass 2** stamps `line-prefix = (space :width (left+right) :height H)'.
+This narrows the text area to `avail - left - right', causing word-wrap
+to fire at the correct boundary.
 
-- **Justify with margins**: the available justification width is
-  `avail - left-margin - right-margin`.  Without a right-margin value,
-  justify cannot compute the correct slack to distribute.
-- **Right-align with a left margin**: `line-prefix` can carry either a
-  left-margin offset OR an align-to position, not both.  Right-align
-  currently clobbers any left margin stamp from pass 2.  Suppress the
-  left margin when right-align is active, or incorporate it into the
-  offset — but this only works if the right boundary is known.
+**Pass 3** (right-margin sub-pass) walks visual lines and for each one:
 
-Until right margin is implemented, `text-align` on faces that also carry
-`horizontal-layout-margin-left` (org-quote, org-verse) will conflict.
-Suppress `text-align` inheritance on those faces for now.
+  1. Restores `line-prefix' to `(space :width left :height H)' (the true
+     left margin).
+  2. On the final buffer character of the visual line at `(1- lend)',
+     stamps a display property that renders the character as itself
+     followed by a `right-px'-wide space:
+
+       (display (concat (buffer-substring (1- lend) lend)
+                        (propertize " " 'display `(space :width ,right-px))))
+
+     This is uniform across all wrap-point characters — space, hyphen,
+     any punctuation — with no special casing required.
+
+**Net display width change: exactly zero** for every character:
+  line-prefix loses right-px (−right-px) and the character gains a
+  right-px trailing space (+right-px).  The wrap point is stable.
+  `vertical-motion' for the next line sees the correct layout.
+
+**Exception:** when `(char-after (1- lend))' is `\n', the visual line is
+the last before a paragraph break and is already shorter than
+`avail - left - right'.  Skip the trailing stamp; only restore
+`line-prefix' to the true left margin.
 
 ### Pass 2 / pass 3 composition
 
-Both passes currently write to `line-prefix`/`wrap-prefix`.  Pass 3
-overwrites pass 2.  The long-term fix is for **pass 3 to take ownership
-of `line-prefix`/`wrap-prefix`** and for pass 2 to record margin values
-only in the face-extra registry (not stamped to text properties).  Pass 3
-then reads both margin values and alignment value from the cache and
-computes one final combined spec:
+Both passes currently write to `line-prefix`/`wrap-prefix'.  Pass 3
+overwrites pass 2.  Long-term fix: pass 3 takes ownership, reads margin
+values from the face-extra cache, and computes one final combined spec:
 
-  - justify + margins: `(space :width left-margin :height H)` + interword
-  - center + margins: `(space :align-to (offset) :height H)` where
+  - justify + margins: `(space :width left :height H)' + interword stamps
+    distributing slack across `avail - left - right'
+  - center + margins: `(space :align-to (offset) :height H)' where
     offset = (avail - left - right - text-px) / 2 + left
   - right + margins: offset = avail - right - text-px
 
