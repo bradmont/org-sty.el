@@ -124,7 +124,8 @@
                    ;; the midpoint of each visual line in hot pink to confirm
                    ;; the linewise pass fires.  Remove once centering is real.
                    (text-align-mode 1)
-                   (face-extra-add-relative 'text-body 'text-align 'center)
+                   (face-extra-add-relative 'text-body 'text-align 'right)
+                   (face-extra-add-relative 'org-document-title 'text-align 'center)
                    (org-title-fold-mode 1)
                    (auto-save-mode)
                    (guillemet-nbsp-mode 1)

@@ -339,29 +339,31 @@ not modify `line-prefix', this restoration is a no-op."
                                           'face nil)))
           (setq pos next))))))
 
-(defun text-align--stamp-center (lbeg lend)
-  "Stamp a centering prefix for the visual line LBEG..LEND.
+(defun text-align--stamp (lbeg lend value)
+  "Stamp an alignment prefix for the visual line LBEG..LEND.
 
-Each visual line gets its own centering offset, computed individually
-from `window-text-pixel-size' in the current window — no temp buffer,
-no `string-pixel-width'.  Measuring from the live window is essential
-because `face-remapping-alist' entries from `variable-spacing-mode'
-affect character widths for proportional fonts and are absent in a
-temp buffer.
+VALUE is `center' or `right'; the offset is computed accordingly:
+  center — (available-px - text-px) / 2
+  right  — (available-px - text-px)
+
+`center', `right', and `justify' are all values of the same `text-align'
+property, so each visual line produces exactly one measurement regardless
+of which value is active.
+
+Measures actual rendered text width via `window-text-pixel-size' in the
+current window — no temp buffer, no `string-pixel-width'.  Measuring
+from the live window is essential because `face-remapping-alist' entries
+from `variable-spacing-mode' affect character widths for proportional
+fonts and are absent in a temp buffer.
 
 `line-prefix' fires at the start of the first visual line of a logical
 line; `wrap-prefix' fires at the start of each continuation visual line.
 Both are looked up from the character at each visual-line start, so
-each can carry a unique centering offset.  This function stamps the
-appropriate property depending on whether LBEG is a logical BOL.
+each carries a unique offset computed for that specific visual line.
 
-Preserves the `:height' component already present (written by pass 1)
-so vertical rhythm is not disturbed.
-
-On re-fontification, pass 1 overwrites the relevant prefix property
-with a fresh neutral spacer before pass 3 runs, giving a clean
-measurement.  Any prior centering prefix that was not overwritten is
-explicitly neutralised before measuring."
+Preserves the `:height' component written by pass 1 so vertical rhythm
+is not disturbed.  Any prior alignment stamp not overwritten by pass 1
+is explicitly neutralised before measuring to keep measurements clean."
   (let* ((win          (get-buffer-window (current-buffer)))
          (avail        (and win (window-body-width win t))))
     (when avail
@@ -386,7 +388,9 @@ explicitly neutralised before measuring."
              (text-px (car (window-text-pixel-size
                             win lbeg lend (* 2 avail)))))
         (when (> avail text-px)
-          (let* ((offset (/ (- avail text-px) 2))
+          (let* ((offset (pcase value
+                           ('center (/ (- avail text-px) 2))
+                           ('right  (- avail text-px))))
                  (prefix (if height
                              `(space :align-to (,offset) :height ,height)
                            `(space :align-to (,offset)))))
@@ -400,7 +404,8 @@ SPANS is a list of (lbeg lend value) triples, one per visual line.
 Apply functions must NOT call `vertical-motion'.
 
 Dispatches on value:
-  `center'      — stamps a centering `line-prefix' at lbeg.
+  `center'      — stamps a centering `line-prefix'/`wrap-prefix' at lbeg.
+  `right'       — stamps a right-align prefix at lbeg.
   `test-marker' — dev stub: highlights the character-position midpoint
                   in hot pink; use `face-extra-add-relative' with value
                   `test-marker' to activate."
@@ -411,8 +416,8 @@ Dispatches on value:
               (lend  (nth 1 span))
               (value (nth 2 span)))
           (pcase value
-            ('center
-             (text-align--stamp-center lbeg lend))
+            ((or 'center 'right)
+             (text-align--stamp lbeg lend value))
             ('test-marker
              (let ((mid (/ (+ lbeg lend) 2)))
                (when (and (> lend lbeg)

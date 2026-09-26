@@ -86,12 +86,50 @@ justification on cite-heavy documents.
 
 ## Next work
 
+### Right margin — prerequisite for full text-align correctness
+
+There is no `line-suffix' text property in Emacs, so a per-face right
+margin cannot be implemented via text properties alone.  Constraining
+word-wrap to a narrower width requires a window-level operation (the
+same fringe/margin mechanism olivetti uses for the page body).
+
+This is a prerequisite for text-align on margined content (quote blocks,
+verse blocks) because:
+
+- **Justify with margins**: the available justification width is
+  `avail - left-margin - right-margin`.  Without a right-margin value,
+  justify cannot compute the correct slack to distribute.
+- **Right-align with a left margin**: `line-prefix` can carry either a
+  left-margin offset OR an align-to position, not both.  Right-align
+  currently clobbers any left margin stamp from pass 2.  Suppress the
+  left margin when right-align is active, or incorporate it into the
+  offset — but this only works if the right boundary is known.
+
+Until right margin is implemented, `text-align` on faces that also carry
+`horizontal-layout-margin-left` (org-quote, org-verse) will conflict.
+Suppress `text-align` inheritance on those faces for now.
+
+### Pass 2 / pass 3 composition
+
+Both passes currently write to `line-prefix`/`wrap-prefix`.  Pass 3
+overwrites pass 2.  The long-term fix is for **pass 3 to take ownership
+of `line-prefix`/`wrap-prefix`** and for pass 2 to record margin values
+only in the face-extra registry (not stamped to text properties).  Pass 3
+then reads both margin values and alignment value from the cache and
+computes one final combined spec:
+
+  - justify + margins: `(space :width left-margin :height H)` + interword
+  - center + margins: `(space :align-to (offset) :height H)` where
+    offset = (avail - left - right - text-px) / 2 + left
+  - right + margins: offset = avail - right - text-px
+
+This refactor should happen alongside right-margin implementation.
+
 ### Right alignment
 
-`text-align = right`: for each visual line, compute
-  offset = available-px - text-px
-and stamp `line-prefix` / `wrap-prefix` with `(space :align-to (offset))`.
-Same architecture as centre; reuse `text-align--stamp-center` structure.
+DONE.  `text-align = right` implemented; refactored shared `text-align--stamp'
+function used by both center and right.  One measurement per visual line
+regardless of value.
 
 ### Justification
 
