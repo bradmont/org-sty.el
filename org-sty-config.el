@@ -76,9 +76,11 @@
          ;; (buffer-local face-extra--local-properties) before it reaches
          ;; the inherited chain.
          (org-quote           . (:slant italic :variable-spacing-ratio 0
-                                 :horizontal-layout-margin-left 4))
+                                 :horizontal-layout-margin-left 4
+                                 :horizontal-layout-margin-right 4))
          (org-verse           . (:slant italic :variable-spacing-ratio 0
-                                 :horizontal-layout-margin-left 4))
+                                 :horizontal-layout-margin-left 4
+                                 :horizontal-layout-margin-right 4))
          (org-block           . (:variable-spacing-ratio 0)))
         :eval
         ((org-sty-remap
@@ -124,7 +126,7 @@
                    ;; the midpoint of each visual line in hot pink to confirm
                    ;; the linewise pass fires.  Remove once centering is real.
                    (text-align-mode 1)
-                   (face-extra-add-relative 'text-body 'text-align 'right)
+                   ;(face-extra-add-relative 'text-body 'text-align 'right)
                    (face-extra-add-relative 'org-document-title 'text-align 'center)
                    (org-title-fold-mode 1)
                    (auto-save-mode)

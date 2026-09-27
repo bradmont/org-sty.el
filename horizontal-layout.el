@@ -68,6 +68,11 @@ Used by `horizontal-layout-clear' to remove exactly this package's
 display properties without disturbing Org's or other packages' uses of
 `line-prefix'/`wrap-prefix'.")
 
+(defconst horizontal-layout--right-prop 'horizontal-layout--right
+  "Overlay property key for right-margin after-string overlays.
+Set on overlays created by `horizontal-layout--apply-margin-right-pass3'.
+Used by `horizontal-layout-clear' to find and remove these overlays.")
+
 (defun horizontal-layout--compose-prefix (width existing-prefix)
   "Return a display spec combining WIDTH with EXISTING-PREFIX's :height.
 
@@ -164,6 +169,10 @@ present."
     ;; Remove block-start indent overlays in the range.
     (dolist (ov (overlays-in beg end))
       (when (overlay-get ov horizontal-layout--prop)
+        (delete-overlay ov)))
+    ;; Remove right-margin after-string overlays.
+    (dolist (ov (overlays-in beg end))
+      (when (overlay-get ov horizontal-layout--right-prop)
         (delete-overlay ov))))))
 
 
@@ -246,6 +255,187 @@ on mode disable or the next dispatch cycle."
 
 
 ;;;; ================================================================
+;;;; Section 3b — Right margin (pass 2 + pass 3)
+;;;; ================================================================
+;;
+;; `horizontal-layout-margin-right' is registered at BOTH pass 2 and
+;; pass 3 under separate `(property . pass)' registry keys, sharing the
+;; same user-facing property name.
+;;
+;; Pass 2 (:after horizontal-layout-margin-left):
+;;   Reads the existing `line-prefix' (which at this point carries
+;;   `(space :width left :height H)' from margin-left) and replaces
+;;   `:width' with `left + right'.  This narrows the display text area
+;;   so word-wrap fires at `avail - left - right'.
+;;
+;; Pass 3 (:after nil, before text-align via :after constraint there):
+;;   Walks visual-line spans (one triple per line) and atomically:
+;;   1. Reads the combined width from line-prefix and restores it to
+;;      left-only by subtracting VALUE.
+;;   2. Stamps a display property on the final char `(1- lend)' that
+;;      renders it as itself followed by a VALUE-wide trailing space.
+;;
+;;   Trailing stamp is skipped when:
+;;     (a) `(char-after (1- lend))' is `\n' — last line of a paragraph.
+;;     (b) The face at lbeg has a non-nil `text-align' — alignment takes
+;;         ownership of the right boundary (see NEXT.md for geometry).
+
+(defun horizontal-layout--apply-margin-right-pass2 (spans)
+  "Narrow text area for right margin — pass-2 apply for margin-right.
+
+SPANS is a list of (beg end value) triples where VALUE is the right
+margin in canonical character widths.  Runs after margin-left (:after
+constraint) so the left-margin `line-prefix' is already stamped.
+Reads `(space :width left :height H)' and replaces `:width' with
+`left+right', narrowing the display text area so word-wrap fires at
+`avail - left - right'.
+
+Only runs when `horizontal-layout-mode' is active."
+  (when (bound-and-true-p horizontal-layout-mode)
+    (with-silent-modifications
+      (dolist (span spans)
+        (let ((beg   (nth 0 span))
+              (end   (nth 1 span))
+              (right (nth 2 span)))
+          (when (and (numberp right) (> right 0))
+            ;; Skip beg when org-block-appear has hidden the block
+            ;; delimiter: beg is not at a screen-line start, but the
+            ;; block-start overlay (from margin-left) already provides
+            ;; the indent via before-string.  Stamping line-prefix on
+            ;; beg as well would double the indent.
+            (let ((pos (if (horizontal-layout--block-start-p beg)
+                           (1+ beg)
+                         beg)))
+              (while (< pos end)
+                (let* ((next     (min end
+                                      (or (next-single-property-change
+                                           pos 'line-prefix nil end)
+                                          end)))
+                       (existing (get-text-property pos 'line-prefix))
+                       (left     (and (consp existing)
+                                      (eq (car existing) 'space)
+                                      (plist-get (cdr existing) :width)))
+                       (height   (and (consp existing)
+                                      (eq (car existing) 'space)
+                                      (plist-get (cdr existing) :height)))
+                       (combined (+ (or left 0) right))
+                       (prefix   (if height
+                                     `(space :width ,combined :height ,height)
+                                   `(space :width ,combined))))
+                  (put-text-property pos next 'line-prefix  prefix)
+                  (put-text-property pos next 'wrap-prefix  prefix)
+                  (put-text-property pos next horizontal-layout--prop t)
+                  (setq pos next))))))))))
+
+(defun horizontal-layout--clear-margin-right (_cookie)
+  "No-op `:clear' callback for `horizontal-layout-margin-right'.
+Per-buffer stamps are cleaned up by `horizontal-layout-clear'."
+  nil)
+
+(defun horizontal-layout--apply-margin-right-pass3 (spans)
+  "Atomic right-margin expansion — pass-3 apply for margin-right.
+
+SPANS is a list of (lbeg lend value) triples, one per visual line
+(from `face-extra--dispatch-pass3').  VALUE is the right margin in
+canonical character widths.  Must NOT call `vertical-motion'.
+
+For each visual line, within `with-silent-modifications':
+  1. Reads `line-prefix' width (left+right from pass 2) and restores
+     it to left-only: `(space :width left :height H)'.
+  2. Stamps a display property on `(1- lend)' rendering the character
+     as itself followed by a VALUE-wide trailing space, unless:
+       (a) `(char-after (1- lend))' is `\\n' — last line of paragraph.
+       (b) The face at lbeg has a non-nil `text-align' — alignment
+           takes ownership of the right boundary.
+
+Only runs when `horizontal-layout-mode' is active."
+  (when (bound-and-true-p horizontal-layout-mode)
+    (with-silent-modifications
+      (dolist (span spans)
+        (let* ((lbeg  (nth 0 span))
+               (lend  (nth 1 span))
+               (right (nth 2 span)))
+          (when (and (numberp right) (> right 0) (< lbeg lend))
+            (let* ((existing (get-text-property lbeg 'line-prefix))
+                   (combined (and (consp existing)
+                                  (eq (car existing) 'space)
+                                  (plist-get (cdr existing) :width)))
+                   (height   (and (consp existing)
+                                  (eq (car existing) 'space)
+                                  (plist-get (cdr existing) :height)))
+                   (left     (max 0 (- (or combined 0) right))))
+              ;; Step 1: restore the firing prefix to left-only.
+              ;; line-prefix fires at logical BOL; wrap-prefix fires at
+              ;; continuation visual-line starts.  Restore whichever
+              ;; one actually fires for this visual line.
+              (let* ((logical-bol-p (= lbeg (save-excursion
+                                              (goto-char lbeg)
+                                              (line-beginning-position))))
+                     (prefix-prop   (if logical-bol-p
+                                        'line-prefix
+                                      'wrap-prefix))
+                     (restored      (if height
+                                        `(space :width ,left :height ,height)
+                                      `(space :width ,left))))
+                (put-text-property lbeg (1+ lbeg) prefix-prop restored))
+              ;; Clear any stale right-margin overlay for this visual line.
+              (dolist (ov (overlays-in lbeg lend))
+                (when (overlay-get ov horizontal-layout--right-prop)
+                  (delete-overlay ov)))
+              ;; Step 2: right-margin after-string (unless skipped).
+              (let* ((trail-pos (1- lend))
+                     (trail-ch  (and (>= trail-pos lbeg)
+                                     (char-after trail-pos)))
+                     (f         (or (get-text-property lbeg 'font-lock-face)
+                                    (get-text-property lbeg 'face)))
+                     (face      (cond ((symbolp f) f)
+                                      ((listp f)   (cl-find-if #'symbolp f))
+                                      (t           nil)))
+                     (has-align (and face
+                                     (face-extra--resolve-property
+                                      face 'text-align))))
+                (unless (or (null trail-ch)
+                            (eq trail-ch ?\n)
+                            has-align)
+                  ;; Add a right-margin space via an overlay after-string.
+                  ;; An after-string's display property is processed as a
+                  ;; top-level display element (not nested), so
+                  ;; `(space :width N)' correctly uses N × face-char-width.
+                  ;; A display property inside a display string is ignored
+                  ;; by Emacs, which is why a text-property approach fails.
+                  (let* ((tf         (or (get-text-property trail-pos
+                                                            'font-lock-face)
+                                         (get-text-property trail-pos 'face)))
+                         (trail-face (cond ((symbolp tf) tf)
+                                           ((listp tf)   (cl-find-if
+                                                          #'symbolp tf))
+                                           (t            nil)))
+                         (ov         (make-overlay trail-pos lend)))
+                    (overlay-put ov 'after-string
+                                 (propertize " "
+                                             'face trail-face
+                                             'display `(space :width ,right)))
+                    (overlay-put ov horizontal-layout--right-prop t)))))))))))
+
+(defun horizontal-layout--pre-clear-right-margin (beg end)
+  "Remove right-margin after-string overlays in BEG..END.
+Called as a `:pre-clear' callback before `face-extra--dispatch-pass3'
+starts its `vertical-motion' walk.  Stale right-margin overlays from a
+previous pass-3 run add visual width via their after-strings, causing
+`vertical-motion' to compute wrong visual-line boundaries (lend too
+early, potentially mid-word).  Clearing them here ensures the walk sees
+the clean display state."
+  (dolist (ov (overlays-in beg end))
+    (when (overlay-get ov horizontal-layout--right-prop)
+      (delete-overlay ov))))
+
+(defun horizontal-layout--clear-margin-right-pass3 (_cookie)
+  "No-op `:clear' callback for `horizontal-layout-margin-right' pass 3.
+Per-buffer stamps are cleaned up by `horizontal-layout-clear'."
+  nil)
+
+
+;;;; ================================================================
 ;;;; Section 4 — Minor mode
 ;;;; ================================================================
 
@@ -256,17 +446,20 @@ on mode disable or the next dispatch cycle."
 Margin values are configured via `face-extra-add-relative' (buffer-local)
 or `face-extra-add' (global):
 
-  (face-extra-add-relative \\='org-quote \\='horizontal-layout-margin-left 40)
+  (face-extra-add-relative \\='org-quote \\='horizontal-layout-margin-left 4)
+  (face-extra-add-relative \\='org-quote \\='horizontal-layout-margin-right 4)
 
-`face-extra--dispatch' owns the apply loop; this mode ensures dispatch
-is active and handles cleanup on disable."
+`face-extra--dispatch' owns passes 1-2; `face-extra--dispatch-pass3'
+owns pass 3 (right-margin expansion).  Both are managed here."
   :lighter " HLay"
   (if horizontal-layout-mode
       (progn
         (face-extra--enable-dispatch)
+        (face-extra--enable-dispatch-pass3)
         (face-extra--invalidate-cache)
         (font-lock-flush))
     (horizontal-layout-clear)
+    (face-extra--disable-dispatch-pass3)
     (face-extra--disable-dispatch)))
 
 
@@ -279,6 +472,19 @@ is active and handles cleanup on disable."
   :after nil
   :apply  #'horizontal-layout--apply-margin-left
   :clear  #'horizontal-layout--clear-margin-left)
+
+(face-extra-define-property 'horizontal-layout-margin-right
+  :pass  2
+  :after '(horizontal-layout-margin-left)
+  :apply  #'horizontal-layout--apply-margin-right-pass2
+  :clear  #'horizontal-layout--clear-margin-right)
+
+(face-extra-define-property 'horizontal-layout-margin-right
+  :pass       3
+  :after      nil
+  :pre-clear  #'horizontal-layout--pre-clear-right-margin
+  :apply      #'horizontal-layout--apply-margin-right-pass3
+  :clear      #'horizontal-layout--clear-margin-right-pass3)
 
 
 ;;;; ================================================================
@@ -340,11 +546,17 @@ not modify `line-prefix', this restoration is a no-op."
           (setq pos next))))))
 
 (defun text-align--stamp (lbeg lend value)
-  "Stamp an alignment prefix for the visual line LBEG..LEND.
+  "Stamp a margin-aware alignment prefix for the visual line LBEG..LEND.
 
-VALUE is `center' or `right'; the offset is computed accordingly:
-  center — (available-px - text-px) / 2
-  right  — (available-px - text-px)
+VALUE is `center' or `right'; the offset accounts for any left/right
+margins on the face at LBEG (see NEXT.md for derivation):
+  center — left_px + (avail - left_px - right_px - text_px) / 2
+  right  — avail - right_px - text_px
+
+margin-left and margin-right are resolved from the face cache and
+converted to pixels via `frame-char-width' (approximate but sufficient;
+`frame-char-width' is horizontal and unaffected by the floor-height
+remap that makes `frame-char-height' unreliable in WP buffers).
 
 `center', `right', and `justify' are all values of the same `text-align'
 property, so each visual line produces exactly one measurement regardless
@@ -364,10 +576,24 @@ each carries a unique offset computed for that specific visual line.
 Preserves the `:height' component written by pass 1 so vertical rhythm
 is not disturbed.  Any prior alignment stamp not overwritten by pass 1
 is explicitly neutralised before measuring to keep measurements clean."
-  (let* ((win          (get-buffer-window (current-buffer)))
-         (avail        (and win (window-body-width win t))))
+  (let* ((win   (get-buffer-window (current-buffer)))
+         (avail (and win (window-body-width win t))))
     (when avail
-      (let* (;; line-prefix fires at logical BOL; wrap-prefix fires at
+      (let* (;; Margin values for the face at lbeg.
+             (f        (or (get-text-property lbeg 'font-lock-face)
+                           (get-text-property lbeg 'face)))
+             (face     (cond ((symbolp f) f)
+                             ((listp f)   (cl-find-if #'symbolp f))
+                             (t           nil)))
+             (char-w   (frame-char-width))
+             (left-px  (* char-w (or (and face (face-extra--resolve-property
+                                               face 'horizontal-layout-margin-left))
+                                     0)))
+             (right-px (* char-w (or (and face (face-extra--resolve-property
+                                               face 'horizontal-layout-margin-right))
+                                     0)))
+             (zone     (- avail left-px right-px))
+             ;; line-prefix fires at logical BOL; wrap-prefix fires at
              ;; continuation visual-line starts.
              (logical-bol-p (= lbeg (save-excursion
                                       (goto-char lbeg)
@@ -377,8 +603,7 @@ is explicitly neutralised before measuring to keep measurements clean."
              (height        (and (consp existing)
                                  (eq (car existing) 'space)
                                  (plist-get (cdr existing) :height)))
-             ;; Restore neutral state if we previously stamped here and
-             ;; pass 1 did not overwrite it, so the measurement is clean.
+             ;; Neutralise any prior alignment stamp before measuring.
              (_ (when (get-text-property lbeg text-align--prop)
                   (if height
                       (put-text-property lbeg (1+ lbeg) prefix-prop
@@ -387,10 +612,10 @@ is explicitly neutralised before measuring to keep measurements clean."
                                             (list prefix-prop nil)))))
              (text-px (car (window-text-pixel-size
                             win lbeg lend (* 2 avail)))))
-        (when (> avail text-px)
+        (when (> zone text-px)
           (let* ((offset (pcase value
-                           ('center (/ (- avail text-px) 2))
-                           ('right  (- avail text-px))))
+                           ('center (+ left-px (/ (- zone text-px) 2)))
+                           ('right  (- avail right-px text-px))))
                  (prefix (if height
                              `(space :align-to (,offset) :height ,height)
                            `(space :align-to (,offset)))))
@@ -469,7 +694,7 @@ is registered and handles cleanup on disable."
 
 (face-extra-define-property 'text-align
   :pass  3
-  :after nil
+  :after '(horizontal-layout-margin-right)
   :apply  #'text-align--apply
   :clear  #'text-align--clear-marker)
 

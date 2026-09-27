@@ -136,16 +136,21 @@ PLIST must contain:
           to undo a global property installation.
 
 Optional:
-  :after  List of property symbols in the same PASS that must run before
-          this property.  Cross-pass references are rejected.
+  :after      List of property symbols in the same PASS that must run before
+              this property.  Cross-pass references are rejected.
+  :pre-clear  Function called with (beg end) once before the pass-3
+              visual-line walk begins.  Use this to remove display artifacts
+              (e.g. overlays) that would affect `vertical-motion' layout
+              calculations.  Only meaningful for pass-3 properties.
 
 Registering a property clears the entire face cache (via
 `face-extra--invalidate-all-caches') because existing per-face cache
 entries may be stale.  At load time this is inexpensive and rare."
-  (let ((pass  (plist-get plist :pass))
-        (after (plist-get plist :after))
-        (apply-fn (plist-get plist :apply))
-        (clear-fn (plist-get plist :clear)))
+  (let ((pass       (plist-get plist :pass))
+        (after      (plist-get plist :after))
+        (apply-fn   (plist-get plist :apply))
+        (clear-fn   (plist-get plist :clear))
+        (pre-clear  (plist-get plist :pre-clear)))
     (unless (memql pass '(1 2 3))
       (error "face-extra-define-property: :pass must be 1, 2, or 3 (got %S)" pass))
     (unless (functionp apply-fn)
@@ -155,7 +160,8 @@ entries may be stale.  At load time this is inexpensive and rare."
     ;; are impossible; :after must only name already-registered symbols.
     (face-extra--validate-after property after pass)
     (puthash (cons property pass)
-             (list :pass pass :after after :apply apply-fn :clear clear-fn)
+             (list :pass pass :after after :apply apply-fn :clear clear-fn
+                   :pre-clear pre-clear)
              face-extra--registry)
     ;; Re-sort the affected pass bucket.
     (face-extra--sort-pass pass)
@@ -172,6 +178,20 @@ entries may be stale.  At load time this is inexpensive and rare."
 
 Nil until first use; created lazily by `face-extra-add-relative'.
 A value of 0 means \"explicitly suppressed\" — stops inheritance search.")
+
+(defvar-local face-extra--pass3-pending nil
+  "Cons `(beg . end)' of the region pass-2 processed in the current
+jit-lock cycle, set by `face-extra--dispatch' and consumed by
+`face-extra--dispatch-pass3'.
+
+`font-lock-fontify-keywords-region' (where pass-2 runs via :after
+advice) receives font-lock's extended region — for multiline constructs
+like org-quote blocks this covers the full block.  The jit-lock
+registered function (where pass-3 runs) receives only the original
+smaller jit-lock chunk.  This variable bridges that gap so pass-3
+always covers at least the region pass-2 processed.  Multiple calls
+to `face-extra--dispatch' within one jit-lock cycle accumulate the
+union of all sub-regions.")
 
 (defvar-local face-extra--face-cache nil
   "Buffer-local hash table: face-symbol → per-pass sorted apply lists.
@@ -497,7 +517,7 @@ leaking the `text-body' ratio through."
                        supp))))
               (dolist (face faces)
                 (let ((entry (face-extra--get-cache-entry face)))
-                  (dolist (pass-key '(:pass1 :pass2 :pass3))
+                  (dolist (pass-key '(:pass1 :pass2))
                     (dolist (triple (plist-get entry pass-key))
                       (let ((prop (nth 0 triple))
                             (val  (nth 1 triple)))
@@ -546,17 +566,47 @@ Steps:
       ;; after the display engine has settled, so vertical-motion is safe there.
       (let ((spans-table (face-extra--collect-spans beg end)))
         (face-extra--run-pass 1 spans-table)
-        (face-extra--run-pass 2 spans-table)))))
+        (face-extra--run-pass 2 spans-table))
+      ;; Record the full region we just processed so pass-3 can cover it.
+      ;; Multiple calls within one jit-lock cycle accumulate the union.
+      (setq face-extra--pass3-pending
+            (if face-extra--pass3-pending
+                (cons (min beg (car face-extra--pass3-pending))
+                      (max end (cdr face-extra--pass3-pending)))
+              (cons beg end))))))
 
 ;;;; ------ Advice wiring ------
+
+(defun face-extra--after-ensure (&rest _)
+  "Run pass-3 on the visible window after `font-lock-ensure'.
+
+`font-lock-update' calls `font-lock-ensure' which drives
+`font-lock-fontify-region' directly, bypassing jit-lock entirely.
+Pass-2 runs (via the :after advice on `font-lock-fontify-keywords-region')
+but `jit-lock-register' functions never fire, so pass-3 is skipped.
+
+This advice closes that gap: after `font-lock-ensure' finishes (outside
+jit-lock, so `vertical-motion' is safe), pass-3 is run on the currently
+visible window region.  Off-screen content is corrected lazily when the
+user scrolls and jit-lock processes it normally."
+  (when (and (or face-extra--local-properties
+                 (face-extra--active-backend))
+             (gethash 3 face-extra--pass-order))
+    (let ((win (get-buffer-window (current-buffer) t)))
+      (when win
+        (face-extra--dispatch-pass3
+         (window-start win)
+         (window-end win t))))))
 
 (defun face-extra--enable-dispatch ()
   "Add `face-extra--dispatch' as :after advice on fontification.
 Advises `font-lock-fontify-keywords-region' so the dispatch runs
 after Org (and all other font-lock keywords) have fully annotated the
-region.  Idempotent."
+region.  Also advises `font-lock-ensure' so that `font-lock-update'
+(which bypasses jit-lock) still triggers pass-3.  Idempotent."
   (advice-add 'font-lock-fontify-keywords-region :after
-              #'face-extra--dispatch))
+              #'face-extra--dispatch)
+  (advice-add 'font-lock-ensure :after #'face-extra--after-ensure))
 
 (defun face-extra--disable-dispatch ()
   "Remove the `face-extra--dispatch' advice.
@@ -574,7 +624,9 @@ backend matches any live buffer's major mode."
           (buffer-list))))
     (unless still-needed
       (advice-remove 'font-lock-fontify-keywords-region
-                     #'face-extra--dispatch))))
+                     #'face-extra--dispatch)
+      (advice-remove 'font-lock-ensure
+                     #'face-extra--after-ensure))))
 
 ;;;; ------ Pass-3 jit-lock dispatch ------
 
@@ -625,6 +677,15 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
   (when (and (or face-extra--local-properties
                  (face-extra--active-backend))
              (gethash 3 face-extra--pass-order))
+    ;; Expand beg/end by any region pass-2 covered in this jit-lock cycle.
+    ;; Pass-2's :after advice receives font-lock's extended region (e.g.
+    ;; the full org-quote block); jit-lock only passes us the smaller
+    ;; original chunk.  Without this, the tail of a multi-line block never
+    ;; gets pass-3 treatment because font-lock already marked it fontified.
+    (when face-extra--pass3-pending
+      (setq beg (min beg (car face-extra--pass3-pending))
+            end (max end (cdr face-extra--pass3-pending)))
+      (setq face-extra--pass3-pending nil))
     (let ((region (face-extra--expand-to-lines beg end)))
       (when region
         (let ((rbeg (car region))
@@ -633,6 +694,15 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
               ;; one per visual line.  Same hash format as spans-table so
               ;; face-extra--run-pass can be reused unchanged.
               (line-spans (make-hash-table :test #'eq)))
+          ;; Pre-clear pass: call :pre-clear for each registered pass-3 property
+          ;; before the visual-line walk.  Stale overlays from previous pass-3
+          ;; runs affect `vertical-motion' layout, causing wrong lbeg/lend values.
+          ;; Clearing them here ensures the walk sees the clean display state.
+          (dolist (prop (gethash 3 face-extra--pass-order))
+            (let* ((entry  (gethash (cons prop 3) face-extra--registry))
+                   (pre-fn (plist-get entry :pre-clear)))
+              (when pre-fn
+                (funcall pre-fn rbeg rend))))
           (save-excursion
             (goto-char rbeg)
             (while (< (point) rend)
@@ -677,8 +747,18 @@ that requires pass-3 dispatch.  Idempotent."
   (jit-lock-register #'face-extra--dispatch-pass3))
 
 (defun face-extra--disable-dispatch-pass3 ()
-  "Unregister `face-extra--dispatch-pass3' from jit-lock in the current buffer."
-  (jit-lock-unregister #'face-extra--dispatch-pass3))
+  "Unregister `face-extra--dispatch-pass3' from jit-lock in the current buffer.
+
+Only unregisters when no pass-3 properties remain active in this buffer
+— i.e. when `face-extra--local-properties' carries no pass-3 values and
+no registered backend is active.  This prevents one mode disabling pass-3
+while another mode still requires it in the same buffer."
+  (let ((still-needed
+         (and (or face-extra--local-properties
+                  (face-extra--active-backend))
+              (gethash 3 face-extra--pass-order))))
+    (unless still-needed
+      (jit-lock-unregister #'face-extra--dispatch-pass3))))
 
 
 (provide 'face-extra)
