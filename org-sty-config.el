@@ -47,15 +47,18 @@
          ;; `--apply-font' via heading-remap-cookies so that tag-specific
          ;; :font overrides (e.g. "Times New Roman" for WP buffers) are
          ;; respected.  Never specify :family/:font here.
-         (org-level-1         . (:weight bold :height 1.4))
-         (org-level-2         . (:weight bold :height 1.3))
-         (org-level-3         . (:weight bold :height 1.2))
-         (org-level-4         . (:weight bold :height 1.1))
-         (org-level-5         . (:weight bold :height 1.0))
-         (org-level-6         . (:weight bold :height 1.0))
-         (org-level-7         . (:weight bold :height 1.0))
-         (org-level-8         . (:weight bold :height 1.0))
-         (org-document-title  . (:weight bold :height 1.6))
+         ;; :text-align 0 suppresses justify/center/right inherited from
+         ;; text-body through the face-extra resolver.  Headings must
+         ;; never be justified.
+         (org-level-1         . (:weight bold :height 1.4 :text-align 0))
+         (org-level-2         . (:weight bold :height 1.3 :text-align 0))
+         (org-level-3         . (:weight bold :height 1.2 :text-align 0))
+         (org-level-4         . (:weight bold :height 1.1 :text-align 0))
+         (org-level-5         . (:weight bold :height 1.0 :text-align 0))
+         (org-level-6         . (:weight bold :height 1.0 :text-align 0))
+         (org-level-7         . (:weight bold :height 1.0 :text-align 0))
+         (org-level-8         . (:weight bold :height 1.0 :text-align 0))
+         (org-document-title  . (:weight bold :height 1.6 :text-align 0))
          ;; Structural / metadata: fixed-pitch at floor size.
          (org-drawer          . (:inherit fixed-pitch :height 1.0))
          (org-property-value  . (:inherit fixed-pitch :height 60))

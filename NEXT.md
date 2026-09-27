@@ -30,7 +30,27 @@ of a line inside a quote block and read the echo area output.
 
 ---
 
-## Priority 2 — Performance: idle render-ahead window
+## Priority 2 — Performance: space-width cache
+
+Currently `text-align--stamp` calls `window-text-pixel-size` on the
+first collected space once per visual line to get `natural-px`.  This
+is already one call per line (not per space), but it can be reduced to
+one call per *face combination* per dispatch cycle.
+
+Add a `defvar-local text-align--space-width-cache` hash table keyed by
+the raw face value at the space position (symbol, list, or nil).  On a
+miss, measure and cache; on a hit, return directly.  Clear the cache at
+the top of `text-align--justify-clear` (the `:pre-clear` callback) so
+it is rebuilt fresh each dispatch cycle, picking up any font/scale
+changes.
+
+This correctly handles superscripts and other face variants — a space
+in a superscript run has a smaller natural width than body-text spaces
+and must get its own cache entry.  With the cache, all lines in a chunk
+that share the same face combination pay zero marginal cost for the
+space-width lookup.
+
+## Priority 3 — Performance: idle render-ahead window
 
 `window-text-pixel-size` is called once per justified visual line per
 jit-lock chunk.  This dominates scroll performance on long documents
