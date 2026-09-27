@@ -193,6 +193,21 @@ always covers at least the region pass-2 processed.  Multiple calls
 to `face-extra--dispatch' within one jit-lock cycle accumulate the
 union of all sub-regions.")
 
+(defvar-local face-extra--pass3-flush-timer nil
+  "Buffer-local idle timer that runs a deferred full pass-3 flush.
+Set by `face-extra--dispatch-pass3' when it detects active typing and
+defers the full pending region to idle time.  Cancelled and rescheduled
+on each keystroke so only one flush fires per typing burst.")
+
+(defvar face-extra--pass3-flush-delay 0.1
+  "Idle delay in seconds before a deferred pass-3 flush runs.
+When the pending region is much larger than the jit-lock chunk (i.e.
+the whole paragraph was re-fontified by Org's extension functions but
+only one line was actually edited), pass-3 processes only the jit-lock
+chunk immediately and defers the full region to this idle delay.
+Lower values give more responsive justification after pausing; higher
+values reduce timer overhead during very fast typing.")
+
 (defvar-local face-extra--face-cache nil
   "Buffer-local hash table: face-symbol → per-pass sorted apply lists.
 
@@ -652,6 +667,24 @@ Returns a (BEG . END) cons, or nil if the region is empty after clipping."
     (when (< beg end)
       (cons beg end))))
 
+(defun face-extra--schedule-pass3-flush (buf beg end)
+  "Schedule a full pass-3 run for BEG..END in BUF after an idle delay.
+Cancels any previously scheduled flush for the same buffer so only one
+fires per typing burst.  When the timer fires, calls
+`face-extra--dispatch-pass3' directly with the deferred region."
+  (when (buffer-local-value 'face-extra--pass3-flush-timer buf)
+    (cancel-timer (buffer-local-value 'face-extra--pass3-flush-timer buf)))
+  (with-current-buffer buf
+    (setq face-extra--pass3-flush-timer
+          (run-with-idle-timer
+           face-extra--pass3-flush-delay nil
+           (lambda (b e)
+             (when (buffer-live-p buf)
+               (with-current-buffer buf
+                 (setq face-extra--pass3-flush-timer nil)
+                 (face-extra--dispatch-pass3 b e))))
+           beg end))))
+
 (defun face-extra--dispatch-pass3 (beg end)
   "jit-lock-register pass-3 dispatch: one visual-line walk, not spanwise.
 
@@ -682,10 +715,28 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
     ;; the full org-quote block); jit-lock only passes us the smaller
     ;; original chunk.  Without this, the tail of a multi-line block never
     ;; gets pass-3 treatment because font-lock already marked it fontified.
+    ;;
+    ;; Debounce: when Emacs is not idle (active typing) AND the pending
+    ;; region is significantly larger than the jit-lock chunk, expanding
+    ;; immediately means walking the whole paragraph on every keystroke —
+    ;; O(paragraph_lines) vertical-motion calls per key.  Instead, process
+    ;; only the jit-lock chunk now (unchanged lines keep valid stamps) and
+    ;; schedule a short idle flush for the full pending region.  The flush
+    ;; fires ~0.1 s after typing pauses, settling justification cleanly.
     (when face-extra--pass3-pending
-      (setq beg (min beg (car face-extra--pass3-pending))
-            end (max end (cdr face-extra--pass3-pending)))
-      (setq face-extra--pass3-pending nil))
+      (let ((pending-beg (car face-extra--pass3-pending))
+            (pending-end (cdr face-extra--pass3-pending)))
+        (setq face-extra--pass3-pending nil)
+        (if (and (null (current-idle-time))
+                 ;; Pending region is at least 3× the jit-lock chunk.
+                 (> (- pending-end pending-beg)
+                    (* 3 (- end beg))))
+            ;; Active typing with large pending: defer full region to idle.
+            (face-extra--schedule-pass3-flush
+             (current-buffer) pending-beg pending-end)
+          ;; Idle or small expansion: expand immediately as normal.
+          (setq beg (min beg pending-beg)
+                end (max end pending-end)))))
     (let ((region (face-extra--expand-to-lines beg end)))
       (when region
         (let ((rbeg (car region))

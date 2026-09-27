@@ -532,6 +532,30 @@ remove stale stamps before `window-text-pixel-size' measures the line.
 Without this, stale display widths on spaces inflate the measured
 text-px and cause the distributed slack to be too small.")
 
+(defvar-local text-align--space-width-cache nil
+  "Hash table caching natural space pixel widths keyed by face value.
+The key is the raw face property at the space position — a symbol, a
+list of symbols, or nil.  Different face combinations (e.g. text-body
+vs. a superscript run) get distinct entries with their own measured
+widths.  Cleared at the start of each `:pre-clear' pass so any
+font/scale change is picked up immediately.")
+
+(defun text-align--natural-space-px (win pos avail)
+  "Return the natural pixel width of the space character at POS in WIN.
+Checks `text-align--space-width-cache' keyed by the face at POS; on a
+miss, measures via `window-text-pixel-size' and caches the result.
+This reduces the per-line measurement to O(1) amortised once each
+distinct face combination has been seen in the current dispatch cycle."
+  (let* ((face  (or (get-text-property pos 'font-lock-face)
+                    (get-text-property pos 'face)))
+         (cache (or text-align--space-width-cache
+                    (setq text-align--space-width-cache
+                          (make-hash-table :test #'equal)))))
+    (or (gethash face cache)
+        (let ((w (car (window-text-pixel-size win pos (1+ pos) (* 2 avail)))))
+          (puthash face w cache)
+          w))))
+
 (defconst text-align--debug-lend-prop 'text-align--debug-lend
   "Sentinel text property on the lend-1 character when
 `text-align-justify-debug-mode' is active.  Used to paint a green
@@ -540,10 +564,11 @@ lend boundary is visible during debugging.")
 
 (defun text-align--justify-clear (beg end)
   "Remove stale justify display stamps from space characters in BEG..END.
-Also removes debug lend markers when `text-align-justify-debug-mode' is
-active.  Called as `:pre-clear' before the pass-3 `vertical-motion' walk
-so that `window-text-pixel-size' measures natural (unstamped) character
-widths."
+Also clears `text-align--space-width-cache' so any font or scale change
+since the last dispatch cycle is picked up in fresh measurements.
+Called as `:pre-clear' before the pass-3 `vertical-motion' walk so that
+`window-text-pixel-size' measures natural (unstamped) character widths."
+  (setq text-align--space-width-cache nil)
   (with-silent-modifications
     (let ((pos beg))
       (while (< pos end)
@@ -739,11 +764,8 @@ is explicitly neutralised before measuring to keep measurements clean."
                         ;; natural-px inflates the line beyond zone.
                         ;; `window-text-pixel-size' on a buffer position
                         ;; sees the full face-remapping-alist in context.
-                        (let* ((natural-px (car (window-text-pixel-size
-                                                 win
-                                                 (car ordered)
-                                                 (1+ (car ordered))
-                                                 (* 2 avail))))
+                        (let* ((natural-px (text-align--natural-space-px
+                                                 win (car ordered) avail))
                                (base-extra (/ slack n))
                                (remainder  (% slack n))
                                (i          0))
@@ -812,9 +834,8 @@ Fires only when point is at visual-line beginning position."
                 (setq ordered (butlast ordered)))
               (let* ((n          (length ordered))
                      (natural-px (if (> n 0)
-                                    (car (window-text-pixel-size
-                                          win (car ordered) (1+ (car ordered))
-                                          (* 2 avail)))
+                                    (text-align--natural-space-px
+                                     win (car ordered) avail)
                                   0))
                      (base-extra (if (> n 0) (/ slack n) 0))
                      (remainder  (if (> n 0) (% slack n) 0))
