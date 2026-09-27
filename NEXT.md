@@ -1,155 +1,138 @@
-# Next session — text-align right + justify
+# Next session
 
 ## Status
 
-Pass-3 linewise dispatch is working.  `text-align = center` is
-implemented and verified:
+- `text-align = center`, `right`, `justify` all implemented and working
+  on plain body text.
+- Right margin (`horizontal-layout-margin-right`) working on quote blocks.
+- Justification is pixel-perfect on body text (Bresenham distribution,
+  `window-text-pixel-size` on live buffer positions).
 
-- `face-extra--dispatch-pass3` is a `jit-lock-register` function that
-  does one `vertical-motion` walk per chunk, resolving pass-3 properties
-  at each visual-line BOL via the face cache.  O(visual_lines), not
-  O(face_boundaries).
-- `text-align--stamp-center` uses `window-text-pixel-size` on the live
-  buffer (correct face-remapping-alist in scope) and stamps `line-prefix`
-  at logical BOL and `wrap-prefix` at continuation visual-line starts,
-  giving true per-visual-line centering including wrapped paragraphs.
-- `text-align = test-marker` stub (hot-pink midpoint char) is kept in
-  the repo as a diagnostic tool.
+---
 
-## Known performance note — pass-3 measurement cost
+## Priority 1 — Justify in margin blocks (quote/verse)
 
-`window-text-pixel-size` dominates scroll time (~26% of jit-lock
-samples) because it forces a layout pass for each newly-visible visual
-line.  jit-lock caching already handles the "already-seen" case, so a
-content-keyed cache adds nothing — jit-lock simply does not re-fontify
-already-fontified regions.
+Justify does not yet work correctly inside `org-quote` / `org-verse`
+blocks that have both `horizontal-layout-margin-left` and
+`horizontal-layout-margin-right` set.  The interaction between the
+pass-2 line-prefix narrowing (left+right combined), pass-3 right-margin
+restore, and pass-3 justify measurement needs investigation.
 
-This is acceptable for centering (few lines in a document are centred).
-For **justification** the same cost applies per-line and is not
-acceptable.
+Likely cause: `window-text-pixel-size win lbeg lend` inside
+`text-align--stamp` may be including the right-margin after-string
+overlay at `(1- lend)`, inflating `text-px` and making slack appear
+negative.  Alternatively the `zone` calculation (`avail - left - right`)
+may not match what word-wrap actually uses after pass-3 restores
+`line-prefix` to left-only.
 
-**Window resize:** with olivetti fancy mode (fringe-based desktop), the
-text body width is held constant by the fringes — `window-body-width`
-(text area) does not change when the window widens above page width.
-`available-px` and `text-px` are both unchanged, so centering stamps
-remain valid.  No font-lock flush is needed on window resize as long as
-the window stays above page width.
+Use `text-align-justify-debug-mode` to instrument: move point to BOL
+of a line inside a quote block and read the echo area output.
 
-**Planned: incremental idle look-ahead pre-render**
+---
+
+## Priority 2 — Performance: idle render-ahead window
+
+`window-text-pixel-size` is called once per justified visual line per
+jit-lock chunk.  This dominates scroll performance on long documents
+(~26% of jit-lock samples for centering alone; now applying to all body
+text lines for justify).
+
+**Fix: incremental idle look-ahead pre-render.**
 
 An idle timer crawls forward from the current viewport frontier,
-pre-fontifying and pre-computing pass-3 stamps 2–3 screens at a time:
+pre-fontifying and pre-stamping pass-3 properties 2–3 screens at a time:
 
-  1. `(jit-lock-fontify-now frontier-beg frontier-end)` — runs passes
-     0–2 for the look-ahead region.
-  2. `(face-extra--dispatch-pass3 frontier-beg frontier-end)` — runs
-     pass 3 on the now-fontified region.
-  3. Advance the frontier; reschedule.
+  1. `(jit-lock-fontify-now frontier-beg frontier-end)` — runs passes 0–2.
+  2. `(face-extra--dispatch-pass3 frontier-beg frontier-end)` — runs pass 3.
+  3. Advance the frontier; reschedule at next idle.
 
 When the user scrolls into pre-rendered territory, jit-lock finds it
 already fontified and does nothing — zero measurement cost at scroll
-time.  Crawling in small increments keeps individual idle slices short.
-Large jumps (dozens of pages) land on pre-rendered territory more often
-as the frontier advances.
+time.  Short increments keep idle slices brief.
 
-**This is also the prerequisite infrastructure for pagination.**
-Pagination requires cumulative pixel heights from `point-min` to the
-current viewport — the entire document above the visible window must be
-measured before page N can be computed.  The look-ahead pre-render and
-the pagination height accumulator are the same idle pass and should be
-designed together when pagination work begins.
+**This is also the prerequisite for pagination.**  The look-ahead pass
+and the pagination height accumulator are the same idle pass and should
+be designed together.
 
-**Planned hybrid measurement approach (for justification in particular):**
-1. Quick first pass using `font-get-glyphs` advance widths (fast, ~90%
-   accurate, misses mixed-face lines with different font sizes).
-2. Deferred refinement via the idle look-ahead using `window-text-pixel-size`
-   (accurate).  May produce a brief jitter on mixed-face lines.
+Also noted: `org-cite-activate` / citar takes ~21% of jit-lock scroll
+time independently of our code, producing many face-boundary spans per
+citation.  Folding citations behind a single display character would
+help; deferred.
 
-**Also noted:** `org-cite-activate` / citar takes ~21% of jit-lock scroll
-time independently of our code and produces many face-boundary spans per
-citation.  Folding citations behind a single display character (analogous
-to `org-appear` hiding emphasis markers) would collapse that span
-explosion and reduce `face-extra--collect-spans` cost proportionally.
-A prerequisite for correct justification on cite-heavy documents.
+---
 
-## Known performance note — org-cite-activate
+## Priority 3 — WP rendering test file (ACID3 analogue)
 
-`org-cite-activate` / citar takes ~21% of jit-lock scroll time
-independently of our code.  It also produces many face-boundary spans
-per citation, inflating `face-extra--collect-spans` cost.
+Currently visual testing is done against a chapter of a real
+dissertation.  We need a dedicated test file that exercises the full
+rendering stack systematically — analogous to ACID3 for browsers.
 
-**Planned fix (deferred):** fold citations behind a single display
-character (analogous to `org-appear` hiding emphasis markers).  This
-collapses the face-boundary explosion inside citation spans and reduces
-`collect-spans` cost proportionally.  A prerequisite for correct
-justification on cite-heavy documents.
+The `test` filetag in `org-sty-config.el` should activate the full WP
+style.  The test file should cover at minimum:
 
-## Next work
+**Text alignment**
+- Body text: justify, center, right (one section each)
+- Last line of paragraph: must be left-aligned (not stretched)
+- Single-word lines, very short lines: must not be over-stretched
+- Lines with guillemets, em-dashes, and other wide punctuation
+- Mixed-face lines: bold words, italic phrases, inline code — justify
+  must measure from buffer not temp buffer
 
-### Right margin — via atomic trailing-character expansion
+**Margin blocks**
+- `#+begin_quote` with justify: correct zone, no overflow
+- `#+begin_quote` with center / right
+- Nested or adjacent quote blocks
+- Quote blocks at start/end of document
 
-There is no `line-suffix' text property in Emacs.  Right margin is
-instead implemented by an atomic pair of operations on each visual line,
-both within one `with-silent-modifications' call so `vertical-motion'
-never sees an intermediate state.
+**Interaction tests**
+- Justify + left margin only (no right)
+- Justify + right margin only (no left)
+- Justify + both margins
+- Center + margins
+- Right + margins
 
-**Pass 2** stamps `line-prefix = (space :width (left+right) :height H)'.
-This narrows the text area to `avail - left - right', causing word-wrap
-to fire at the correct boundary.
+**Variable spacing**
+- Heading lines (must not be justified — no `text-align` on headings)
+- Metadata lines (drawer, keyword, property) — floor face, no stamps
+- Code blocks — fixed-pitch, no justify
 
-**Pass 3** (right-margin sub-pass) walks visual lines and for each one:
+**Edge cases**
+- Empty lines
+- Lines containing only a single word
+- Very long unbreakable words (URL, etc.)
+- End of buffer (no trailing newline)
+- `org-block-appear-mode` active: block delimiters hidden
 
-  1. Restores `line-prefix' to `(space :width left :height H)' (the true
-     left margin).
-  2. On the final buffer character of the visual line at `(1- lend)',
-     stamps a display property that renders the character as itself
-     followed by a `right-px'-wide space:
+The test file should be self-documenting: each section annotated with
+what the expected visual result is, so regressions are immediately
+visible.
 
-       (display (concat (buffer-substring (1- lend) lend)
-                        (propertize " " 'display `(space :width ,right-px))))
+---
 
-     This is uniform across all wrap-point characters — space, hyphen,
-     any punctuation — with no special casing required.
+## Deferred / noted
 
-**Net display width change: exactly zero** for every character:
-  line-prefix loses right-px (−right-px) and the character gains a
-  right-px trailing space (+right-px).  The wrap point is stable.
-  `vertical-motion' for the next line sees the correct layout.
+### Hanging punctuation
+Commas, periods, closing quotes at visual line-end could hang into the
+right margin (optical margin alignment).  Not yet implemented.  Low
+priority until performance is resolved.
 
-**Exception:** when `(char-after (1- lend))' is `\n', the visual line is
-the last before a paragraph break and is already shorter than
-`avail - left - right'.  Skip the trailing stamp; only restore
-`line-prefix' to the true left margin.
+### `variable-spacing--spacer` off-screen height fix
+The `frame-char-height` fallback in `variable-spacing--spacer` returns
+the floor size once the global default is shrunk.  Must be fixed before
+pagination (requires reliable line-height for arbitrary buffer
+positions).
 
-### Pass 2 / pass 3 composition
+### Right-margin double-subtract bug
+Intermittent: when pass-3 re-fires on positions it already restored in
+a prior cycle, `combined - right` double-subtracts, collapsing the left
+margin to zero.  Left for a dedicated session; the correct fix requires
+either a sentinel property or a two-phase walk architecture.
 
-Both passes currently write to `line-prefix`/`wrap-prefix'.  Pass 3
-overwrites pass 2.  Long-term fix: pass 3 takes ownership, reads margin
-values from the face-extra cache, and computes one final combined spec:
-
-  - justify + margins: `(space :width left :height H)' + interword stamps
-    distributing slack across `avail - left - right'
-  - center + margins: `(space :align-to (offset) :height H)' where
-    offset = (avail - left - right - text-px) / 2 + left
-  - right + margins: offset = avail - right - text-px
-
-This refactor should happen alongside right-margin implementation.
-
-### Right alignment
-
-DONE.  `text-align = right` implemented; refactored shared `text-align--stamp'
-function used by both center and right.  One measurement per visual line
-regardless of value.
-
-### Justification
-
-`text-align = justify`: distributes slack across interword spaces.
-Mutates character display widths → risks jit-lock feedback loop.
-
-Design decisions still open:
-- Whether to use `jit-lock-register` with `defer=t`.
-- Must clear old interword-space stamps before re-measuring (stale stamps
-  inflate `string-pixel-width`).
-- Intra-pass ordering: tab stops must be resolved before justify.
-- Last line of a paragraph should NOT be justified (left-aligned).
-- Use hybrid font-get-glyphs + idle window-text-pixel-size for measurement.
+### Pass-3 two-phase walk architecture
+`text-align--stamp` for justify calls `vertical-motion` inside the
+apply function (documented violation of the "apply must not call
+vertical-motion" rule) because the single dispatch walk runs with
+right-margin overlays absent.  The clean fix is a two-phase pass-3
+walk: run right-margin first (stamps overlays), then walk for
+text-align with overlays in place.  Not urgent while justify works in
+practice; fix before shipping.
