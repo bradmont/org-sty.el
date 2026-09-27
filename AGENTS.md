@@ -178,12 +178,20 @@ extends back to BOL.  Re-processing an already-correct line is idempotent
 
 **Geometry source:** Pass 3 reads margin and indent geometry from the
 `line-prefix`/`wrap-prefix` display properties stamped in the buffer by
-Pass 2, and measures text widths with `string-pixel-width` on
-`buffer-substring`.  Both require the text to be fontified — the `fontified`
+Pass 2, and measures text widths with `window-text-pixel-size` on live
+buffer positions.  Both require the text to be fontified — the `fontified`
 expansion check is necessary for face-metric accuracy and for geometry
 accuracy equally.  Pass 3 must not derive geometry from the face-extra
 registry or local-properties table; those give unresolved values, not the
 pixel widths that Pass 2 has computed and stamped.
+
+**NEVER use `string-pixel-width` for any measurement in this codebase.**
+It opens a temp buffer and measures with the global default face, completely
+ignoring the buffer-local `face-remapping-alist`.  In WP buffers,
+`variable-spacing-mode` remaps `default` to a floor font and body text to a
+different family altogether; `string-pixel-width` will silently return the
+wrong font's metrics.  Always use `window-text-pixel-size` on a live buffer
+position in the target window.
 
 **No deferral for centre/right:** these have no feedback loop — a `line-prefix`
 alignment spacer shifts text rightward but does not change where lines wrap —
@@ -194,7 +202,7 @@ which changes line breaking and risks a jit-lock feedback loop.  Whether
 justify should use a deferred execution path (e.g. `jit-lock-register` with
 `defer=t`) is an open decision to be made when justify is implemented.
 Justify must also clear its old interword-space stamps before re-measuring,
-because stale stamps inflate `string-pixel-width` results.
+because stale stamps inflate the `window-text-pixel-size` measurement.
 
 **Window resize:** when the window width changes, all Pass 3 stamps are stale.
 A `window-size-change-functions` hook must call `font-lock-flush` to trigger
@@ -491,7 +499,7 @@ for each pass before moving to the next.
   `(space :align-to offset-px)` spec at BOL.  `available-px` is derived from
   the window pixel width minus the left and right margin values read from the
   `line-prefix`/`wrap-prefix` display properties stamped by Pass 2.
-  `text-px` is `string-pixel-width` of the line's `buffer-substring`.
+  `text-px` is measured via `window-text-pixel-size` on the live buffer.
   Re-processing is idempotent (overwrites the same stamp).  Stale stamps from
   a previous window width are cleared by the `window-size-change-functions`
   hook that calls `font-lock-flush`.

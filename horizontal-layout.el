@@ -6,6 +6,26 @@
 
 ;;; Commentary:
 
+;; !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+;; NEVER USE `string-pixel-width' IN THIS FILE.
+;;
+;; `string-pixel-width' opens a temp buffer and measures using the GLOBAL
+;; default face — it does NOT see the buffer-local face-remapping-alist.
+;; In WP buffers, variable-spacing-mode remaps faces so body text renders
+;; in a completely different font (e.g. Times New Roman) than the global
+;; default (e.g. Iosevka Aile).  Any measurement via `string-pixel-width'
+;; will be silently wrong, producing inflated or deflated pixel values
+;; that corrupt justification, margin, and alignment calculations.
+;;
+;; ALWAYS measure from a live buffer position using:
+;;   (window-text-pixel-size win pos (1+ pos) large-x-limit)
+;; or for a range:
+;;   (window-text-pixel-size win beg end large-x-limit)
+;;
+;; These see the actual face-remapping-alist in the current buffer and
+;; return the true rendered pixel widths.
+;; !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
 ;; `horizontal-layout' provides synthetic face properties for horizontal
 ;; text placement, implemented as a face-extra pass-2 plugin.
 ;;
@@ -505,6 +525,48 @@ owns pass 3 (right-margin expansion).  Both are managed here."
   "Sentinel text property marking spans styled by `text-align-mode'.
 Used by `text-align-clear' to remove exactly this package's properties.")
 
+(defconst text-align--justify-prop 'text-align--justify-space
+  "Sentinel text property on space characters stamped by justify.
+Set alongside the `display' property so the pre-clear pass can find and
+remove stale stamps before `window-text-pixel-size' measures the line.
+Without this, stale display widths on spaces inflate the measured
+text-px and cause the distributed slack to be too small.")
+
+(defconst text-align--debug-lend-prop 'text-align--debug-lend
+  "Sentinel text property on the lend-1 character when
+`text-align-justify-debug-mode' is active.  Used to paint a green
+background on the last character of each justified visual line so the
+lend boundary is visible during debugging.")
+
+(defun text-align--justify-clear (beg end)
+  "Remove stale justify display stamps from space characters in BEG..END.
+Also removes debug lend markers when `text-align-justify-debug-mode' is
+active.  Called as `:pre-clear' before the pass-3 `vertical-motion' walk
+so that `window-text-pixel-size' measures natural (unstamped) character
+widths."
+  (with-silent-modifications
+    (let ((pos beg))
+      (while (< pos end)
+        (let ((next (or (next-single-property-change
+                         pos text-align--justify-prop nil end)
+                        end)))
+          (when (get-text-property pos text-align--justify-prop)
+            (remove-text-properties pos next
+                                    (list 'display                 nil
+                                          text-align--justify-prop nil)))
+          (setq pos next))))
+    ;; Also clear debug lend markers.
+    (let ((pos beg))
+      (while (< pos end)
+        (let ((next (or (next-single-property-change
+                         pos text-align--debug-lend-prop nil end)
+                        end)))
+          (when (get-text-property pos text-align--debug-lend-prop)
+            (remove-text-properties pos next
+                                    (list 'face                    nil
+                                          text-align--debug-lend-prop nil)))
+          (setq pos next))))))
+
 ;;;###autoload
 (defun text-align-clear (&optional beg end)
   "Remove text-align display properties from BEG..END.
@@ -542,16 +604,21 @@ not modify `line-prefix', this restoration is a no-op."
                     (remove-text-properties pos next (list prop nil))))))
             (remove-text-properties pos next
                                     (list text-align--prop nil
-                                          'face nil)))
+                                          'face            nil)))
+          ;; Also sweep justify stamps in this range (they use a separate
+          ;; sentinel so they're not caught by text-align--prop above).
+          (text-align--justify-clear pos next)
           (setq pos next))))))
 
 (defun text-align--stamp (lbeg lend value)
   "Stamp a margin-aware alignment prefix for the visual line LBEG..LEND.
 
-VALUE is `center' or `right'; the offset accounts for any left/right
-margins on the face at LBEG (see NEXT.md for derivation):
-  center — left_px + (avail - left_px - right_px - text_px) / 2
-  right  — avail - right_px - text_px
+VALUE is `center', `right', or `justify'.  The offset or distribution
+accounts for any left/right margins on the face at LBEG:
+  center  — left_px + (zone - text_px) / 2             [line-prefix]
+  right   — avail - right_px - text_px                 [line-prefix]
+  justify — slack distributed across interword spaces  [display props]
+where zone = avail - left_px - right_px.
 
 margin-left and margin-right are resolved from the face cache and
 converted to pixels via `frame-char-width' (approximate but sufficient;
@@ -612,15 +679,168 @@ is explicitly neutralised before measuring to keep measurements clean."
                                             (list prefix-prop nil)))))
              (text-px (car (window-text-pixel-size
                             win lbeg lend (* 2 avail)))))
-        (when (> zone text-px)
-          (let* ((offset (pcase value
-                           ('center (+ left-px (/ (- zone text-px) 2)))
-                           ('right  (- avail right-px text-px))))
-                 (prefix (if height
-                             `(space :align-to (,offset) :height ,height)
-                           `(space :align-to (,offset)))))
-            (put-text-property lbeg (1+ lbeg) prefix-prop prefix)
-            (put-text-property lbeg (1+ lbeg) text-align--prop t)))))))
+        (cond
+         ;; ── center / right ─────────────────────────────────────────
+         ((memq value '(center right))
+          (when (> zone text-px)
+            (let* ((offset (pcase value
+                             ('center (+ left-px (/ (- zone text-px) 2)))
+                             ('right  (- avail right-px text-px))))
+                   (prefix (if height
+                               `(space :align-to (,offset) :height ,height)
+                             `(space :align-to (,offset)))))
+              (put-text-property lbeg (1+ lbeg) prefix-prop prefix)
+              (put-text-property lbeg (1+ lbeg) text-align--prop t))))
+
+         ;; ── justify ────────────────────────────────────────────────
+         ;; Skip the last line of a paragraph (ends with \n) — it should
+         ;; be left-aligned, not stretched.  Also skip when slack ≤ 0
+         ;; (line already fills or overflows the zone).
+         ((eq value 'justify)
+          ;; Debug: paint lend-1 green so the wrap boundary is visible.
+          (when (bound-and-true-p text-align-justify-debug-mode)
+            (put-text-property (1- lend) lend
+                               'face '(:background "#00aa44" :foreground "white"))
+            (put-text-property (1- lend) lend text-align--debug-lend-prop t))
+          (unless (eq (char-after (1- lend)) ?\n)
+            (let ((slack (- zone text-px)))
+              (when (> slack 0)
+                ;; Collect interword space positions in the visual line,
+                ;; excluding the wrap character at (1- lend).
+                (let ((spaces nil)
+                      (pos    lbeg))
+                  (while (< pos (1- lend))
+                    (when (eq (char-syntax (char-after pos)) ?\ )
+                      (push pos spaces))
+                    (setq pos (1+ pos)))
+                  ;; Trim any trailing spaces that are not followed by a
+                  ;; non-space character before (1- lend).  These are
+                  ;; gaps after the last word on the line and should not
+                  ;; be widened.
+                  (let ((ordered (nreverse spaces)))
+                    (while (and ordered
+                                (let ((p (1+ (car (last ordered)))))
+                                  (while (and (< p (1- lend))
+                                              (eq (char-syntax (char-after p)) ?\ ))
+                                    (setq p (1+ p)))
+                                  (>= p (1- lend))))
+                      (setq ordered (butlast ordered)))
+                    (let ((n (length ordered)))
+                      (when (> n 0)
+                        ;; Measure natural space width from an actual space
+                        ;; in the line, not from `string-pixel-width'.
+                        ;; `string-pixel-width' opens a temp buffer and
+                        ;; uses the global default face — in a WP buffer
+                        ;; where variable-spacing remaps default to a floor
+                        ;; font (e.g. Iosevka Aile) but body text renders
+                        ;; in a different font (e.g. Times New Roman via
+                        ;; buffer-local face remapping), the two space
+                        ;; widths diverge.  Stamping with the wrong
+                        ;; natural-px inflates the line beyond zone.
+                        ;; `window-text-pixel-size' on a buffer position
+                        ;; sees the full face-remapping-alist in context.
+                        (let* ((natural-px (car (window-text-pixel-size
+                                                 win
+                                                 (car ordered)
+                                                 (1+ (car ordered))
+                                                 (* 2 avail))))
+                               (base-extra (/ slack n))
+                               (remainder  (% slack n))
+                               (i          0))
+                          ;; Distribute: first `remainder' spaces get
+                          ;; base-extra+1 px, the rest get base-extra
+                          ;; (Bresenham — every slack pixel is used).
+                          (dolist (sp ordered)
+                            (let* ((extra  (+ base-extra
+                                              (if (< i remainder) 1 0)))
+                                   (new-px (+ natural-px extra)))
+                              (when (> extra 0)
+                                (put-text-property sp (1+ sp)
+                                                   'display
+                                                   `(space :width (,new-px)))
+                                (put-text-property sp (1+ sp)
+                                                   text-align--justify-prop t)))
+                            (setq i (1+ i)))))))))))))))))
+
+;;;; ================================================================
+;;;; Section 6b — justify debug mode
+;;;; ================================================================
+
+(defun text-align--justify-debug-echo ()
+  "Echo justification metrics for the visual line at point.
+Active via `post-command-hook' when `text-align-justify-debug-mode' is on.
+Fires only when point is at visual-line beginning position."
+  (when (and (bound-and-true-p text-align-justify-debug-mode)
+             (= (point) (save-excursion (beginning-of-visual-line) (point))))
+    (let* ((win   (get-buffer-window (current-buffer)))
+           (avail (and win (window-body-width win t))))
+      (when avail
+        (let* ((lbeg (point))
+               (lend (save-excursion (vertical-motion 1)
+                                     (min (point-max) (point))))
+               (f    (or (get-text-property lbeg 'font-lock-face)
+                         (get-text-property lbeg 'face)))
+               (face (cond ((symbolp f) f)
+                           ((listp f)   (cl-find-if #'symbolp f))
+                           (t           nil)))
+               (char-w   (frame-char-width))
+               (left-px  (* char-w
+                             (or (and face (face-extra--resolve-property
+                                           face 'horizontal-layout-margin-left))
+                                 0)))
+               (right-px (* char-w
+                             (or (and face (face-extra--resolve-property
+                                           face 'horizontal-layout-margin-right))
+                                 0)))
+               (zone     (- avail left-px right-px))
+               (text-px  (car (window-text-pixel-size win lbeg lend (* 2 avail))))
+               (slack    (- zone text-px)))
+          ;; Collect and trim spaces the same way the stamp function does.
+          (let ((spaces nil)
+                (pos    lbeg))
+            (while (< pos (1- lend))
+              (when (eq (char-syntax (char-after pos)) ?\ )
+                (push pos spaces))
+              (setq pos (1+ pos)))
+            (let ((ordered (nreverse spaces)))
+              (while (and ordered
+                          (let ((p (1+ (car (last ordered)))))
+                            (while (and (< p (1- lend))
+                                        (eq (char-syntax (char-after p)) ?\ ))
+                              (setq p (1+ p)))
+                            (>= p (1- lend))))
+                (setq ordered (butlast ordered)))
+              (let* ((n          (length ordered))
+                     (natural-px (if (> n 0)
+                                    (car (window-text-pixel-size
+                                          win (car ordered) (1+ (car ordered))
+                                          (* 2 avail)))
+                                  0))
+                     (base-extra (if (> n 0) (/ slack n) 0))
+                     (remainder  (if (> n 0) (% slack n) 0))
+                     (widths     (cl-loop for i from 0 below n
+                                          collect (+ natural-px base-extra
+                                                     (if (< i remainder) 1 0)))))
+                (message "line=%dpx  zone=%dpx  slack=%dpx  n=%d  extra=%dpx  widths=%S"
+                         text-px zone slack n
+                         (- (apply #'+ widths) (* n natural-px))
+                         widths))))))))  )
+
+;;;###autoload
+(define-minor-mode text-align-justify-debug-mode
+  "Show justification metrics in the echo area at visual-line BOL.
+
+When active:
+  - Moving point to visual-line BOL echoes: measured line width, zone,
+    slack, space count, sum of distributed widths, per-space width list.
+  - The lend-1 character of each justified visual line is painted with a
+    green background so the wrap boundary is visible."
+  :lighter " JDbg"
+  (if text-align-justify-debug-mode
+      (add-hook 'post-command-hook #'text-align--justify-debug-echo nil t)
+    (remove-hook 'post-command-hook #'text-align--justify-debug-echo t)
+    ;; Clear any lingering lend markers.
+    (text-align--justify-clear (point-min) (point-max))))
 
 (defun text-align--apply (spans)
   "Apply text alignment for SPANS from `face-extra--dispatch-pass3'.
@@ -631,6 +851,8 @@ Apply functions must NOT call `vertical-motion'.
 Dispatches on value:
   `center'      — stamps a centering `line-prefix'/`wrap-prefix' at lbeg.
   `right'       — stamps a right-align prefix at lbeg.
+  `justify'     — distributes slack across interword spaces; skips last
+                  line of paragraph.
   `test-marker' — dev stub: highlights the character-position midpoint
                   in hot pink; use `face-extra-add-relative' with value
                   `test-marker' to activate."
@@ -641,7 +863,7 @@ Dispatches on value:
               (lend  (nth 1 span))
               (value (nth 2 span)))
           (pcase value
-            ((or 'center 'right)
+            ((or 'center 'right 'justify)
              (text-align--stamp lbeg lend value))
             ('test-marker
              (let ((mid (/ (+ lbeg lend) 2)))
@@ -693,10 +915,11 @@ is registered and handles cleanup on disable."
 ;;;; ================================================================
 
 (face-extra-define-property 'text-align
-  :pass  3
-  :after '(horizontal-layout-margin-right)
-  :apply  #'text-align--apply
-  :clear  #'text-align--clear-marker)
+  :pass       3
+  :after      '(horizontal-layout-margin-right)
+  :pre-clear  #'text-align--justify-clear
+  :apply      #'text-align--apply
+  :clear      #'text-align--clear-marker)
 
 (provide 'horizontal-layout)
 ;;; horizontal-layout.el ends here

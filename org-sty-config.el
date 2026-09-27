@@ -127,6 +127,7 @@
                    ;; the linewise pass fires.  Remove once centering is real.
                    (text-align-mode 1)
                    ;(face-extra-add-relative 'text-body 'text-align 'right)
+                   (face-extra-add-relative 'text-body 'text-align 'justify)
                    (face-extra-add-relative 'org-document-title 'text-align 'center)
                    (org-title-fold-mode 1)
                    (auto-save-mode)
