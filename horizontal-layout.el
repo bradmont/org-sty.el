@@ -556,6 +556,14 @@ distinct face combination has been seen in the current dispatch cycle."
           (puthash face w cache)
           w))))
 
+(defconst text-align--line-hash-prop 'text-align--line-hash
+  "Text property on visual-line BOL storing `buffer-hash' at last justify.
+Used to skip re-justifying lines whose content has not changed since the
+last flush, making the flush cost O(changed-lines) instead of O(all-lines).
+Stored at (point lbeg) by `text-align--apply' after each successful stamp.
+Cleared by `text-align--justify-clear' on mode disable so stale hashes
+do not survive a font or scale change.")
+
 (defconst text-align--debug-lend-prop 'text-align--debug-lend
   "Sentinel text property on the lend-1 character when
 `text-align-justify-debug-mode' is active.  Used to paint a green
@@ -580,6 +588,10 @@ Called as `:pre-clear' before the pass-3 `vertical-motion' walk so that
                                     (list 'display                 nil
                                           text-align--justify-prop nil)))
           (setq pos next))))
+    ;; Clear line-hash stamps so re-justify runs fresh after a clear.
+    ;; This ensures font/scale changes are picked up: when the mode is
+    ;; re-applied after text-scale-mode, this runs and invalidates hashes.
+    (remove-text-properties beg end (list text-align--line-hash-prop nil))
     ;; Also clear debug lend markers.
     (let ((pos beg))
       (while (< pos end)
@@ -668,6 +680,14 @@ each carries a unique offset computed for that specific visual line.
 Preserves the `:height' component written by pass 1 so vertical rhythm
 is not disturbed.  Any prior alignment stamp not overwritten by pass 1
 is explicitly neutralised before measuring to keep measurements clean."
+  ;; Paragraph-final guard — bail out before any measurement.
+  ;; For justify, the last line of a paragraph has \n immediately before
+  ;; lend; stretching it would look wrong.  Returning early skips the
+  ;; window-text-pixel-size call and stamp neutralisation entirely, which
+  ;; matters for the narrow (point's-line-only) keystroke path where this
+  ;; function would otherwise fire on every keystroke for no effect.
+  (unless (and (eq value 'justify)
+               (eq (char-after (1- lend)) ?\n))
   (let* ((win   (get-buffer-window (current-buffer)))
          (avail (and win (window-body-width win t))))
     (when avail
@@ -782,7 +802,7 @@ is explicitly neutralised before measuring to keep measurements clean."
                                                    `(space :width (,new-px)))
                                 (put-text-property sp (1+ sp)
                                                    text-align--justify-prop t)))
-                            (setq i (1+ i)))))))))))))))))
+                            (setq i (1+ i))))))))))))))))))  ; closes unless
 
 ;;;; ================================================================
 ;;;; Section 6b — justify debug mode
@@ -884,8 +904,25 @@ Dispatches on value:
               (lend  (nth 1 span))
               (value (nth 2 span)))
           (pcase value
-            ((or 'center 'right 'justify)
+            ((or 'center 'right)
              (text-align--stamp lbeg lend value))
+            ('justify
+             ;; Fast path: paragraph-final line — skip with zero work.
+             (unless (eq (char-after (1- lend)) ?\n)
+               ;; Content-hash check: skip lines unchanged since last flush.
+               ;; `buffer-hash' is a C primitive (~1μs for a 60-char line);
+               ;; avoids the full stamp (face lookups + window-text-pixel-size
+               ;; + put-text-property×N) for lines whose content is identical.
+               (let ((h (sxhash-equal (buffer-substring-no-properties lbeg lend))))
+                 (unless (equal (get-text-property lbeg text-align--line-hash-prop) h)
+                   ;; Content changed: clear stale space stamps for THIS line
+                   ;; before measuring, then stamp and record the new hash.
+                   ;; (Global pre-clear was removed from the registration so
+                   ;; unchanged lines keep correct stamps without being cleared.)
+                   (text-align--justify-clear lbeg lend)
+                   (text-align--stamp lbeg lend 'justify)
+                   (put-text-property lbeg (1+ lbeg)
+                                      text-align--line-hash-prop h)))))
             ('test-marker
              (let ((mid (/ (+ lbeg lend) 2)))
                (when (and (> lend lbeg)
@@ -938,7 +975,9 @@ is registered and handles cleanup on disable."
 (face-extra-define-property 'text-align
   :pass       3
   :after      '(horizontal-layout-margin-right)
-  :pre-clear  #'text-align--justify-clear
+  ;; No :pre-clear — clearing is now done per-line inside `text-align--apply'
+  ;; only for lines whose content-hash has changed.  Unchanged lines keep
+  ;; their existing stamps (still correct) and are never cleared or re-stamped.
   :apply      #'text-align--apply
   :clear      #'text-align--clear-marker)
 

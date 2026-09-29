@@ -162,6 +162,16 @@ The list is cleared and rebuilt on each call to `org-sty-apply'.")
   "Minor modes newly activated by the last `:eval' run.
 Recorded so `org-sty--disable' can turn them off cleanly.")
 
+(defvar-local org-sty--cite-defer-timer nil
+  "Timer for the pending deferred citation font-lock flush in this buffer.
+Cancelled and replaced on each new keystroke that triggers deferral.")
+
+(defvar-local org-sty--citar-bib-files-cache nil
+  "Cached return value of `citar-org-local-bib-files' for this buffer.")
+
+(defvar-local org-sty--citar-bib-files-tick nil
+  "Value of `buffer-chars-modified-tick' when the bib-files cache was filled.")
+
 (defconst org-sty--known-eval-modes
   '(variable-spacing-mode org-title-fold-mode org-block-appear-mode org-num-mode)
   "Minor modes that `:eval' commonly activates; tracked for teardown.")
@@ -374,6 +384,10 @@ Intended for use via `org-sty-mode'; safe to call directly to refresh."
 
 (defun org-sty--disable ()
   "Reverse all styling applied by `org-sty-mode' in this buffer."
+  ;; Cancel any pending deferred citation flush timer.
+  (when (timerp org-sty--cite-defer-timer)
+    (cancel-timer org-sty--cite-defer-timer)
+    (setq org-sty--cite-defer-timer nil))
   ;; Remove tracked face remaps and symbol-property effects.
   (org-sty--clear-face-remaps)
   (org-sty--clear-heading-remaps)
@@ -432,6 +446,81 @@ filetag-driven style."
         ;; filetag path.  We immediately override with the chosen style.
         (org-sty-mode 1))
       (org-sty--apply-style style))))
+
+;;; Cite activation deferral
+
+;; During active typing, `citar-org-cite-basic-activate' is the dominant
+;; font-lock cost: it calls `citar-get-entries' and `citar-format-reference'
+;; on every jit-lock chunk that touches the paragraph.  Citation content is
+;; stable while typing prose; paying for full activation on every keystroke
+;; is wasteful.
+;;
+;; Two independent optimisations are applied here:
+;;
+;;  1. ACTIVATION DEFER — an :around advice on `citar-org-cite-basic-activate'
+;;     that is installed globally at load time (not per-buffer).  When called
+;;     while `org-sty-mode' is active and Emacs is not idle, it applies only
+;;     the cheap `org-cite' face and schedules an idle-0 `font-lock-flush' so
+;;     full activation happens the moment the user pauses.  In non-org-sty
+;;     buffers, or when idle, it calls through to the original function.
+;;
+;;     Installing the advice globally (not in the mode enable/disable body)
+;;     avoids the lifecycle bug where `advice-remove' in any one buffer's
+;;     disable call would strip it from all buffers.
+;;
+;;  2. BIB-FILES CACHE — `citar-org-local-bib-files' calls
+;;     `org-collect-keywords' (a `re-search-forward' over the buffer) on
+;;     every single citation activation, twice — once for `citar-get-entries'
+;;     and once for `citar-format-reference'.  The bibliography file list
+;;     changes only when the buffer text changes (a new #+bibliography: line
+;;     is added).  We cache the result per `buffer-chars-modified-tick' so
+;;     the scan happens at most once per buffer modification.
+
+(defun org-sty--cite-basic-activate-advice (orig citation)
+  "Defer expensive citar activation to idle in `org-sty-mode' buffers.
+ORIG is `citar-org-cite-basic-activate'; CITATION is the org-element.
+Outside `org-sty-mode', or when already idle, calls ORIG directly.
+When `org-sty-mode' is active and Emacs is not idle, stamps only the
+cheap `org-cite' face and schedules an idle-0 flush."
+  (if (or (not (bound-and-true-p org-sty-mode))
+          (current-idle-time))
+      (funcall orig citation)
+    ;; Active typing in a WP buffer: minimal face only.
+    (pcase-let ((`(,beg . ,end) (org-cite-boundaries citation)))
+      (add-face-text-property beg end 'org-cite))
+    (let ((buf (current-buffer)))
+      (when (timerp org-sty--cite-defer-timer)
+        (cancel-timer org-sty--cite-defer-timer))
+      (setq org-sty--cite-defer-timer
+            (run-with-idle-timer
+             0 nil
+             (lambda ()
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (setq org-sty--cite-defer-timer nil)
+                   (font-lock-flush)))))))))
+
+(defun org-sty--citar-local-bib-files-advice (orig &rest args)
+  "Cache `citar-org-local-bib-files' result per buffer-chars-modified-tick.
+ORIG is the real function; ARGS are its arguments.
+Eliminates the `org-collect-keywords' re-search-forward that citar
+runs on every citation activation."
+  (if (eq (buffer-chars-modified-tick) org-sty--citar-bib-files-tick)
+      org-sty--citar-bib-files-cache
+    (let ((result (apply orig args)))
+      (setq org-sty--citar-bib-files-tick (buffer-chars-modified-tick)
+            org-sty--citar-bib-files-cache result)
+      result)))
+
+;; Install both pieces of advice once, when citar-org loads.
+;; Using with-eval-after-load rather than the mode enable/disable body
+;; avoids the lifecycle bug: advice-remove is global, so removing it in
+;; any one buffer's disable call would strip it from all buffers.
+(with-eval-after-load 'citar-org
+  (advice-add 'citar-org-cite-basic-activate :around
+              #'org-sty--cite-basic-activate-advice)
+  (advice-add 'citar-org-local-bib-files :around
+              #'org-sty--citar-local-bib-files-advice))
 
 ;;; Minor mode
 

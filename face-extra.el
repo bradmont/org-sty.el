@@ -199,14 +199,25 @@ Set by `face-extra--dispatch-pass3' when it detects active typing and
 defers the full pending region to idle time.  Cancelled and rescheduled
 on each keystroke so only one flush fires per typing burst.")
 
-(defvar face-extra--pass3-flush-delay 0.1
-  "Idle delay in seconds before a deferred pass-3 flush runs.
-When the pending region is much larger than the jit-lock chunk (i.e.
-the whole paragraph was re-fontified by Org's extension functions but
-only one line was actually edited), pass-3 processes only the jit-lock
-chunk immediately and defers the full region to this idle delay.
-Lower values give more responsive justification after pausing; higher
-values reduce timer overhead during very fast typing.")
+(defvar-local face-extra--pass3-flush-beg nil
+  "Buffer position BEG for the pending pass-3 flush, or nil.")
+
+(defvar-local face-extra--pass3-flush-end nil
+  "Buffer position END for the pending pass-3 flush, or nil.")
+
+(defvar-local face-extra--line-spans-table nil
+  "Reusable hash table for the pass-3 visual-line walk.
+Allocated once per buffer and cleared between walks to avoid
+per-walk allocation that drives GC during active typing.")
+
+(defvar face-extra--pass3-flush-delay 2.0
+  "Idle delay in seconds before the deferred full-paragraph pass-3 flush runs.
+During active typing, pass-3 processes only the visual line at point;
+the full paragraph region is deferred until this many seconds of idle
+time have elapsed.  0.5s means brief inter-keystroke hesitations do not
+trigger a full-paragraph walk — only genuine pauses do.  Raise this for
+faster hardware where the flush feels intrusive; lower it if justification
+settling on pause feels too slow.")
 
 (defvar-local face-extra--face-cache nil
   "Buffer-local hash table: face-symbol → per-pass sorted apply lists.
@@ -576,19 +587,43 @@ Steps:
         (let ((stamp-fn (plist-get backend :stamp-body-text)))
           (when stamp-fn
             (funcall stamp-fn beg end))))
-      ;; Passes 1–2: scan once, then dispatch.
-      ;; Pass 3 runs separately via jit-lock-register (face-extra--dispatch-pass3)
-      ;; after the display engine has settled, so vertical-motion is safe there.
-      (let ((spans-table (face-extra--collect-spans beg end)))
-        (face-extra--run-pass 1 spans-table)
-        (face-extra--run-pass 2 spans-table))
-      ;; Record the full region we just processed so pass-3 can cover it.
-      ;; Multiple calls within one jit-lock cycle accumulate the union.
+      ;; Always accumulate the FULL region for pass-3 before any narrowing,
+      ;; so the pass-3 flush covers everything font-lock dirtied.
       (setq face-extra--pass3-pending
             (if face-extra--pass3-pending
                 (cons (min beg (car face-extra--pass3-pending))
                       (max end (cdr face-extra--pass3-pending)))
-              (cons beg end))))))
+              (cons beg end)))
+      ;; Passes 1–2: scan once, then dispatch.
+      ;; Pass 3 runs separately via jit-lock-register (face-extra--dispatch-pass3)
+      ;; after the display engine has settled, so vertical-motion is safe there.
+      ;;
+      ;; During active typing, narrow beg/end to point's visual line before
+      ;; running passes 1–2.  Stamps on other lines are already correct for
+      ;; their unchanged content and faces, so re-running them is pure waste.
+      ;; Adjacent blocks (e.g. a quote block right after the paragraph) are
+      ;; swept into the jit-lock region by Org's font-lock-extend-region-functions
+      ;; and would otherwise trigger expensive margin + text-align work on every
+      ;; keystroke.  The full region is handled by the pass-3 flush on idle.
+      (let ((passes-beg beg)
+            (passes-end end))
+        (when (null (current-idle-time))
+          (let ((pt (point)))
+            (if (and (>= pt beg) (< pt end))
+                (save-excursion
+                  (goto-char pt)
+                  (vertical-motion 0)
+                  (setq passes-beg (point))
+                  (vertical-motion 1)
+                  ;; Do not clip by end — same reason as in dispatch-pass3:
+                  ;; the trailing \n must be visible to paragraph-final guards.
+                  (setq passes-end (point)))
+              ;; Point outside region: skip passes 1–2 entirely.
+              (setq passes-beg passes-end))))
+        (unless (= passes-beg passes-end)
+          (let ((spans-table (face-extra--collect-spans passes-beg passes-end)))
+            (face-extra--run-pass 1 spans-table)
+            (face-extra--run-pass 2 spans-table)))))))
 
 ;;;; ------ Advice wiring ------
 
@@ -667,23 +702,34 @@ Returns a (BEG . END) cons, or nil if the region is empty after clipping."
     (when (< beg end)
       (cons beg end))))
 
+(defun face-extra--pass3-flush-callback (buf)
+  "Idle timer callback: run the deferred pass-3 flush for BUF.
+Reads the pending region from buffer-local `face-extra--pass3-flush-beg'
+and `face-extra--pass3-flush-end'.  Using a named function avoids
+allocating a new closure on every keystroke."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq face-extra--pass3-flush-timer nil)
+      (let ((b face-extra--pass3-flush-beg)
+            (e face-extra--pass3-flush-end))
+        (setq face-extra--pass3-flush-beg nil
+              face-extra--pass3-flush-end nil)
+        (when (and b e)
+          (face-extra--dispatch-pass3 b e))))))
+
 (defun face-extra--schedule-pass3-flush (buf beg end)
   "Schedule a full pass-3 run for BEG..END in BUF after an idle delay.
 Cancels any previously scheduled flush for the same buffer so only one
-fires per typing burst.  When the timer fires, calls
-`face-extra--dispatch-pass3' directly with the deferred region."
-  (when (buffer-local-value 'face-extra--pass3-flush-timer buf)
-    (cancel-timer (buffer-local-value 'face-extra--pass3-flush-timer buf)))
+fires per typing burst.  Stores the region in buffer-local variables
+rather than a closure to avoid per-keystroke allocation."
+  (let ((existing (buffer-local-value 'face-extra--pass3-flush-timer buf)))
+    (when existing (cancel-timer existing)))
   (with-current-buffer buf
+    (setq face-extra--pass3-flush-beg beg
+          face-extra--pass3-flush-end end)
     (setq face-extra--pass3-flush-timer
-          (run-with-idle-timer
-           face-extra--pass3-flush-delay nil
-           (lambda (b e)
-             (when (buffer-live-p buf)
-               (with-current-buffer buf
-                 (setq face-extra--pass3-flush-timer nil)
-                 (face-extra--dispatch-pass3 b e))))
-           beg end))))
+          (run-with-idle-timer face-extra--pass3-flush-delay nil
+                               #'face-extra--pass3-flush-callback buf))))
 
 (defun face-extra--dispatch-pass3 (beg end)
   "jit-lock-register pass-3 dispatch: one visual-line walk, not spanwise.
@@ -716,39 +762,113 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
     ;; original chunk.  Without this, the tail of a multi-line block never
     ;; gets pass-3 treatment because font-lock already marked it fontified.
     ;;
-    ;; Debounce: when Emacs is not idle (active typing) AND the pending
-    ;; region is significantly larger than the jit-lock chunk, expanding
-    ;; immediately means walking the whole paragraph on every keystroke —
-    ;; O(paragraph_lines) vertical-motion calls per key.  Instead, process
-    ;; only the jit-lock chunk now (unchanged lines keep valid stamps) and
-    ;; schedule a short idle flush for the full pending region.  The flush
-    ;; fires ~0.1 s after typing pauses, settling justification cleanly.
+    ;; Debounce: when Emacs is not idle (active typing), always defer to
+    ;; idle rather than walking visual lines now.
+    ;;
+    ;; DESIGN NOTE — why the check is unconditional (not gated on pending):
+    ;; `face-extra--dispatch' (passes 1+2) sets `face-extra--pass3-pending'
+    ;; and then calls this function inline for the same beg/end.  That inline
+    ;; call sees pending, clears it, and defers.  But jit-lock-register ALSO
+    ;; calls this function independently for the same chunk.  By the time
+    ;; that registered call fires, pending is nil (cleared by the inline
+    ;; call), so a `(when face-extra--pass3-pending ...)' guard would fall
+    ;; through and run pass-3 immediately — defeating the debounce entirely.
+    ;; Checking (null (current-idle-time)) unconditionally fixes this: the
+    ;; registered call is also deferred when not idle, regardless of pending.
+    ;;
+    ;; Org's font-lock-extend-region-functions pre-expand the jit-lock chunk
+    ;; to the full paragraph element before face-extra sees it, so the
+    ;; pending region always ≈ chunk — making a size-based threshold useless.
+    ;;
+    ;; The flush fires immediately when Emacs goes idle (idle-0 timer via
+    ;; face-extra--schedule-pass3-flush), so justification settles as soon
+    ;; as the user pauses with no perceptible lag.
+
+    ;; First, merge any pending region accumulated by face-extra--dispatch.
     (when face-extra--pass3-pending
-      (let ((pending-beg (car face-extra--pass3-pending))
-            (pending-end (cdr face-extra--pass3-pending)))
-        (setq face-extra--pass3-pending nil)
-        (if (and (null (current-idle-time))
-                 ;; Pending region is at least 3× the jit-lock chunk.
-                 (> (- pending-end pending-beg)
-                    (* 3 (- end beg))))
-            ;; Active typing with large pending: defer full region to idle.
-            (face-extra--schedule-pass3-flush
-             (current-buffer) pending-beg pending-end)
-          ;; Idle or small expansion: expand immediately as normal.
-          (setq beg (min beg pending-beg)
-                end (max end pending-end)))))
+      (setq beg (min beg (car face-extra--pass3-pending))
+            end (max end (cdr face-extra--pass3-pending)))
+      (setq face-extra--pass3-pending nil))
+    ;; Debounce: when not idle (active typing), narrow the walk to the
+    ;; single visual line containing point rather than skipping entirely.
+    ;;
+    ;; This gives O(1) vertical-motion calls per keystroke (2: one to find
+    ;; BOL, one to find EOL of point's line) instead of O(paragraph_lines).
+    ;; Lines other than point's keep their existing stamps — those stamps are
+    ;; correct as long as their content hasn't changed; any line whose breaks
+    ;; shift (overflow) will be corrected by the deferred flush.
+    ;;
+    ;; The full region is always scheduled for a flush after
+    ;; `face-extra--pass3-flush-delay' seconds of idle, so justification
+    ;; settles correctly on any genuine pause.  Brief inter-keystroke
+    ;; hesitations (< flush-delay) do not trigger the full-paragraph walk.
+    (when (null (current-idle-time))
+      ;; Schedule full-paragraph flush for idle.
+      (face-extra--schedule-pass3-flush (current-buffer) beg end)
+      ;; Narrow beg/end to point's visual line — but check paragraph-final
+      ;; FIRST using only cheap logical-line functions (no vertical-motion).
+      ;;
+      ;; The previous ordering called vertical-motion 0 + 1 to find visual
+      ;; line bounds, then detected paragraph-final and discarded the result.
+      ;; That wasted 2 vertical-motion calls per keystroke even in the most
+      ;; common case (typing at end of paragraph).
+      ;;
+      ;; New ordering:
+      ;;   1. Point outside chunk → skip (no vertical-motion).
+      ;;   2. Paragraph-final logical line (end-of-line + char-after, cheap)
+      ;;      → skip (no vertical-motion).
+      ;;   3. Non-final line → narrow with vertical-motion 0 + 1.
+      ;;   4. Visual-final wrap of non-final logical line → skip.
+      ;;
+      ;; The logical-line check (step 2) detects the common case: the
+      ;; current logical line is followed by a blank line (\\n\\n) or EOB.
+      ;; It is correct for non-wrapped final lines.  For wrapped non-final
+      ;; logical lines it always falls through to step 3 (correct).  For
+      ;; wrapped final logical lines the visual-final wrap is caught by
+      ;; step 4; earlier wraps of the same logical line still justify
+      ;; (also correct).
+      (let ((pt (point)))
+        (cond
+         ;; Point outside the jit-lock chunk: skip entirely.
+         ((not (and (>= pt beg) (< pt end)))
+          (setq beg end))
+         ;; Paragraph-final logical line: no vertical-motion needed.
+         ((save-excursion
+            (end-of-line)
+            (or (eobp)
+                (eq (char-after (1+ (point))) ?\n)))
+          (setq beg end))
+         ;; Non-final line: narrow to point's visual line.
+         (t
+          (save-excursion
+            (goto-char pt)
+            (vertical-motion 0)
+            (setq beg (point))
+            (vertical-motion 1)
+            ;; Do NOT clip by outer end: paragraph-final guard in
+            ;; text-align--apply needs to see the trailing \\n.
+            (setq end (point)))
+          ;; Visual-final line of a non-final logical line: skip.
+          (when (and (< beg end)
+                     (eq (char-after (1- end)) ?\n))
+            (setq beg end))))))
+    ;; Walk the (possibly narrowed) region.  beg = end → loop never runs.
     (let ((region (face-extra--expand-to-lines beg end)))
       (when region
         (let ((rbeg (car region))
               (rend (cdr region))
               ;; line-spans: property → list of (lbeg lend value) triples,
-              ;; one per visual line.  Same hash format as spans-table so
-              ;; face-extra--run-pass can be reused unchanged.
-              (line-spans (make-hash-table :test #'eq)))
-          ;; Pre-clear pass: call :pre-clear for each registered pass-3 property
-          ;; before the visual-line walk.  Stale overlays from previous pass-3
-          ;; runs affect `vertical-motion' layout, causing wrong lbeg/lend values.
-          ;; Clearing them here ensures the walk sees the clean display state.
+              ;; one per visual line.  Reuse a buffer-local table (cleared
+              ;; below) to avoid per-walk allocation that drives GC.
+              (line-spans (or face-extra--line-spans-table
+                              (setq face-extra--line-spans-table
+                                    (make-hash-table :test #'eq)))))
+          ;; Clear the reused table from any previous walk.
+          (clrhash line-spans)
+          ;; Pre-clear pass: call :pre-clear for each registered pass-3 property.
+          ;; text-align no longer registers :pre-clear (it does per-line clearing
+          ;; inside text-align--apply using content hashes).  Other properties
+          ;; may still register :pre-clear here.
           (dolist (prop (gethash 3 face-extra--pass-order))
             (let* ((entry  (gethash (cons prop 3) face-extra--registry))
                    (pre-fn (plist-get entry :pre-clear)))
@@ -759,7 +879,16 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
             (while (< (point) rend)
               (let* ((lbeg  (point))
                      (moved (vertical-motion 1))
-                     (lend  (min rend (point)))
+                     ;; Do NOT clip lend by rend.  The paragraph-final guard
+                     ;; in text-align--apply checks (char-after (1- lend));
+                     ;; for the last line of a paragraph lend must land past
+                     ;; the trailing \n, not at it.  Clipping to rend when
+                     ;; rend sits on that \n shifts lend one position early,
+                     ;; making (char-after (1- lend)) the last content char
+                     ;; rather than \n — silently disabling the guard.
+                     ;; The apply functions already receive lend bounded by
+                     ;; the buffer, so no clipping is needed here.
+                     (lend  (point))
                      ;; Face at visual-line BOL.  font-lock-face takes
                      ;; priority (Org regexp keywords); fall back to face
                      ;; (Org anchor functions, text-body stamp).

@@ -542,6 +542,158 @@ for each pass before moving to the next.
 - **Generalising `variable-spacing-mode`** beyond Org via pluggable backends
   is partially done (text backend exists) but not fully exercised outside Org.
 
+## Pass-3 performance architecture — decisions and known issues
+
+This section records the design decisions made during the justify
+performance work so future sessions can reason from a known baseline.
+
+### What the profiler showed (starting point)
+
+Before optimisation, a typical typing profile showed:
+- `citar-org-cite-basic-activate` ~28% — citar re-scanned bibliography
+  files on every citation activation, twice per cite (once for entry
+  lookup, once for format).
+- `face-extra--dispatch-pass3` ~29% — full O(paragraph_lines) visual-line
+  walk + `window-text-pixel-size` per space on every keystroke, because
+  Org's `font-lock-extend-region-functions` extend the jit-lock chunk to
+  the full paragraph element before face-extra sees it.
+
+### Optimisations implemented
+
+**Citar activation defer** (`org-sty.el`):
+- `citar-org-cite-basic-activate` adviced globally via `with-eval-after-load
+  'citar-org` (not in the mode enable/disable body — that caused the advice
+  to be removed globally when any one buffer disabled the mode).
+- When `org-sty-mode` is active and Emacs is not idle: apply only the cheap
+  `org-cite` face; schedule an idle-0 `font-lock-flush` so full activation
+  runs the moment typing pauses.
+- `citar-org-local-bib-files` adviced to cache the bibliography file list
+  per `buffer-chars-modified-tick` — eliminates the `org-collect-keywords`
+  `re-search-forward` that was running on every citation activation.
+
+**Pass-3 debounce** (`face-extra.el`, `face-extra--dispatch-pass3`):
+- Passes 1–2 (`face-extra--dispatch`): narrowed to point's visual line
+  when not idle. Adjacent blocks swept into the jit-lock region by Org
+  (e.g. a quote block after the paragraph) are skipped; they keep their
+  existing stamps (still correct for unchanged content and faces).
+- Pass 3 (`face-extra--dispatch-pass3`): similar point-line narrowing with
+  a fast paragraph-final pre-check that avoids `vertical-motion` entirely
+  for the common case (typing at end of paragraph):
+  1. Point outside chunk → skip.
+  2. `end-of-line` + `char-after (1+eol)` = `\n` or EOB → paragraph-final
+     logical line → skip without any `vertical-motion` calls.
+  3. Otherwise → narrow to visual line with `vertical-motion 0` + `1`.
+  4. Visual-final line of a non-final logical line → skip.
+- Full-paragraph flush deferred to `face-extra--pass3-flush-delay` seconds
+  of idle (default 2.0s). Timer stored in buffer-local var with named
+  callback function — avoids per-keystroke closure allocation that was
+  driving GC.
+
+**Paragraph-final guard hoisted** (`horizontal-layout.el`,
+`text-align--stamp`):
+- The `unless (eq (char-after (1- lend)) ?\n)` guard was inside the
+  function body AFTER all `let*` bindings including `window-text-pixel-size`.
+  Hoisted to a top-level `unless` wrapping the entire function body so
+  the guard fires before any measurement or face lookup.
+
+**`lend` clipping removed** (`face-extra.el`):
+- The walk loop previously used `(lend (min rend (point)))`. When `rend`
+  landed exactly on the `\n`, `(1- lend)` pointed to the last content char
+  rather than `\n`, silently disabling the paragraph-final guard.  Changed
+  to `(lend (point))` — unclipped — so the guard sees the `\n`.
+
+**Content hash for flush lines** (`horizontal-layout.el`,
+`text-align--apply`):
+- `text-align--apply` now computes `(sxhash-equal (buffer-substring-no-properties
+  lbeg lend))` per visual line before calling `text-align--stamp`.
+- If the hash matches the stored `text-align--line-hash-prop` at `lbeg`,
+  the line is skipped — existing stamps are still correct.
+- If changed: per-line `text-align--justify-clear` (removes stale space
+  stamps for clean measurement), then stamp, then store new hash.
+- The global `:pre-clear` was removed from the `text-align` registration
+  in favour of this per-line selective clear.  `text-align--justify-clear`
+  still clears hash props when called from `text-align-clear` (mode disable
+  or re-apply), so font/scale changes correctly invalidate all hashes.
+
+**`line-spans` hash table reuse** (`face-extra.el`):
+- Previously `make-hash-table` was called fresh in every pass-3 walk.
+  Now a buffer-local `face-extra--line-spans-table` is allocated once and
+  `clrhash`ed between walks, eliminating per-walk GC allocation.
+
+### Performance floor
+
+With the above changes, the per-keystroke cost for typing at the end of a
+paragraph is approximately:
+- Org font-lock (link activation, emphasis, etc.): ~18% of profiler samples.
+  This is Org's own baseline cost — irreducible without patching Org.
+- `face-extra--dispatch` (passes 1–2 narrow): ~6%.
+- Pass-3 narrow path (final line): near-zero (paragraph-final heuristic
+  fires before any `vertical-motion`).
+- 2s flush: O(changed_lines × stamp_cost) with content hashing.
+
+The remaining ~6% overhead above Org's baseline is our unavoidable cost.
+Turning off `text-align-mode` still shows some lag, meaning passes 1–2
+and/or Org keyword activation are the remaining contributors.
+
+### Known remaining issues
+
+**Mid-paragraph spacing goes crazy** (UNFIXED, needs diagnosis):
+When editing in the middle of a paragraph (not on the final line), spacing
+stamps from `variable-spacing-mode` become erratic — line spacing gets very
+large or inconsistent.  Suspected cause: the pass-1 spacing stamps for
+lines near point are being cleared and re-applied out of sync with the
+pass-3 narrow-path walk, possibly because the point-line narrowing in
+`face-extra--dispatch` (passes 1–2) clips the spacing pass differently
+than what the spacing measurements expect.  Use `text-align-justify-debug-mode`
+and instrument `variable-spacing--apply-ratio` to diagnose.
+
+**Right-margin measurement in quote/verse blocks** (UNFIXED):
+`window-text-pixel-size` for `text-px` includes the after-string overlay
+from the right-margin stamp at `(1- lend)`, inflating the measurement and
+making slack negative (justify thinks the line overflows). The right margin
+was removed from `org-quote`/`org-verse` as a workaround. The fix requires
+measuring text-px BEFORE applying or excluding the right-margin after-string.
+
+**Right-margin double-subtract** (UNFIXED):
+Intermittent: pass-3 re-fires on positions it already restored, causing
+`combined - right` double-subtraction that collapses the left margin to zero.
+
+**Passes 1–2 lag for non-final lines** (KNOWN, partly addressed):
+When editing in the middle of a long paragraph, passes 1–2 still walk
+point's full visual line (needed for correct margin/spacing stamps on that
+line). The 2 `vertical-motion` calls for visual-line boundary detection are
+unavoidable here. No fast logical-line heuristic applies because mid-paragraph
+lines are not paragraph-final.
+
+### Potential next optimisations
+
+- **Skip pass-3 flush for lines unchanged since last justify.** DONE via
+  content hash — see above.
+
+- **Idle render-ahead window.** An idle timer crawls the viewport frontier
+  and pre-fontifies + pre-stamps 2–3 screens ahead.  Also prerequisite for
+  the pagination height accumulator.
+
+- **`window-text-pixel-size` cache for text-px.** Cache the whole-line
+  text-px measurement keyed by line content hash + face-remapping state.
+  Would make the stamp essentially free for unchanged lines even when the
+  hash check misses (e.g. after font change).
+
+- **Passes 1–2 narrow path for mid-paragraph editing.** Currently falls
+  back to 2 `vertical-motion` calls per keystroke for non-final lines.
+  A logical-line approach (`line-beginning-position` / `line-end-position`)
+  would avoid `vertical-motion` but processes the whole logical line for
+  wrapped lines.
+
+- **`make-hash-table` in `face-extra--collect-spans`.** Each per-keystroke
+  pass-1/2 dispatch creates a spans hash table. Reuse the same buffer-local
+  table pattern applied to `line-spans`.
+
+- **Org font-lock cost (~18%).** This is Org's own jit-lock keyword work
+  (link activation, emphasis, citar activation). The only lever is reducing
+  how often the paragraph-level extension fires, or deferring specific
+  expensive keywords (e.g. `org-activate-links`) to idle.
+
 ## Architecture notes — `text-body` face model
 
 Body-text sizing uses `default` as a true floor (very small, e.g. 6pt);
@@ -801,6 +953,8 @@ engine renders into becomes `window-pixel-width − 2×outer-fringe −
 boundary.  Implementing this requires overriding or forking
 `olivetti-set-window`; the rest of Olivetti (window-resize hooks, split-window
 handling, mode-line) can be reused.
+
+Questions added by user: does emacs have a concept of outer and inner fringes? Will they render as we like, with a different background colour for the "desktop" vs the page "margin"? Alternatively, could we modify the window-margins to use a different width character? Perhaps with a pixel-wise :display property as we're doing for justification padding, or substituting some other space for the frame-char-width space?
 
 ### Window narrower than the page
 
