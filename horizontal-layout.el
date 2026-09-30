@@ -1007,5 +1007,46 @@ is registered and handles cleanup on disable."
 (add-hook 'face-extra-invalidate-cache-functions
           #'text-align--clear-space-width-cache)
 
+;; ---- Window resize: flush stale justify stamps when window width changes ----
+;;
+;; Pass-3 justify stamps encode `avail' (window pixel width) at stamp time.
+;; After a resize all stamps are stale: the slack distribution was computed
+;; for the old width.  `font-lock-flush' marks the buffer dirty so jit-lock
+;; re-fontifies the visible region; the `:pre-clear' pass removes stale stamps
+;; and the visual-line walk re-stamps with the new `avail'.
+;; Deduplicates buffers shown in multiple windows on the same frame.
+
+(defun horizontal-layout--window-size-change (frame)
+  "Flush font-lock for layout-active buffers when a window on FRAME resizes."
+  (let ((seen nil))
+    (dolist (win (window-list frame 'no-minibuffer))
+      (let ((buf (window-buffer win)))
+        (when (and (buffer-live-p buf) (not (memq buf seen)))
+          (push buf seen)
+          (with-current-buffer buf
+            (when (or (bound-and-true-p horizontal-layout-mode)
+                      (bound-and-true-p text-align-mode))
+              (font-lock-flush))))))))
+
+(add-hook 'window-size-change-functions
+          #'horizontal-layout--window-size-change)
+
+;; ---- Text scale: invalidate metric caches and reflow after text-scale-set ----
+;;
+;; `text-scale-set' changes face `:height' via `face-remapping-alist', which
+;; alters rendered character widths.  The space-width cache (face →
+;; natural-space-px) is stale after scaling; `face-extra--invalidate-cache'
+;; clears it via `face-extra-invalidate-cache-functions', and `font-lock-flush'
+;; triggers a full reflow so stamps are recomputed with correct metrics.
+
+(defun horizontal-layout--after-text-scale (&rest _)
+  "Invalidate caches and reflow after `text-scale-set'."
+  (when (or (bound-and-true-p horizontal-layout-mode)
+            (bound-and-true-p text-align-mode))
+    (face-extra--invalidate-cache)
+    (font-lock-flush)))
+
+(advice-add 'text-scale-set :after #'horizontal-layout--after-text-scale)
+
 (provide 'horizontal-layout)
 ;;; horizontal-layout.el ends here
