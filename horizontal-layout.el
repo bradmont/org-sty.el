@@ -377,13 +377,25 @@ Only runs when `horizontal-layout-mode' is active."
                (right (nth 2 span)))
           (when (and (numberp right) (> right 0) (< lbeg lend))
             (let* ((existing (get-text-property lbeg 'line-prefix))
-                   (combined (and (consp existing)
-                                  (eq (car existing) 'space)
-                                  (plist-get (cdr existing) :width)))
                    (height   (and (consp existing)
                                   (eq (car existing) 'space)
                                   (plist-get (cdr existing) :height)))
-                   (left     (max 0 (- (or combined 0) right))))
+                   ;; Resolve the configured left-margin value directly from
+                   ;; the face cache rather than deriving it from `combined -
+                   ;; right'.  The derived approach double-subtracts when
+                   ;; pass-3 has already run and restored line-prefix to
+                   ;; left-only: the second run sees left as combined and
+                   ;; subtracts right again, collapsing the margin to 0.
+                   (f        (or (get-text-property lbeg 'font-lock-face)
+                                 (get-text-property lbeg 'face)))
+                   (face     (cond ((symbolp f) f)
+                                   ((listp f)   (cl-find-if #'symbolp f))
+                                   (t           nil)))
+                   (left     (* (frame-char-width)
+                                (or (and face
+                                         (face-extra--resolve-property
+                                          face 'horizontal-layout-margin-left))
+                                    0))))
               ;; Step 1: restore the firing prefix to left-only.
               ;; line-prefix fires at logical BOL; wrap-prefix fires at
               ;; continuation visual-line starts.  Restore whichever
@@ -570,13 +582,23 @@ do not survive a font or scale change.")
 background on the last character of each justified visual line so the
 lend boundary is visible during debugging.")
 
+(defun text-align--clear-space-width-cache ()
+  "Clear `text-align--space-width-cache' in the current buffer.
+Registered on `face-extra-invalidate-cache-functions' so the cache is
+flushed whenever font metrics change — after `org-sty-apply',
+font-family changes, or `text-scale-mode'.  The cache maps face to
+natural space pixel width; it is stable across keystrokes but stale
+after any change that affects rendered character widths."
+  (setq text-align--space-width-cache nil))
+
 (defun text-align--justify-clear (beg end)
   "Remove stale justify display stamps from space characters in BEG..END.
-Also clears `text-align--space-width-cache' so any font or scale change
-since the last dispatch cycle is picked up in fresh measurements.
 Called as `:pre-clear' before the pass-3 `vertical-motion' walk so that
-`window-text-pixel-size' measures natural (unstamped) character widths."
-  (setq text-align--space-width-cache nil)
+`window-text-pixel-size' measures natural (unstamped) character widths.
+Does NOT clear `text-align--space-width-cache': that cache maps face to
+natural-space-px and is stable across keystrokes.  It is cleared by
+`text-align--clear-space-width-cache' via
+`face-extra-invalidate-cache-functions' when font metrics actually change."
   (with-silent-modifications
     (let ((pos beg))
       (while (< pos end)
@@ -645,7 +667,10 @@ not modify `line-prefix', this restoration is a no-op."
           ;; Also sweep justify stamps in this range (they use a separate
           ;; sentinel so they're not caught by text-align--prop above).
           (text-align--justify-clear pos next)
-          (setq pos next))))))
+          (setq pos next))))
+    ;; Full clear also invalidates the space-width cache: mode disable or
+    ;; explicit text-align-clear means a clean slate on next enable/flush.
+    (setq text-align--space-width-cache nil)))
 
 (defun text-align--stamp (lbeg lend value)
   "Stamp a margin-aware alignment prefix for the visual line LBEG..LEND.
@@ -907,22 +932,11 @@ Dispatches on value:
             ((or 'center 'right)
              (text-align--stamp lbeg lend value))
             ('justify
-             ;; Fast path: paragraph-final line — skip with zero work.
+             ;; Paragraph-final guard: last line of paragraph is left-aligned.
+             ;; text-align--stamp has the same guard internally, but checking
+             ;; here avoids the function call overhead on every final line.
              (unless (eq (char-after (1- lend)) ?\n)
-               ;; Content-hash check: skip lines unchanged since last flush.
-               ;; `buffer-hash' is a C primitive (~1μs for a 60-char line);
-               ;; avoids the full stamp (face lookups + window-text-pixel-size
-               ;; + put-text-property×N) for lines whose content is identical.
-               (let ((h (sxhash-equal (buffer-substring-no-properties lbeg lend))))
-                 (unless (equal (get-text-property lbeg text-align--line-hash-prop) h)
-                   ;; Content changed: clear stale space stamps for THIS line
-                   ;; before measuring, then stamp and record the new hash.
-                   ;; (Global pre-clear was removed from the registration so
-                   ;; unchanged lines keep correct stamps without being cleared.)
-                   (text-align--justify-clear lbeg lend)
-                   (text-align--stamp lbeg lend 'justify)
-                   (put-text-property lbeg (1+ lbeg)
-                                      text-align--line-hash-prop h)))))
+               (text-align--stamp lbeg lend 'justify)))
             ('test-marker
              (let ((mid (/ (+ lbeg lend) 2)))
                (when (and (> lend lbeg)
@@ -975,11 +989,23 @@ is registered and handles cleanup on disable."
 (face-extra-define-property 'text-align
   :pass       3
   :after      '(horizontal-layout-margin-right)
-  ;; No :pre-clear — clearing is now done per-line inside `text-align--apply'
-  ;; only for lines whose content-hash has changed.  Unchanged lines keep
-  ;; their existing stamps (still correct) and are never cleared or re-stamped.
+  ;; :pre-clear removes stale justify space stamps from the walk region
+  ;; before the visual-line walk begins, so `window-text-pixel-size'
+  ;; always measures natural (unstamped) text widths.
+  ;; `text-align--space-width-cache' is NOT cleared here — it is stable
+  ;; across keystrokes and is only invalidated on genuine metric changes
+  ;; (font-family or text-scale) via `face-extra-invalidate-cache-functions'.
+  :pre-clear  #'text-align--justify-clear
   :apply      #'text-align--apply
   :clear      #'text-align--clear-marker)
+
+;; Clear the natural-space-width cache whenever face metrics change.
+;; `face-extra--invalidate-cache' is called after org-sty-apply (font-family
+;; changes) and whenever face-remapping-alist is updated — which includes
+;; text-scale-mode, since variable-spacing-mode advises it and calls
+;; face-extra--invalidate-cache via font-lock-flush → face-extra--dispatch.
+(add-hook 'face-extra-invalidate-cache-functions
+          #'text-align--clear-space-width-cache)
 
 (provide 'horizontal-layout)
 ;;; horizontal-layout.el ends here

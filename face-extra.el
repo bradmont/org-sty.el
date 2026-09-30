@@ -210,14 +210,12 @@ on each keystroke so only one flush fires per typing burst.")
 Allocated once per buffer and cleared between walks to avoid
 per-walk allocation that drives GC during active typing.")
 
-(defvar face-extra--pass3-flush-delay 2.0
+(defvar face-extra--pass3-flush-delay 1.0
   "Idle delay in seconds before the deferred full-paragraph pass-3 flush runs.
 During active typing, pass-3 processes only the visual line at point;
 the full paragraph region is deferred until this many seconds of idle
-time have elapsed.  0.5s means brief inter-keystroke hesitations do not
-trigger a full-paragraph walk — only genuine pauses do.  Raise this for
-faster hardware where the flush feels intrusive; lower it if justification
-settling on pause feels too slow.")
+time have elapsed.  Raise this for faster hardware where the flush feels
+intrusive; lower it if justification settling on pause feels too slow.")
 
 (defvar-local face-extra--face-cache nil
   "Buffer-local hash table: face-symbol → per-pass sorted apply lists.
@@ -235,9 +233,24 @@ Cache is invalidated (set to nil) on:
   - face-extra--local-properties changes (face-extra-add-relative/remove)
   - Global symbol property mutation (face-extra-remove for global cookie)")
 
+(defvar face-extra-invalidate-cache-functions nil
+  "Abnormal hook run in the current buffer when the per-face cache is cleared.
+
+Each function is called with no arguments, in the current buffer.  Use
+this to clear any secondary caches (e.g. natural-space-width tables) that
+derive from font metrics and therefore become stale whenever face remapping
+changes — typically after `org-sty-apply', font-family change, or
+`text-scale-mode'.
+
+Register with `add-hook':
+  (add-hook \\='face-extra-invalidate-cache-functions #\\='my-clear-fn)")
+
 (defun face-extra--invalidate-cache ()
-  "Clear the per-face cache for the current buffer."
-  (setq face-extra--face-cache nil))
+  "Clear the per-face cache for the current buffer.
+Also runs `face-extra-invalidate-cache-functions' so secondary caches
+that depend on font metrics (e.g. space-width tables) are cleared too."
+  (setq face-extra--face-cache nil)
+  (run-hooks 'face-extra-invalidate-cache-functions))
 
 (defun face-extra--invalidate-all-caches ()
   "Clear the per-face cache in every live buffer."
@@ -731,6 +744,31 @@ rather than a closure to avoid per-keystroke allocation."
           (run-with-idle-timer face-extra--pass3-flush-delay nil
                                #'face-extra--pass3-flush-callback buf))))
 
+(defun face-extra--paragraph-bounds (beg end)
+  "Return a (BEG . END) cons expanded to paragraph boundaries.
+
+A paragraph boundary is a blank line (a line containing only whitespace)
+or the buffer start/end.  Expansion is done with `re-search-backward' and
+`re-search-forward' — no `vertical-motion' calls, so safe to call during
+active editing.
+
+The returned BEG is the start of the first line of the paragraph that
+contains the original BEG; the returned END is the end of the last line
+of the paragraph that contains the original END."
+  (cons (save-excursion
+          (goto-char beg)
+          (if (re-search-backward "^[ \t]*$" (point-min) t)
+              ;; Found a blank line — the paragraph starts on the next line.
+              (line-beginning-position 2)
+            (point-min)))
+        (save-excursion
+          (goto-char end)
+          (if (re-search-forward "^[ \t]*$" (point-max) t)
+              ;; Found a blank line — the paragraph ends at the end of the
+              ;; previous line (the last non-blank line).
+              (match-beginning 0)
+            (point-max)))))
+
 (defun face-extra--dispatch-pass3 (beg end)
   "jit-lock-register pass-3 dispatch: one visual-line walk, not spanwise.
 
@@ -804,7 +842,13 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
     ;; hesitations (< flush-delay) do not trigger the full-paragraph walk.
     (when (null (current-idle-time))
       ;; Schedule full-paragraph flush for idle.
-      (face-extra--schedule-pass3-flush (current-buffer) beg end)
+      ;; The jit-lock chunk only covers the lines around point; lines below
+      ;; in the same paragraph are never re-dirtified by jit-lock.  Expand
+      ;; beg/end to the full paragraph (blank-line-delimited) so the idle
+      ;; flush re-justifies all lines, including those below the edit point.
+      (let ((para (face-extra--paragraph-bounds beg end)))
+        (face-extra--schedule-pass3-flush (current-buffer)
+                                          (car para) (cdr para)))
       ;; Narrow beg/end to point's visual line — but check paragraph-final
       ;; FIRST using only cheap logical-line functions (no vertical-motion).
       ;;
