@@ -210,7 +210,7 @@ on each keystroke so only one flush fires per typing burst.")
 Allocated once per buffer and cleared between walks to avoid
 per-walk allocation that drives GC during active typing.")
 
-(defvar face-extra--pass3-flush-delay 1.0
+(defvar face-extra--pass3-flush-delay 0.15
   "Idle delay in seconds before the deferred full-paragraph pass-3 flush runs.
 During active typing, pass-3 processes only the visual line at point;
 the full paragraph region is deferred until this many seconds of idle
@@ -623,14 +623,24 @@ Steps:
         (when (null (current-idle-time))
           (let ((pt (point)))
             (if (and (>= pt beg) (< pt end))
+                ;; Narrow to point's logical line (line-beginning-position /
+                ;; line-end-position).  This covers all visual wraps of the
+                ;; same logical line, so when word-wrap pushes a character
+                ;; onto a new visual line, that character — still part of the
+                ;; same logical line — receives pass-1/2 stamps.  Narrowing to
+                ;; the visual line (via vertical-motion) left new wrap
+                ;; characters unstamped, causing missing variable-spacing
+                ;; heights on newly created visual lines.
+                ;;
+                ;; Adjacent blocks (quote, verse, etc.) are separate logical
+                ;; lines and remain excluded.  Pass-1/2 work in face-span
+                ;; steps with O(1) put-text-property per span, so a long
+                ;; logical line is still fast — no vertical-motion, no
+                ;; window-text-pixel-size.
                 (save-excursion
                   (goto-char pt)
-                  (vertical-motion 0)
-                  (setq passes-beg (point))
-                  (vertical-motion 1)
-                  ;; Do not clip by end — same reason as in dispatch-pass3:
-                  ;; the trailing \n must be visible to paragraph-final guards.
-                  (setq passes-end (point)))
+                  (setq passes-beg (line-beginning-position)
+                        passes-end (line-end-position)))
               ;; Point outside region: skip passes 1–2 entirely.
               (setq passes-beg passes-end))))
         (unless (= passes-beg passes-end)
