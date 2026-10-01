@@ -665,14 +665,57 @@ line). The 2 `vertical-motion` calls for visual-line boundary detection are
 unavoidable here. No fast logical-line heuristic applies because mid-paragraph
 lines are not paragraph-final.
 
+**Passes 1–2 not applied to some paragraphs on initial open** (OPEN, root cause unknown):
+In large or structurally complex Org buffers (e.g. a file containing both
+test-case EXPECT blocks and thousands of lines of body text), some paragraphs
+on the first visible screen render without variable-spacing height stamps or
+margins, while neighbouring paragraphs render correctly.  The face at
+affected positions is correctly `text-body` (pass-0 runs), but `line-prefix`
+is absent (passes 1–2 did not run).  Removing the passes 1–2 narrowing
+entirely does not fix it and introduces a regression (justify clears on
+focus loss).  The idle-0 refresh that correctly handles simpler files does
+not reliably repair the affected paragraphs in the problem case.  Root cause
+not yet identified; needs targeted instrumentation of `face-extra--dispatch`
+to determine which jit-lock chunks are processed, at what idle state, and
+whether the affected paragraphs are ever included in a full-region passes 1–2
+run.
+
 ### Potential next optimisations
 
 - **Skip pass-3 flush for lines unchanged since last justify.** DONE via
   content hash — see above.
 
 - **Idle render-ahead window.** An idle timer crawls the viewport frontier
-  and pre-fontifies + pre-stamps 2–3 screens ahead.  Also prerequisite for
-  the pagination height accumulator.
+  and pre-fontifies + pre-stamps content ahead of the visible area so that
+  scrolling into new content is instantaneous rather than requiring a
+  jit-lock fontification cycle.  Also a prerequisite for the pagination
+  height accumulator (Pass 4), which needs reliable cumulative line heights
+  for off-screen content.
+
+  **Design:**
+  - Register a function on `jit-lock-after-fontify-buffer` (or use a
+    dedicated idle timer) that, when Emacs has been idle for a short
+    interval (e.g. 0.5 s), identifies the frontier: the first position
+    after `window-end` that has `fontified = nil`.
+  - Call `jit-lock-fontify-now frontier (+ frontier N)` for a fixed N
+    (e.g. 3 × window height in characters).  This drives the full
+    font-lock + face-extra pipeline (passes 0–2) for that region.
+  - Pass-3 (justify) is NOT pre-applied: the idle flush already handles
+    visible content at 0.15 s, and pre-applying justify to off-screen
+    content would waste `window-text-pixel-size` calls whose results
+    become stale the moment the user scrolls (avail might differ for a
+    horizontally-resized window).  Pass-3 fires via the normal jit-lock
+    registered path when the content enters the viewport.
+  - The render-ahead timer should be lower priority than the pass-3 flush
+    (fire at a longer idle delay, e.g. 0.5–1.0 s) so justify on visible
+    content always settles first.
+  - Cancel and reschedule on `window-scroll-functions` so rapid scrolling
+    does not pile up work.
+
+  **Interaction with pagination:** the render-ahead pass populates
+  `line-prefix`/`wrap-prefix` spacers for off-screen content.  The Pass-4
+  height accumulator can then walk the buffer reading these spacers to
+  compute cumulative pixel heights without needing a window.
 
 - **`window-text-pixel-size` cache for text-px.** Cache the whole-line
   text-px measurement keyed by line content hash + face-remapping state.
@@ -693,15 +736,52 @@ lines are not paragraph-final.
   how often the paragraph-level extension fires, or deferring specific
   expensive keywords (e.g. `org-activate-links`) to idle.
 
-- **Cite-block face fragmentation.** `citar-org` / Org's cite activator
-  applies faces (and `mouse-face`, `keymap`, `help-echo`) with different
-  extents per syntactic sub-element (`[cite:`, `@`, key chars, `]`),
-  producing O(citation_length) face boundaries.  `face-extra--collect-spans`
-  walks these one step at a time; even though most resolve to empty cache
-  entries (skipped immediately), the iteration adds O(N_cite_chars) work per
-  jit-lock cycle.  Fix: coalesce adjacent face-boundary steps that resolve to
-  empty cache entries into a single skip, making a whole cite block one no-op
-  instead of ~20 individual lookups.
+- **Cite-block visual replacement (`org-cite-appear-mode`).** Replace the
+  raw `[cite:@smith2024]` markup in the buffer display with a rendered
+  citation string (e.g. `(Smith, 2024)` or `Smith (2024, p. 5)`), similar
+  to how `org-block-appear-mode` hides `#+begin_`/`#+end_` delimiters.
+
+  **Motivation:** two independent benefits:
+  1. **WP readability** — the user reads prose, not markup.  Rendered
+     citations integrate naturally with surrounding text.
+  2. **Face-extra performance** — citar's activator applies faces
+     (`mouse-face`, `keymap`, `help-echo`, `org-cite`, `org-cite-key`) with
+     different extents per syntactic sub-element, producing O(citation_length)
+     face boundaries per cite block.  `face-extra--collect-spans` walks every
+     boundary; even though most resolve to empty cache entries (immediate
+     skip), the iteration is O(N_cite_chars) per jit-lock cycle.  Replacing
+     the markup with a single display overlay makes the entire cite block
+     O(1) to face-extra: one span, one cache lookup, one skip.
+
+  **Implementation sketch (`org-cite-appear.el`, new standalone minor mode):**
+  - On enable: walk the buffer (and hook into jit-lock) to find all
+    `[cite:...]` spans.  For each, place an overlay covering the full span
+    with:
+    - `display`: the rendered citation string (computed from citar's entry
+      data — author last name + year, formatted per document style).
+    - `invisible`: the underlying raw text (so the markup is hidden).
+    - `org-cite-appear--hidden`: sentinel property (same pattern as
+      `org-block-appear`) so the mode can find and remove exactly its own
+      overlays on disable.
+  - **Near-point reveal:** when point enters a cite overlay, make it
+    temporarily visible (remove `invisible`, restore display) so the user
+    can see and edit the raw syntax.  Restore on point-exit.  Same
+    `post-command-hook` pattern as `org-block-appear-mode`.
+  - **Citation format:** configurable via a defcustom or driven by the
+    org-sty style plist.  Minimum viable format: `(Author Year)`.  Full
+    format with page locators: read from the cite's `:suffix` slot in the
+    org-element parse.
+  - **citar integration:** use `citar-get-entry` to look up author/year
+    from the bibliography.  Cache results per cite key in a buffer-local
+    hash table; invalidate on bibliography file change.
+  - **Wire-in via `:eval`** in the WP style, not a new plist key.
+
+  **Known remaining face fragmentation (if org-cite-appear not active):**
+  The coalesce-empty-spans optimisation in `face-extra--collect-spans` is
+  still worth implementing as a fallback: when stepping face boundaries,
+  if the next face resolves to an empty cache entry, jump directly to the
+  next non-empty boundary via repeated `next-single-property-change` rather
+  than processing each character individually.
 
 - **Live justify — zero-measurement keystroke path.** Currently justify
   is deferred to 0.15 s idle; lines below point stay unjustified while
