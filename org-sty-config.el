@@ -58,11 +58,18 @@
          (org-level-6         . (:weight bold :height 1.0 :text-align 0))
          (org-level-7         . (:weight bold :height 1.0 :text-align 0))
          (org-level-8         . (:weight bold :height 1.0 :text-align 0))
-         (org-document-title  . (:weight bold :height 1.6 :text-align 0))
-         ;; Structural / metadata: fixed-pitch at floor size.
+         ;; org-document-title: no :text-align suppressor here.  WP styles
+         ;; add 'center via their own :faces layer (runs after :eval, so it
+         ;; wins over the face-extra-add-relative calls in :eval).  Non-WP
+         ;; buffers get no text-align at all, which is correct.
+         (org-document-title  . (:weight bold :height 1.6))
+         ;; Structural / metadata: fixed-pitch.  Floor-size entries
+         ;; (:height 60) only make sense in WP buffers where
+         ;; variable-spacing-mode shrinks `default' to 6pt; they live in
+         ;; wp-faces below, not here.
          (org-drawer          . (:inherit fixed-pitch :height 1.0))
-         (org-property-value  . (:inherit fixed-pitch :height 60))
-         (org-special-keyword . (:inherit fixed-pitch :height 60))
+         (org-property-value  . (:inherit fixed-pitch))
+         (org-special-keyword . (:inherit fixed-pitch))
          ;; Code / data: fixed-pitch.
          (org-table           . (:inherit fixed-pitch))
          (org-formula         . (:inherit fixed-pitch))
@@ -119,6 +126,7 @@
                    (hl-line-mode 0)
                    ;(lsp-ltex-plus-mode 1)
                    (org-block-appear-mode 1)
+                   (org-cite-appear-mode 1)
                    (variable-spacing-mode 1)
                    (horizontal-layout-mode 1)
                    ;; ── Pass 3 test: midpoint marker ─────────────────────────
@@ -129,7 +137,9 @@
                    (text-align-mode 1)
                    ;(face-extra-add-relative 'text-body 'text-align 'right)
                    (face-extra-add-relative 'text-body 'text-align 'justify)
-                   (face-extra-add-relative 'org-document-title 'text-align 'center)
+                   ;; org-document-title centering is declared in :faces below
+                   ;; so it runs in the :faces phase (after :eval) and wins
+                   ;; cleanly over any base-style suppressor.
                    (org-title-fold-mode 1)
                    (auto-save-mode)
                    (guillemet-nbsp-mode 1)
@@ -149,8 +159,20 @@
                    (when (bound-and-true-p org-num-mode)
                      (org-num-mode -1)
                      (org-num-mode 1))))
+       (wp-faces '(;; Metadata faces at floor size — only correct in WP buffers
+                   ;; where variable-spacing-mode remaps `default' to 6pt.
+                   (org-property-value  . (:height 60))
+                   (org-special-keyword . (:height 60))
+                   ;; Center the document title.  Declared here (in :faces)
+                   ;; rather than via face-extra-add-relative in :eval so
+                   ;; that it runs in the :faces phase — after :eval — and
+                   ;; cannot be clobbered by a base-style :text-align 0
+                   ;; suppressor installed in the same :faces phase.
+                   ;; The :faces phase runs last and has highest priority.
+                   (org-document-title . (:text-align center))))
        (wp-style `(:font "Times New Roman"
                    :num-level 3 :indent nil
+                   :faces ,wp-faces
                    :eval ,wp-eval)))
   (setq org-sty-alist
         (mapcar (lambda (tag) (cons tag wp-style))
