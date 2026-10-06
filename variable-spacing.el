@@ -376,6 +376,12 @@ preceding character's face so it renders at the height of the line it
 terminates.
 
 Stale stamps from a previous fontification cycle are cleared first."
+  ;; Only stamp in buffers where variable-spacing-mode is active.
+  ;; The backend is registered globally (so face-extra knows about it at
+  ;; load time) but the stamp must not run in untagged / non-WP buffers:
+  ;; without the buffer-local `default' floor remap, text-body's :height 2.0
+  ;; multiplies against the normal default size and makes body text huge.
+  (when (bound-and-true-p variable-spacing-mode)
   (with-silent-modifications
     ;; 1. Clear stale text-body stamps so newly Org-styled text is clean.
     (variable-spacing--remove-body-face beg end)
@@ -405,7 +411,7 @@ Stale stamps from a previous fontification cycle are cleared first."
                     (setq stamp-start (1+ pos)))))
               (when (< stamp-start next)
                 (add-face-text-property stamp-start next 'text-body t))))
-          (setq pos next))))))
+          (setq pos next)))))))
 
 (defvar variable-spacing-org-backend
   (list :stamp-body-text #'variable-spacing--stamp-body-text)
