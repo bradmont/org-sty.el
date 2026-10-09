@@ -190,6 +190,11 @@ and popped one at a time by `org-cite-appear--format-one'.  Entries
 whose `overlay-buffer' is nil (deleted by an edit) are silently
 skipped when encountered.")
 
+(defvar-local org-cite-appear--rehide-timer nil
+  "Idle timer pending a re-hide of the currently revealed citation, or nil.
+Scheduled when point leaves a citation region; cancelled if point
+re-enters before the timer fires.")
+
 (defvar-local org-cite-appear--revealed nil
   "Plist for the currently revealed citation, or nil.
 Keys:
@@ -353,7 +358,15 @@ Existing overlays in the region are deleted first."
 ;;; ----------------------------------------------------------------
 
 (defun org-cite-appear--do-format (ov)
-  "Format the citation under OV and update its display string."
+  "Format the citation under OV and update its display string.
+
+After updating the display string, marks the overlay's logical line(s)
+as needing jit-lock refontification by setting `fontified' to nil.
+This is the standard jit-lock \"dirty region\" primitive: it causes
+jit-lock to re-run face-extra passes 1–3 on those lines lazily — on
+the next idle cycle if the lines are already visible, or when the user
+scrolls to them otherwise.  Only the affected lines are marked; the
+rest of the buffer is untouched."
   (let* ((beg (overlay-start ov))
          (end (overlay-end   ov)))
     (when (and beg end)
@@ -369,7 +382,16 @@ Existing overlays in the region are deleted first."
                                    refs "; "))))
         (when display
           (overlay-put ov 'display   display)
-          (overlay-put ov 'help-echo (or echo "RET/C-c C-c: reveal  mouse-1: edit")))
+          (overlay-put ov 'help-echo (or echo "RET/C-c C-c: reveal  mouse-1: edit"))
+          ;; Mark the overlay's line(s) dirty so jit-lock re-justifies them.
+          ;; Expanding to line boundaries gives jit-lock a clean chunk to
+          ;; process; with-silent-modifications suppresses undo and
+          ;; modification hooks so this is invisible to the buffer state.
+          (with-silent-modifications
+            (put-text-property
+             (save-excursion (goto-char beg) (line-beginning-position))
+             (save-excursion (goto-char end) (line-end-position))
+             'fontified nil)))
         (overlay-put ov org-cite-appear--needs-format-prop nil)))))
 
 (defun org-cite-appear--format-one ()
@@ -561,11 +583,14 @@ or add a locator without having to navigate there manually."
     (goto-char (1- end))))
 
 (defun org-cite-appear--do-rehide ()
-  "Re-hide the currently revealed citation."
+  "Re-hide the currently revealed citation.
+Calls `org-cite-appear--do-format' which marks the affected line(s)
+dirty for jit-lock so justify re-stamps with the restored display width."
   (when org-cite-appear--revealed
     (let ((ov (plist-get org-cite-appear--revealed :ov)))
       (when (and (overlayp ov) (overlay-buffer ov))
         ;; Reformat from current buffer text (user may have edited it).
+        ;; --do-format also marks the line(s) fontified=nil.
         (overlay-put ov org-cite-appear--needs-format-prop t)
         (org-cite-appear--do-format ov)
         ;; Restore keymap and mouse-face now that citation is folded.
@@ -626,6 +651,32 @@ explicit goto-char here is therefore omitted."
 
 
 ;;; ----------------------------------------------------------------
+;;; Rehide timer
+;;; ----------------------------------------------------------------
+
+(defun org-cite-appear--cancel-rehide-timer ()
+  "Cancel any pending re-hide idle timer."
+  (when (timerp org-cite-appear--rehide-timer)
+    (cancel-timer org-cite-appear--rehide-timer)
+    (setq org-cite-appear--rehide-timer nil)))
+
+(defun org-cite-appear--schedule-rehide ()
+  "Schedule `org-cite-appear--do-rehide' after 0.5 s of idle time.
+If a timer is already pending it is left unchanged — the existing
+deadline is always earlier than or equal to a freshly scheduled one."
+  (unless (timerp org-cite-appear--rehide-timer)
+    (let ((buf (current-buffer)))
+      (setq org-cite-appear--rehide-timer
+            (run-with-idle-timer
+             0.5 nil
+             (lambda ()
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (setq org-cite-appear--rehide-timer nil)
+                   (org-cite-appear--do-rehide)))))))))
+
+
+;;; ----------------------------------------------------------------
 ;;; post-command-hook: re-hide when point leaves
 ;;; ----------------------------------------------------------------
 
@@ -654,8 +705,11 @@ explicit goto-char here is therefore omitted."
              (end (if (and (overlayp ov) (overlay-buffer ov))
                       (overlay-end ov)
                     (cdr (plist-get org-cite-appear--revealed :range)))))
-        (unless (and (>= (point) beg) (< (point) end))
-          (org-cite-appear--do-rehide))))
+        (if (and (>= (point) beg) (< (point) end))
+            ;; Point is still inside — cancel any pending rehide timer.
+            (org-cite-appear--cancel-rehide-timer)
+          ;; Point has left — schedule a deferred rehide.
+          (org-cite-appear--schedule-rehide))))
     ;; ── 2. Mouse-1 on folded citation ───────────────────────────────
     (when (and (not org-cite-appear--revealed)
                (mouse-event-p last-command-event)
@@ -728,6 +782,7 @@ available; falls back to the raw key when citar is not loaded."
         (add-hook 'after-change-functions #'org-cite-appear--after-change nil t))
     ;; ---- disable ----
     (org-cite-appear--cancel-format-timer)
+    (org-cite-appear--cancel-rehide-timer)
     (when (timerp org-cite-appear--new-cite-timer)
       (cancel-timer org-cite-appear--new-cite-timer))
     (setq org-cite-appear--new-cite-timer   nil
