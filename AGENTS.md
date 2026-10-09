@@ -48,9 +48,11 @@ layer for Org mode. Each file is self-contained and loadable on its own;
 The planned post-v1 dependency graph is:
 
 ```
-face-extra.el          ← generic core: registry, pass dispatcher, backend protocol
+face-extra.el          ← generic core: registry, pass dispatcher, backend protocol,
+    ↑                       text-body face defn + bare-text scan loop
     ↑                       (no deps beyond Emacs + cl-lib)
-variable-spacing.el    ← spacing/text-body impl; depends on face-extra; standalone useful
+variable-spacing.el    ← spacing impl; depends on face-extra; standalone useful
+horizontal-layout.el   ← margin/indent impl; depends on face-extra
 org-title-fold.el      ← standalone; no new deps
 org-block-appear.el    ← standalone; no new deps
     ↑
@@ -61,6 +63,28 @@ Pass 0 (face/font resolution) is the only mode-specific layer.  Passes 1–4
 are mode-agnostic — they operate on faces and geometry.  A backend for
 another major mode supplies pass 0 knowledge (face configuration + bare-text
 predicate) and the rest of the pipeline works unchanged.
+
+**`text-body` belongs in `face-extra`, not `variable-spacing`.**  `text-body`
+is not a spacing concept — it is a semantic identity face meaning "this
+character is body text."  It is the stand-in for "any unspecified text" in
+the pipeline: anything that wants to operate on naked document text without
+touching `default` (which belongs to all of Emacs) uses `text-body`.
+Variable-spacing, horizontal-layout, and text-align are all consumers of
+`text-body`; none of them owns it.  The bare-text scan loop — the pass-0
+walk that stamps `text-body` on characters Org left unstyled — is likewise
+face-extra infrastructure, not a spacing feature.  The Org-specific
+bare-text predicate (what counts as "bare" in Org: no `face` and no
+`font-lock-face`) stays in the backend registration, which can remain in
+`variable-spacing.el` until there is a reason to split it out.
+
+`text-body` is useful beyond Org.  Any major mode backend that wants to
+distinguish body text from structural or metadata text can register a
+backend that stamps `text-body`, and all three property packages
+(variable-spacing, horizontal-layout, text-align) will then apply to that
+text automatically.  The `defface` should carry neutral default attrs
+(`'((t :inherit default))`) with no sizing opinion baked in — the size is
+supplied by `variable-spacing-mode`'s floor/body remap on enable, not by
+the face definition itself.
 
 ### Independence of files
 The four files are deliberately decoupled. Do not add cross-`require`
@@ -225,6 +249,95 @@ dispatcher iterates passes 1–3 in order, running all properties registered
 for each pass before moving to the next.
 
 ## Known planned work (not yet implemented)
+
+### ⚑ HIGH PRIORITY — Move `text-body` and bare-text scan to `face-extra`
+
+**Rationale:** `text-body` is a semantic identity face ("this character is
+body text"), not a spacing concept.  It is the correct target for any
+property that wants to operate on naked document text without touching
+`default`.  Variable-spacing, horizontal-layout, and text-align are all
+consumers; none of them should own it.  The bare-text scan loop (pass 0) is
+face-extra infrastructure.  Leaving both in `variable-spacing.el` is a
+layering violation that has already caused one bug (text-body stamped in
+untagged buffers because the backend registration was global) and will
+cause more as new property packages are added.
+
+**Scope of changes:**
+
+1. **`face-extra.el`** — add:
+   - `defface text-body` with neutral attrs `'((t :inherit default))` — no
+     `:height`, no sizing opinion.
+   - `face-extra--stamp-body-text` — the generic scan-and-stamp loop,
+     extracted verbatim from `variable-spacing--stamp-body-text` minus the
+     `(bound-and-true-p variable-spacing-mode)` guard (that guard becomes
+     unnecessary once registration is mode-scoped; see below).
+   - `face-extra-remove-body-face` — thin public wrapper around the existing
+     `variable-spacing--remove-body-face` logic, so callers outside
+     variable-spacing can clean up stamps.
+   - Update the backend protocol doc: `:stamp-body-text` may call
+     `face-extra--stamp-body-text` directly, or supply its own function.
+
+2. **`variable-spacing.el`** — change:
+   - Remove `defface text-body` and the scan loop; `(require 'face-extra)`
+     already pulls them in.
+   - `variable-spacing-mode` enable: install the floor remap on `default`
+     and the `(:inherit text-body)` remaps on content faces (unchanged).
+     The `text-body` face itself stays neutral; variable-spacing makes it
+     sized via the floor model.
+   - Move `(face-extra-register-backend 'org-mode ...)` from load-time into
+     `variable-spacing-mode`'s enable/disable body (register on enable,
+     deregister on disable).  This makes `face-extra--active-backend` return
+     nil in inactive buffers naturally — the `(bound-and-true-p
+     variable-spacing-mode)` guard added to fix the text-body-huge bug can
+     then be removed.
+   - Update `variable-spacing--stamp-body-text` to delegate to
+     `face-extra--stamp-body-text` (or remove it if the backend directly
+     names the face-extra function).
+
+3. **`horizontal-layout.el`**, **`text-align` / `face-extra.el`** — no
+   functional change; they already operate on `text-body` spans and will
+   continue to do so.  Remove any `(require 'variable-spacing)` that was
+   added solely for `text-body`.
+
+4. **`org-sty-config.el`** / user configs — no change; `text-body` is still
+   the same symbol.
+
+**Debugging concerns (the main risk):**
+
+- **Neutral `defface` may break existing `:height` expectations.**  Any
+  code that currently relies on `text-body` having `:height 2.0` at face
+  definition time (before `variable-spacing-mode` runs) will silently render
+  at floor size.  The fix is to ensure `variable-spacing-mode` runs before
+  any fontification — already the case via `org-sty-apply` + `font-lock-flush`
+  ordering, but worth instrumenting explicitly during the migration.  A
+  temporary `(face-attribute 'text-body :height)` assertion in the mode body
+  can catch this.
+
+- **Mode-scoped backend registration means the scan loop doesn't run if
+  `variable-spacing-mode` is not yet on when the first jit-lock cycle fires.**
+  This is the same ordering constraint as today; the idle-0 refresh after
+  mode enable handles it.  Verify by opening a WP buffer and confirming
+  body text renders correctly before and after a `font-lock-flush`.
+
+- **Other buffers that happen to `require 'variable-spacing`** will lose the
+  global `text-body` defface if they haven't also loaded `face-extra`.  The
+  `(require 'face-extra)` at the top of `variable-spacing.el` ensures
+  `text-body` is always defined when variable-spacing is loaded; no user
+  config change is needed.
+
+- **`variable-spacing--remove-body-face` is currently private.** Callers
+  outside variable-spacing (e.g. a future `text-align` cleanup path) need
+  the public `face-extra-remove-body-face` wrapper.  Audit all callers before
+  removing the private function.
+
+**Effort estimate:** ~2–3 hours of focused work.  The scan loop is ~50 lines
+of well-understood code; the `defface` move is mechanical; the registration
+change is ~10 lines.  The bulk of the time is verification: open an untagged
+Org buffer, a WP-tagged buffer, and a non-Org buffer, confirm no spurious
+stamping, confirm variable-spacing renders correctly, byte-compile all four
+files clean.  The `(bound-and-true-p variable-spacing-mode)` guard added as
+a stopgap can be removed as the final step, which gives a clean before/after
+regression test point.
 
 ### v1 release
 
@@ -846,6 +959,15 @@ run.
   profiling shows the ring walk is measurable.
 
 ## Architecture notes — `text-body` face model
+
+> **Ownership note:** `text-body` and the bare-text scan loop currently live
+> in `variable-spacing.el` but are planned to move to `face-extra.el`.  See
+> the "Long-term file structure" section and the "`text-body` move to
+> `face-extra`" planned work item.  The description below reflects the
+> current implementation; after the move the only changes are that the
+> `defface` loses its `:height 2.0` (neutral `(:inherit default)` instead)
+> and sizing becomes entirely `variable-spacing-mode`'s responsibility via
+> its floor/body remap.
 
 Body-text sizing uses `default` as a true floor (very small, e.g. 6pt);
 body text opts in to a larger `text-body` face via two orthogonal mechanisms:
