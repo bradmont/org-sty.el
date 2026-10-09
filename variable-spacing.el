@@ -229,21 +229,23 @@ Installed on `variable-spacing-mode' enable; removed on disable.")
 
 (defun variable-spacing--spacer (ratio face)
   "Return a `space' display spec for RATIO.
-Measures the rendered height of FACE via `face-font' rather than
-`font-at', so the result is independent of whatever `face' text
-properties may (or may not) be set elsewhere."
-  (let* ((ratio (or ratio 1.5))
-         (win (get-buffer-window (current-buffer) t))
-         (height
-          (or (when (window-live-p win)
-                (condition-case nil
-                    (let* ((font (face-font face (window-frame win)))
-                           (fi   (and font (font-info font))))
-                      (when (and (vectorp fi) (> (length fi) 2) (aref fi 2))
-                        (aref fi 2)))
-                  (error nil)))
-              (frame-char-height)))
-         (px (max 0 (round (* ratio height)))))
+Measures the rendered height of FACE in the current buffer via
+`face-font' and `font-info'.  This correctly respects the buffer-local
+`face-remapping-alist' (e.g. the variable-spacing floor remap on
+`default') and works for off-screen content where no live window
+exists.  `frame-char-height' is intentionally not used: in WP buffers
+it reflects the floor-remapped `default' rather than the body text
+height, and would return incorrect results for off-screen content."
+  (let* ((ratio  (or ratio 1.5))
+         (win    (get-buffer-window (current-buffer) t))
+         (f      (if (window-live-p win) (window-frame win) (selected-frame)))
+         (font   (face-font face f))
+         (fi     (and font (font-info font)))
+         (height (if (and (vectorp fi) (> (length fi) 2) (aref fi 2))
+                     (aref fi 2)
+                   (error "variable-spacing--spacer: \
+could not measure font height for face `%s'" face)))
+         (px     (max 0 (round (* ratio height)))))
     `(space :width 0 :height (,px))))
 
 (defun variable-spacing--add-body-face (beg end)
