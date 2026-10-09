@@ -773,14 +773,34 @@ is explicitly neutralised before measuring to keep measurements clean."
                                'face '(:background "#00aa44" :foreground "white"))
             (put-text-property (1- lend) lend text-align--debug-lend-prop t))
           (unless (eq (char-after (1- lend)) ?\n)
+          ;; Skip visual lines that start immediately after a display
+          ;; overlay (e.g. a wrapped org-cite-appear citation).  On such
+          ;; lines lbeg = overlay-end, so window-text-pixel-size misses
+          ;; the overlay's contribution to this visual line (the second
+          ;; half of its display string), making text-px far too small
+          ;; and slack far too large — widening spaces until a word
+          ;; overflows onto a third line.  Skipping is the safe first
+          ;; step; a follow-up pass will compute the correct slack from
+          ;; cached overlay word widths.
+          (unless (and (> lbeg (point-min))
+                       (cl-some (lambda (ov) (overlay-get ov 'display))
+                                (overlays-at (1- lbeg))))
             (let ((slack (- zone text-px)))
               (when (> slack 0)
                 ;; Collect interword space positions in the visual line,
                 ;; excluding the wrap character at (1- lend).
+                ;; Skip spaces that lie inside an overlay whose `display'
+                ;; property replaces the whole span (e.g. org-cite-appear
+                ;; overlays).  Those spaces are not rendered; stamping
+                ;; extra width on them consumes slack without widening
+                ;; anything visible, leaving the line short of the margin.
                 (let ((spaces nil)
                       (pos    lbeg))
                   (while (< pos (1- lend))
-                    (when (eq (char-syntax (char-after pos)) ?\ )
+                    (when (and (eq (char-syntax (char-after pos)) ?\ )
+                               (not (cl-some
+                                     (lambda (ov) (overlay-get ov 'display))
+                                     (overlays-at pos))))
                       (push pos spaces))
                     (setq pos (1+ pos)))
                   ;; Trim any trailing spaces that are not followed by a
@@ -827,7 +847,7 @@ is explicitly neutralised before measuring to keep measurements clean."
                                                    `(space :width (,new-px)))
                                 (put-text-property sp (1+ sp)
                                                    text-align--justify-prop t)))
-                            (setq i (1+ i))))))))))))))))))  ; closes unless
+                            (setq i (1+ i)))))))))))))))))))  ; closes unless
 
 ;;;; ================================================================
 ;;;; Section 6b — justify debug mode
@@ -863,10 +883,15 @@ Fires only when point is at visual-line beginning position."
                (text-px  (car (window-text-pixel-size win lbeg lend (* 2 avail))))
                (slack    (- zone text-px)))
           ;; Collect and trim spaces the same way the stamp function does.
+          ;; Skip spaces inside display overlays (mirrors the guard in
+          ;; `text-align--stamp').
           (let ((spaces nil)
                 (pos    lbeg))
             (while (< pos (1- lend))
-              (when (eq (char-syntax (char-after pos)) ?\ )
+              (when (and (eq (char-syntax (char-after pos)) ?\ )
+                         (not (cl-some
+                               (lambda (ov) (overlay-get ov 'display))
+                               (overlays-at pos))))
                 (push pos spaces))
               (setq pos (1+ pos)))
             (let ((ordered (nreverse spaces)))
