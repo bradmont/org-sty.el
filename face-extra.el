@@ -946,8 +946,25 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                      ;; Face at visual-line BOL.  font-lock-face takes
                      ;; priority (Org regexp keywords); fall back to face
                      ;; (Org anchor functions, text-body stamp).
-                     (f     (or (get-text-property lbeg 'font-lock-face)
-                                (get-text-property lbeg 'face)))
+                     ;;
+                     ;; When lbeg is inside an invisible (folded) region —
+                     ;; e.g. the "#+TITLE: " prefix folded by
+                     ;; org-title-fold-mode — the face there belongs to the
+                     ;; keyword markup, not the content.  Scan forward to
+                     ;; the first non-invisible position so that
+                     ;; org-document-title (applied to the title value text)
+                     ;; is resolved correctly.  The line-prefix stamp is
+                     ;; still written at lbeg: the display engine reads
+                     ;; line-prefix from the buffer BOL regardless of
+                     ;; whether that position is invisible.
+                     (fpos  (if (get-text-property lbeg 'invisible)
+                                (let ((p (next-single-property-change
+                                          lbeg 'invisible nil lend)))
+                                  (or p lend))
+                              lbeg))
+                     (f     (when (< fpos lend)
+                              (or (get-text-property fpos 'font-lock-face)
+                                  (get-text-property fpos 'face))))
                      (faces (cond
                               ((null f)                          nil)
                               ((symbolp f)                       (list f))
