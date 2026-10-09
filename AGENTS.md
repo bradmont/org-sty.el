@@ -1284,12 +1284,135 @@ or user-pinned (100% view).
 
 ### Pagination — prerequisite
 
-**Fix `variable-spacing--spacer` off-screen height before implementing
+~~**Fix `variable-spacing--spacer` off-screen height before implementing
 pagination.**  Replace the `frame-char-height` fallback with: effective face
 `:height` resolved from `face-remapping-alist` → converted to px via frame
 DPI × `variable-spacing-ratio`.  This must work for arbitrary buffer
 positions with no window.  Pagination requires reliable cumulative line
-heights across the entire buffer, including off-screen content.
+heights across the entire buffer, including off-screen content.~~  **DONE.**
+`frame-char-height` removed; replaced with `face-font` + `font-info` on
+`(selected-frame)` as the fallback frame.  `face-font` is called in the
+current buffer's context so it correctly consults the buffer-local
+`face-remapping-alist` regardless of whether a live window exists.
+
+### Pass 4 — height cache architecture
+
+Pass 4 is the page-height accumulator: it walks the buffer summing per-line
+pixel heights to determine where page breaks fall.  It runs as a **separate
+idle-timer pass**, after jit-lock has settled for the region being walked
+(passes 1–2 must have stamped `line-prefix` spacers before any line height
+is measured).
+
+#### Height source
+
+A logical line's pixel height is derived entirely from text properties
+already in the buffer — no window or `window-text-pixel-size` call is needed:
+
+```
+line_height_px = spacer_px + char_height_px
+```
+
+where `spacer_px` is the `:height` value inside the `line-prefix` display
+spec stamped by pass 1, and `char_height_px` is `font-info` index 2 for the
+effective face at that position.  Both are readable off-screen.
+
+A multi-visual-line (wrapped) logical line contributes one spacer per
+visual sub-line (each visual BOL carries the `line-prefix` stamp), so the
+total logical-line height is the sum over all its visual sub-lines.
+
+#### Window resize
+
+The height cache is **not** invalidated on window resize.  Olivetti absorbs
+resize events by growing or shrinking its fringes, keeping the text-area body
+width constant.  Line wrapping therefore does not change, and all cached
+heights remain valid.  (This holds strictly once Olivetti is switched to
+pixel-width fringe geometry; with the current char-width margin approach
+there is up to `frame-char-width / 2` of rounding error at the body edge,
+which is acceptable for now.)
+
+The only resize event that matters to pagination is the window becoming
+**narrower than the page** — in that case pagination is disabled entirely
+and the buffer falls back to a non-paginated view.  This is a simple
+boolean check on each `window-size-change-functions` call; no cache work.
+
+#### Per-line height cache
+
+Per-logical-line pixel heights are stored as a text property
+(`page-layout--line-height-px`) at each logical BOL.  `after-change-functions`
+clears this property on the affected line(s) — the *only* work done on the
+hot path.  Heights are recomputed lazily by Pass 4 when first needed after
+invalidation.
+
+Markers are **not** used for per-line storage.  Markers impose O(lines-after-
+edit) update cost on every buffer modification.  Text properties shift with
+the text at the C level with no per-property overhead.
+
+#### Chunk vector
+
+To avoid O(N) forward-line walking for prefix-sum queries (e.g. "what is
+the cumulative pixel height at line 2000?"), logical lines are grouped into
+variable-size chunks.  The chunk vector is a buffer-local Lisp vector of
+`[marker chunk-height-px]` pairs:
+
+- `marker` — points to the logical BOL of the first line in the chunk.
+  Only O(N/K) markers exist (one per chunk, not one per line), so marker
+  update overhead is negligible.
+- `chunk-height-px` — sum of `page-layout--line-height-px` for all lines
+  in this chunk, or `nil` if stale.
+
+**Critical: each entry stores the chunk's own height, not the cumulative
+total from the buffer start.**  This makes edit invalidation local: an edit
+stales exactly one chunk entry, never any other.
+
+Prefix-sum query for position P:
+1. Binary-search the chunk vector by marker position → chunk C containing P.
+2. Sum `chunk-height-px` for chunks 0 … C-1 (pure vector arithmetic;
+   recompute any `nil` entries encountered by walking that chunk's lines).
+3. Walk within chunk C from its marker to P, summing `page-layout--line-height-px`.
+
+Total cost: O(N/K) additions + O(K) `forward-line` calls.  With K = 64 and
+N = 10,000: ~220 operations ≈ 70 µs.  With K = 64 and N = 100,000: ~1,630
+operations ≈ 0.5 ms.
+
+#### Chunk rebalancing (idle, not on hot path)
+
+`after-change-functions` does **not** restructure the chunk vector.  On a
+newline insertion it increments a buffer-local counter
+`page-layout--new-lines-since-rechunk`.  When that counter crosses K (the
+target chunk size), an idle timer is scheduled to run
+`page-layout--rechunk`:
+
+- Walk each chunk from its marker; count lines to the next chunk's marker.
+- Any chunk over 2K: insert a new `[marker-at-midpoint nil]` into the
+  vector at that position.  New entries are stale (nil); heights are
+  recomputed lazily.
+- Fragmentation from deletion (many sub-K/4 chunks) is not aggressively
+  repaired — it is harmless in practice and can be addressed if profiling
+  ever shows it matters.
+
+Chunk vector operations are O(C) where C = N/K ≈ 156 for a 10,000-line
+document at K = 64.  This is negligible even as a synchronous operation,
+but it stays off the hot path regardless.
+
+#### Visual-line subdivision for mid-paragraph page breaks
+
+When pagination determines a page break falls *within* a wrapped logical
+line, it needs the positions of that line's visual sub-line BOLs to place
+the break overlay correctly.  `line-move-visual` is called **on demand for
+that specific logical line only** — not pre-cached across all wrapped lines.
+
+This keeps the common case (break at a paragraph boundary) entirely free of
+`line-move-visual` cost.  The uncommon case (break mid-paragraph) pays for
+exactly one paragraph's worth of `line-move-visual` calls per page, which
+is acceptable.
+
+#### Idle-timer ordering
+
+Pass 4 must fire *after* jit-lock has settled and passes 1–2 have stamped
+`line-prefix` for the region being walked.  The idle delay for Pass 4 should
+be strictly greater than the pass-3 flush delay (`face-extra--pass3-flush-delay`,
+default 2.0 s) so the full pipeline has settled before page breaks are
+recomputed.  A recommended default is 3.0 s idle.
 
 ### Page break and footnote zone rendering
 
@@ -1378,10 +1501,13 @@ values rather than deriving everything through Emacs pixel coordinates.
 ### Implementation order
 
 1. ~~`page-metrics.el` — physical unit conversions, font-metric px/pt~~  DONE
-2. `variable-spacing--spacer` off-screen fix — face metrics + frame DPI,
-   no `frame-char-height`
-3. Page break overlays — thin separator with header/footer chrome
-4. Footnote zone — monolithic overlay first; ephemeral anchors if needed
-5. Page background and chrome — desktop colour, page-white overlay, border
-6. Pixel-accurate geometry — fringe-based layout, fork/override
+2. ~~`variable-spacing--spacer` off-screen fix — `face-font` + `font-info`
+   on `selected-frame`; no `frame-char-height`~~  DONE
+3. Pass 4 height cache (`page-layout.el`) — per-line text-property cache,
+   chunk vector with markers + chunk totals, idle rechunking, idle-timer
+   pagination driver; see "Pass 4 — height cache architecture" above
+4. Page break overlays — thin separator with header/footer chrome
+5. Footnote zone — monolithic overlay first; ephemeral anchors if needed
+6. Page background and chrome — desktop colour, page-white overlay, border
+7. Pixel-accurate geometry — fringe-based layout, fork/override
    `olivetti-set-window`; prerequisite for print correspondence
