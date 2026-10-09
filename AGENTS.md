@@ -778,6 +778,16 @@ line). The 2 `vertical-motion` calls for visual-line boundary detection are
 unavoidable here. No fast logical-line heuristic applies because mid-paragraph
 lines are not paragraph-final.
 
+**variable-spacing not applied when an org-cite-appear citation straddles a line break** (UNFIXED, not yet diagnosed):
+When an inlined citation rendered by `org-cite-appear-mode` wraps across a
+visual line boundary, `variable-spacing` spacing stamps appear to be missing
+or incorrect on the line(s) affected by the citation overlay.  Suspected
+interaction between the display overlay's contribution to visual-line
+geometry and passes 1–2 face resolution, possibly related to the invisible-
+region face-lookup fix in `face-extra--dispatch-pass3` (commit 213dfb5) not
+covering the passes 1–2 path.  Reproduce by placing a citation near the end
+of a long line so it wraps.
+
 **Passes 1–2 not applied to some paragraphs on initial open** (OPEN, root cause unknown):
 In large or structurally complex Org buffers (e.g. a file containing both
 test-case EXPECT blocks and thousands of lines of body text), some paragraphs
