@@ -544,6 +544,13 @@ remove stale stamps before `window-text-pixel-size' measures the line.
 Without this, stale display widths on spaces inflate the measured
 text-px and cause the distributed slack to be too small.")
 
+(defvar-local horizontal-layout--last-avail nil
+  "Last known pixel width of the text area in this buffer's window.
+Used by `horizontal-layout--window-size-change' to detect genuine
+width changes (which require a pass-3 re-stamp) and ignore pure
+height changes (minibuffer growth, vertico popup) which do not affect
+justification geometry.")
+
 (defvar-local text-align--space-width-cache nil
   "Hash table caching natural space pixel widths keyed by face value.
 The key is the raw face property at the space position — a symbol, a
@@ -1042,7 +1049,14 @@ is registered and handles cleanup on disable."
 ;; Deduplicates buffers shown in multiple windows on the same frame.
 
 (defun horizontal-layout--window-size-change (frame)
-  "Flush font-lock for layout-active buffers when a window on FRAME resizes."
+  "Schedule a pass-3 flush when a window on FRAME changes pixel width.
+
+Ignores pure height changes (minibuffer growth, vertico popup) which
+do not affect justification geometry — only the available pixel WIDTH
+matters for text-align stamps.  Avoids `font-lock-flush' entirely:
+passes 1–2 stamps are in character units and don't depend on window
+width, so no re-fontification is needed.  The flush's own `:pre-clear'
+handles stale stamp removal atomically before re-stamping."
   (let ((seen nil))
     (dolist (win (window-list frame 'no-minibuffer))
       (let ((buf (window-buffer win)))
@@ -1051,7 +1065,13 @@ is registered and handles cleanup on disable."
           (with-current-buffer buf
             (when (or (bound-and-true-p horizontal-layout-mode)
                       (bound-and-true-p text-align-mode))
-              (font-lock-flush))))))))
+              (let ((avail (window-body-width win t)))
+                (when (not (equal avail horizontal-layout--last-avail))
+                  (setq horizontal-layout--last-avail avail)
+                  (face-extra--schedule-pass3-flush
+                   buf
+                   (window-start win)
+                   (window-end win t)))))))))))
 
 (add-hook 'window-size-change-functions
           #'horizontal-layout--window-size-change)
@@ -1068,6 +1088,7 @@ is registered and handles cleanup on disable."
   "Invalidate caches and reflow after `text-scale-set'."
   (when (or (bound-and-true-p horizontal-layout-mode)
             (bound-and-true-p text-align-mode))
+    (setq horizontal-layout--last-avail nil)
     (face-extra--invalidate-cache)
     (font-lock-flush)))
 

@@ -210,6 +210,26 @@ on each keystroke so only one flush fires per typing burst.")
 Allocated once per buffer and cleared between walks to avoid
 per-walk allocation that drives GC during active typing.")
 
+(defvar-local face-extra--dispatch-pass3-active nil
+  "Non-nil while `face-extra--dispatch-pass3' is executing in this buffer.
+Used as a reentrancy guard: `vertical-motion' inside the visual-line
+walk can trigger jit-lock, which would call `face-extra--dispatch-pass3'
+again.  The inner call detects this flag and schedules a flush for its
+region instead of trying to run the walk again.")
+
+(defvar face-extra--typing-commands
+  '(self-insert-command
+    delete-backward-char          ; backspace in most modes
+    org-delete-backward-char      ; backspace in Org mode
+    delete-forward-char           ; C-d / forward delete
+    delete-char)
+  "Commands treated as active typing for passes 1–2 narrowing.
+During these commands, passes 1–2 are narrowed to point's logical line,
+keeping per-keystroke cost near zero.  All other commands — scrolling,
+initial render, fontified=nil re-fontification — get full unrestricted
+passes.  `self-insert-command' is first so the common case is a single
+pointer comparison before `memq' returns.")
+
 (defvar face-extra--pass3-flush-delay 0.15
   "Idle delay in seconds before the deferred full-paragraph pass-3 flush runs.
 During active typing, pass-3 processes only the visual line at point;
@@ -620,7 +640,12 @@ Steps:
       ;; keystroke.  The full region is handled by the pass-3 flush on idle.
       (let ((passes-beg beg)
             (passes-end end))
-        (when (null (current-idle-time))
+        ;; Narrow to point's logical line only during rapid character entry.
+        ;; Non-typing events (initial load, scroll, fontified=nil
+        ;; re-fontification from org-cite-appear) get the full region so
+        ;; passes 1–2 always run on freshly-dirtied chunks.
+        (when (and (null (current-idle-time))
+                   (memq this-command face-extra--typing-commands))
           (let ((pt (point)))
             (if (and (>= pt beg) (< pt end))
                 ;; Narrow to point's logical line (line-beginning-position /
@@ -667,19 +692,38 @@ user scrolls and jit-lock processes it normally."
              (gethash 3 face-extra--pass-order))
     (let ((win (get-buffer-window (current-buffer) t)))
       (when win
-        (face-extra--dispatch-pass3
+        (face-extra--schedule-pass3-flush
+         (current-buffer)
          (window-start win)
          (window-end win t))))))
+
+(defun face-extra--window-scroll (win _new-start)
+  "Schedule a pass-3 flush when window WIN scrolls.
+Added to `window-scroll-functions' so that unjustified-but-fontified
+content (paragraphs with no citations that jit-lock never re-dirtied)
+gets stamped when scrolled into view."
+  (let ((buf (window-buffer win)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and (or face-extra--local-properties
+                       (face-extra--active-backend))
+                   (gethash 3 face-extra--pass-order))
+          (face-extra--schedule-pass3-flush buf
+                                            (window-start win)
+                                            (window-end win t)))))))
 
 (defun face-extra--enable-dispatch ()
   "Add `face-extra--dispatch' as :after advice on fontification.
 Advises `font-lock-fontify-keywords-region' so the dispatch runs
 after Org (and all other font-lock keywords) have fully annotated the
 region.  Also advises `font-lock-ensure' so that `font-lock-update'
-(which bypasses jit-lock) still triggers pass-3.  Idempotent."
+(which bypasses jit-lock) still triggers pass-3.  Adds a
+`window-scroll-functions' hook to flush pass-3 on scroll for regions
+that jit-lock never re-dirtied.  Idempotent."
   (advice-add 'font-lock-fontify-keywords-region :after
               #'face-extra--dispatch)
-  (advice-add 'font-lock-ensure :after #'face-extra--after-ensure))
+  (advice-add 'font-lock-ensure :after #'face-extra--after-ensure)
+  (add-hook 'window-scroll-functions #'face-extra--window-scroll))
 
 (defun face-extra--disable-dispatch ()
   "Remove the `face-extra--dispatch' advice.
@@ -699,7 +743,8 @@ backend matches any live buffer's major mode."
       (advice-remove 'font-lock-fontify-keywords-region
                      #'face-extra--dispatch)
       (advice-remove 'font-lock-ensure
-                     #'face-extra--after-ensure))))
+                     #'face-extra--after-ensure)
+      (remove-hook 'window-scroll-functions #'face-extra--window-scroll))))
 
 ;;;; ------ Pass-3 jit-lock dispatch ------
 
@@ -741,18 +786,26 @@ allocating a new closure on every keystroke."
           (face-extra--dispatch-pass3 b e))))))
 
 (defun face-extra--schedule-pass3-flush (buf beg end)
-  "Schedule a full pass-3 run for BEG..END in BUF after an idle delay.
-Cancels any previously scheduled flush for the same buffer so only one
-fires per typing burst.  Stores the region in buffer-local variables
-rather than a closure to avoid per-keystroke allocation."
-  (let ((existing (buffer-local-value 'face-extra--pass3-flush-timer buf)))
-    (when existing (cancel-timer existing)))
+  "Accumulate BEG..END into the pending pass-3 flush region for BUF.
+Only creates a new idle timer if none is already running.  This means
+rapid bursts of fontified=nil marks (e.g. from org-cite-appear
+formatting citations one by one) do not keep resetting the delay clock;
+the flush fires `face-extra--pass3-flush-delay' seconds after the
+FIRST event in the burst, covering the union of all regions dirtied
+during that burst."
   (with-current-buffer buf
-    (setq face-extra--pass3-flush-beg beg
-          face-extra--pass3-flush-end end)
-    (setq face-extra--pass3-flush-timer
-          (run-with-idle-timer face-extra--pass3-flush-delay nil
-                               #'face-extra--pass3-flush-callback buf))))
+    (setq face-extra--pass3-flush-beg
+          (if face-extra--pass3-flush-beg
+              (min beg face-extra--pass3-flush-beg)
+            beg))
+    (setq face-extra--pass3-flush-end
+          (if face-extra--pass3-flush-end
+              (max end face-extra--pass3-flush-end)
+            end))
+    (unless face-extra--pass3-flush-timer
+      (setq face-extra--pass3-flush-timer
+            (run-with-idle-timer face-extra--pass3-flush-delay nil
+                                 #'face-extra--pass3-flush-callback buf)))))
 
 (defun face-extra--paragraph-bounds (beg end)
   "Return a (BEG . END) cons expanded to paragraph boundaries.
@@ -801,9 +854,16 @@ Apply functions must not call `vertical-motion' themselves.
 `vertical-motion' is safe here because jit-lock-register functions fire
 after the display engine has settled for the chunk.  It would deadlock
 inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
-  (when (and (or face-extra--local-properties
-                 (face-extra--active-backend))
-             (gethash 3 face-extra--pass-order))
+  (if face-extra--dispatch-pass3-active
+      ;; Reentrant call: vertical-motion inside the walk triggered jit-lock
+      ;; which called us again.  Schedule a flush for this inner region
+      ;; rather than walking it now — the outer walk is already in progress
+      ;; and will not cover this region (jit-lock fired it separately).
+      (face-extra--schedule-pass3-flush (current-buffer) beg end)
+    (when (and (or face-extra--local-properties
+                   (face-extra--active-backend))
+               (gethash 3 face-extra--pass-order))
+      (let ((face-extra--dispatch-pass3-active t))
     ;; Expand beg/end by any region pass-2 covered in this jit-lock cycle.
     ;; Pass-2's :after advice receives font-lock's extended region (e.g.
     ;; the full org-quote block); jit-lock only passes us the smaller
@@ -989,7 +1049,7 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                             (gethash (car pair) line-spans)))))
                 (when (zerop moved)
                   (goto-char rend)))))
-          (face-extra--run-pass 3 line-spans))))))
+          (face-extra--run-pass 3 line-spans)))))))) ; closes let/when/if
 
 (defun face-extra--enable-dispatch-pass3 ()
   "Register `face-extra--dispatch-pass3' as a jit-lock function.
