@@ -210,12 +210,28 @@ on each keystroke so only one flush fires per typing burst.")
 Allocated once per buffer and cleared between walks to avoid
 per-walk allocation that drives GC during active typing.")
 
-(defvar-local face-extra--dispatch-pass3-active nil
-  "Non-nil while `face-extra--dispatch-pass3' is executing in this buffer.
-Used as a reentrancy guard: `vertical-motion' inside the visual-line
-walk can trigger jit-lock, which would call `face-extra--dispatch-pass3'
-again.  The inner call detects this flag and schedules a flush for its
-region instead of trying to run the walk again.")
+(defvar-local face-extra--pass3-geometry-unsettled nil
+  "Non-nil while the pass-3 visual-line walk is executing in this buffer.
+
+This is a display-geometry gate, not merely a reentrancy guard.
+
+Pass-3 calls `window-text-pixel-size' to measure line widths for
+justification.  That measurement requires settled display geometry —
+the same geometry the user sees on screen.  The walk achieves this by
+running from an idle-timer callback, after the display engine has
+finished a full render cycle.
+
+`vertical-motion' inside the walk asks the display engine to compute
+visual-line boundaries, which unsettles geometry for the duration of
+each step.  If jit-lock fires during `vertical-motion' and calls
+`face-extra--dispatch-pass3' again, any `window-text-pixel-size' call
+in that inner invocation would measure against mid-motion geometry and
+produce wrong pixel widths — causing visible over- or under-spacing.
+
+When this flag is non-nil, geometry is unsettled: a call to
+`face-extra--dispatch-pass3' defers to a flush scheduled for after the
+outer walk completes, at which point geometry will be settled again.
+When nil, geometry is settled and the walk may proceed.")
 
 (defvar face-extra--typing-commands
   '(self-insert-command
@@ -854,16 +870,18 @@ Apply functions must not call `vertical-motion' themselves.
 `vertical-motion' is safe here because jit-lock-register functions fire
 after the display engine has settled for the chunk.  It would deadlock
 inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
-  (if face-extra--dispatch-pass3-active
-      ;; Reentrant call: vertical-motion inside the walk triggered jit-lock
-      ;; which called us again.  Schedule a flush for this inner region
-      ;; rather than walking it now — the outer walk is already in progress
-      ;; and will not cover this region (jit-lock fired it separately).
+  ;; Geometry-settled gate.  Pass-3 calls `window-text-pixel-size', which
+  ;; requires settled display geometry.  `vertical-motion' inside the walk
+  ;; unsettles geometry; any call that arrives while the walk is running
+  ;; (face-extra--pass3-geometry-unsettled = t) must NOT run the walk — it
+  ;; would measure wrong widths.  Schedule a flush instead so the region
+  ;; is processed after the outer walk finishes and geometry settles again.
+  (if face-extra--pass3-geometry-unsettled
       (face-extra--schedule-pass3-flush (current-buffer) beg end)
     (when (and (or face-extra--local-properties
                    (face-extra--active-backend))
                (gethash 3 face-extra--pass-order))
-      (let ((face-extra--dispatch-pass3-active t))
+      (let ((face-extra--pass3-geometry-unsettled t))
     ;; Expand beg/end by any region pass-2 covered in this jit-lock cycle.
     ;; Pass-2's :after advice receives font-lock's extended region (e.g.
     ;; the full org-quote block); jit-lock only passes us the smaller
@@ -956,9 +974,10 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
          (t
           (save-excursion
             (goto-char pt)
-            (vertical-motion 0)
-            (setq beg (point))
-            (vertical-motion 1)
+            (let ((fontification-functions nil))
+              (vertical-motion 0)
+              (setq beg (point))
+              (vertical-motion 1))
             ;; Do NOT clip by outer end: paragraph-final guard in
             ;; text-align--apply needs to see the trailing \\n.
             (setq end (point)))
@@ -992,7 +1011,8 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
             (goto-char rbeg)
             (while (< (point) rend)
               (let* ((lbeg  (point))
-                     (moved (vertical-motion 1))
+                     (moved (let ((fontification-functions nil))
+                              (vertical-motion 1)))
                      ;; Do NOT clip lend by rend.  The paragraph-final guard
                      ;; in text-align--apply checks (char-after (1- lend));
                      ;; for the last line of a paragraph lend must land past
