@@ -159,16 +159,30 @@
                    (when (bound-and-true-p org-num-mode)
                      (org-num-mode -1)
                      (org-num-mode 1))))
-       (wp-faces '(;; Metadata faces at floor size — only correct in WP buffers
+       (wp-faces '(;; :text-align left on headings suppresses justify/center/right
+                   ;; inherited from text-body via the face-extra resolver.
+                   ;; Must live here (after :eval) not in org-sty-default :faces,
+                   ;; because horizontal-layout.el — which registers 'text-align
+                   ;; with face-extra — is only loaded when text-align-mode is
+                   ;; enabled in :eval above.  If placed in org-sty-default :faces,
+                   ;; face-extra-registered-p('text-align) returns nil and
+                   ;; org-sty-remap silently drops the key.
+                   (org-level-1         . (:text-align left))
+                   (org-level-2         . (:text-align left))
+                   (org-level-3         . (:text-align left))
+                   (org-level-4         . (:text-align left))
+                   (org-level-5         . (:text-align left))
+                   (org-level-6         . (:text-align left))
+                   (org-level-7         . (:text-align left))
+                   (org-level-8         . (:text-align left))
+                   ;; Metadata faces at floor size — only correct in WP buffers
                    ;; where variable-spacing-mode remaps `default' to 6pt.
                    (org-property-value  . (:height 60))
                    (org-special-keyword . (:height 60))
                    ;; Center the document title.  Declared here (in :faces)
                    ;; rather than via face-extra-add-relative in :eval so
                    ;; that it runs in the :faces phase — after :eval — and
-                   ;; cannot be clobbered by a base-style :text-align 0
-                   ;; suppressor installed in the same :faces phase.
-                   ;; The :faces phase runs last and has highest priority.
+                   ;; cannot be clobbered by a base-style suppressor.
                    (org-document-title . (:text-align center))))
        (wp-style `(:font "Times New Roman"
                    :num-level 3 :indent nil

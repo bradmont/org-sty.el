@@ -750,6 +750,26 @@ and/or Org keyword activation are the remaining contributors.
 
 ### Known remaining issues
 
+**Heading justification: over-wide spaces and wrong visual-line wrap** (FIXED):
+Root cause: `org-hide` (the face Org applies as a `face` text property to
+leading heading stars) was absent from `variable-spacing-metadata-faces`.
+`has-explicit-face-p` returned nil for it, so pass 0 stamped `text-body` on
+the star characters.  Pass 3 then saw `text-body` → `justify` on those
+positions and applied justification to the whole heading visual line.
+
+Fix: added `org-hide` to `variable-spacing-metadata-faces`.
+
+**Debugging path — for future "something fontifies wrong" bugs:**
+When a pass-3 property (e.g. `text-align`) fires on an element where it
+shouldn't, the first question is always "why does pass 0 think that position
+is bare body text?"  Use `describe-char` on the offending character and check
+the `face` text property.  If it contains a face that is absent from both
+`variable-spacing-content-faces` and `variable-spacing-metadata-faces`,
+`has-explicit-face-p` returns nil and pass 0 stamps `text-body` on it —
+which then propagates `text-align`, `variable-spacing-ratio`, and any other
+`text-body`-inherited property to that position.  The fix is to add the face
+to the appropriate list.
+
 **Mid-paragraph spacing goes crazy** (UNFIXED, needs diagnosis):
 When editing in the middle of a paragraph (not on the final line), spacing
 stamps from `variable-spacing-mode` become erratic — line spacing gets very

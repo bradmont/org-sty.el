@@ -140,7 +140,9 @@ feature."
   :group 'variable-spacing)
 
 (defcustom variable-spacing-metadata-faces
-  '(;; Drawer structure.
+  '(;; Heading stars — org-hide is applied as a `face' text property by Org.
+    org-hide
+    ;; Drawer structure.
     org-drawer
     org-special-keyword
     org-property-value
