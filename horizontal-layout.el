@@ -1014,6 +1014,15 @@ Per-buffer text properties are cleaned up by `text-align-clear'
 on mode disable or the next dispatch cycle."
   nil)
 
+(defun text-align--post-command-reflow ()
+  "One-shot post-command hook: reflow the paragraph at point after overflow.
+Removes itself on first run, then performs a full-paragraph pass-3 walk
+so the cascade from a line overflow is corrected before redisplay."
+  (remove-hook 'post-command-hook #'text-align--post-command-reflow t)
+  (let ((para (face-extra--paragraph-bounds (point) (point))))
+    (setq face-extra--pass3-force-full t)
+    (face-extra--dispatch-pass3 (car para) (cdr para))))
+
 (defun text-align--pre-command-justify (vbeg vend)
   "Pre-command callback for justify: clear stamps and check for overflow.
 VBEG and VEND are the visual-line bounds supplied by `face-extra--pre-command'.
@@ -1035,17 +1044,23 @@ after the character is inserted but before Emacs waits for input."
     (setq text-align--vline-slack
           (- text-align--vline-slack text-align--vline-avg-char-px))
     (message "justify slack: %.1fpx" text-align--vline-slack)
-    (when (< text-align--vline-slack 0)
-      (setq face-extra--pass3-force-full t)
-      (let* ((buf  (current-buffer))
-             (para (face-extra--paragraph-bounds vbeg vend))
-             (pbeg (car para))
-             (pend (cdr para)))
-        (run-with-timer 0 nil
-                        (lambda ()
-                          (when (buffer-live-p buf)
-                            (with-current-buffer buf
-                              (face-extra--dispatch-pass3 pbeg pend)))))))))
+    ;; Trigger when slack drops below one avg-char-px of headroom, not just
+    ;; at zero.  Wide-than-average characters drain real slack faster than
+    ;; the estimate; the one-character buffer catches those before they
+    ;; cause an undetected overflow and cascade.
+    ;; 1.5× avg approximates max char width; replace with per-char cache.
+    (when (< text-align--vline-slack (* 1.5 text-align--vline-avg-char-px))
+      ;; Clear the next visual line's justify stamps too.  The overflowing
+      ;; word is about to wrap onto it; if its spaces are still expanded
+      ;; the cascade continues.  One extra vertical-motion call on near-
+      ;; overflow (an infrequent event) is acceptable.
+      (let ((next-end (save-excursion
+                        (goto-char vend)
+                        (let ((fontification-functions nil))
+                          (vertical-motion 1))
+                        (point))))
+        (text-align--justify-clear vend next-end))
+      (add-hook 'post-command-hook #'text-align--post-command-reflow nil t))))
 
 
 ;;;; ================================================================

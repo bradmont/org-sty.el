@@ -273,7 +273,7 @@ initial render, fontified=nil re-fontification — get full unrestricted
 passes.  `self-insert-command' is first so the common case is a single
 pointer comparison before `memq' returns.")
 
-(defvar face-extra--pass3-flush-delay 0.15
+(defvar face-extra--pass3-flush-delay 0.05
   "Idle delay in seconds before the deferred full-paragraph pass-3 flush runs.
 During active typing, pass-3 processes only the visual line at point;
 the full paragraph region is deferred until this many seconds of idle
