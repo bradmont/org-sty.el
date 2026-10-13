@@ -559,6 +559,24 @@ vs. a superscript run) get distinct entries with their own measured
 widths.  Cleared at the start of each `:pre-clear' pass so any
 font/scale change is picked up immediately.")
 
+(defvar-local text-align--vline-slack nil
+  "Estimated remaining slack in pixels on point's current visual line.
+Set by `text-align--stamp' after justifying the line; decremented by
+`text-align--pre-command-justify' by the average char width on each
+self-inserting keystroke.  When it drops below zero an immediate
+pass-3 reflow is scheduled via `run-with-timer'.  Nil means no metrics
+are cached for the current visual line.")
+
+(defvar-local text-align--vline-avg-char-px nil
+  "Average character width in pixels for point's current visual line.
+Computed as text-px / char-count at last justify stamp and used by
+`text-align--pre-command-justify' to estimate slack cost per keystroke.")
+
+(defvar-local text-align--vline-metrics-lbeg nil
+  "Visual BOL position for which `text-align--vline-slack' was computed.
+Pre-command compares this against `face-extra--vline-beg' to detect
+when point has moved to a different line, skipping the stale metrics.")
+
 (defun text-align--natural-space-px (win pos avail)
   "Return the natural pixel width of the space character at POS in WIN.
 Checks `text-align--space-width-cache' keyed by the face at POS; on a
@@ -794,6 +812,16 @@ is explicitly neutralised before measuring to keep measurements clean."
                                 (overlays-at (1- lbeg))))
             (let ((slack (- zone text-px)))
               (when (> slack 0)
+                ;; Cache metrics for pre-command overflow detection, but
+                ;; only for the visual line that contains point.  Stamping
+                ;; runs over the full flush region; storing for every line
+                ;; would leave stale metrics from whichever line was stamped
+                ;; last.
+                (when (and (>= (point) lbeg) (< (point) lend))
+                  (setq text-align--vline-slack        slack
+                        text-align--vline-avg-char-px  (/ (float text-px)
+                                                           (max 1 (- lend lbeg 1)))
+                        text-align--vline-metrics-lbeg lbeg))
                 ;; Collect interword space positions in the visual line,
                 ;; excluding the wrap character at (1- lend).
                 ;; Skip spaces that lie inside an overlay whose `display'
@@ -986,6 +1014,39 @@ Per-buffer text properties are cleaned up by `text-align-clear'
 on mode disable or the next dispatch cycle."
   nil)
 
+(defun text-align--pre-command-justify (vbeg vend)
+  "Pre-command callback for justify: clear stamps and check for overflow.
+VBEG and VEND are the visual-line bounds supplied by `face-extra--pre-command'.
+
+Clears justify space stamps on the current visual line so the inserted
+character renders into naturally-spaced text.
+
+For self-inserting commands, also decrements the cached slack by the
+average character width.  When slack drops below zero the line is full;
+an immediate pass-3 reflow is scheduled via `run-with-timer' so it fires
+after the character is inserted but before Emacs waits for input."
+  (text-align--justify-clear vbeg vend)
+  (when (and (memq this-command '(self-insert-command
+                                  org-self-insert-command))
+             text-align--vline-slack
+             text-align--vline-avg-char-px
+             text-align--vline-metrics-lbeg
+             (= text-align--vline-metrics-lbeg vbeg))
+    (setq text-align--vline-slack
+          (- text-align--vline-slack text-align--vline-avg-char-px))
+    (message "justify slack: %.1fpx" text-align--vline-slack)
+    (when (< text-align--vline-slack 0)
+      (setq face-extra--pass3-force-full t)
+      (let* ((buf  (current-buffer))
+             (para (face-extra--paragraph-bounds vbeg vend))
+             (pbeg (car para))
+             (pend (cdr para)))
+        (run-with-timer 0 nil
+                        (lambda ()
+                          (when (buffer-live-p buf)
+                            (with-current-buffer buf
+                              (face-extra--dispatch-pass3 pbeg pend)))))))))
+
 
 ;;;; ================================================================
 ;;;; Section 7 — text-align-mode minor mode
@@ -1027,9 +1088,16 @@ is registered and handles cleanup on disable."
   ;; `text-align--space-width-cache' is NOT cleared here — it is stable
   ;; across keystrokes and is only invalidated on genuine metric changes
   ;; (font-family or text-scale) via `face-extra-invalidate-cache-functions'.
-  :pre-clear  #'text-align--justify-clear
-  :apply      #'text-align--apply
-  :clear      #'text-align--clear-marker)
+  :pre-clear   #'text-align--justify-clear
+  ;; :pre-command strips justify space stamps from point's visual line
+  ;; before the keystroke is processed and rendered.  This prevents a
+  ;; justified line from overflowing when a character is inserted into
+  ;; fully-expanded spaces — the display engine sees natural widths for
+  ;; the render that shows the new character, and the idle flush
+  ;; re-justifies correctly afterward.
+  :pre-command #'text-align--pre-command-justify
+  :apply       #'text-align--apply
+  :clear       #'text-align--clear-marker)
 
 ;; Clear the natural-space-width cache whenever face metrics change.
 ;; `face-extra--invalidate-cache' is called after org-sty-apply (font-family

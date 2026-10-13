@@ -142,15 +142,23 @@ Optional:
               visual-line walk begins.  Use this to remove display artifacts
               (e.g. overlays) that would affect `vertical-motion' layout
               calculations.  Only meaningful for pass-3 properties.
+  :pre-command  Function called with (vline-beg vline-end) from
+              `pre-command-hook' before each self-inserting or deleting
+              keystroke.  vline-beg is the cached visual BOL (recomputed
+              via `vertical-motion' only when point has left the last-known
+              visual line); vline-end is the logical EOL via
+              `line-end-position' (recomputed cheaply each call).
+              Only meaningful for pass-3 properties.
 
 Registering a property clears the entire face cache (via
 `face-extra--invalidate-all-caches') because existing per-face cache
 entries may be stale.  At load time this is inexpensive and rare."
   (let ((pass       (plist-get plist :pass))
         (after      (plist-get plist :after))
-        (apply-fn   (plist-get plist :apply))
-        (clear-fn   (plist-get plist :clear))
-        (pre-clear  (plist-get plist :pre-clear)))
+        (apply-fn     (plist-get plist :apply))
+        (clear-fn     (plist-get plist :clear))
+        (pre-clear    (plist-get plist :pre-clear))
+        (pre-command  (plist-get plist :pre-command)))
     (unless (memql pass '(1 2 3))
       (error "face-extra-define-property: :pass must be 1, 2, or 3 (got %S)" pass))
     (unless (functionp apply-fn)
@@ -161,7 +169,7 @@ entries may be stale.  At load time this is inexpensive and rare."
     (face-extra--validate-after property after pass)
     (puthash (cons property pass)
              (list :pass pass :after after :apply apply-fn :clear clear-fn
-                   :pre-clear pre-clear)
+                   :pre-clear pre-clear :pre-command pre-command)
              face-extra--registry)
     ;; Re-sort the affected pass bucket.
     (face-extra--sort-pass pass)
@@ -209,6 +217,25 @@ on each keystroke so only one flush fires per typing burst.")
   "Reusable hash table for the pass-3 visual-line walk.
 Allocated once per buffer and cleared between walks to avoid
 per-walk allocation that drives GC during active typing.")
+
+(defvar-local face-extra--pass3-force-full nil
+  "When non-nil, skip visual-line narrowing in `face-extra--dispatch-pass3'.
+Consumed (reset to nil) at the start of the narrowing check so it applies
+to exactly one jit-lock cycle.  Set by callers such as
+`text-align--pre-command-justify' when overflow is detected and the full
+logical-line walk is needed on the very next redisplay cycle.")
+
+(defvar-local face-extra--vline-beg nil
+  "Cached visual-line beginning position for `face-extra--pre-command'.
+Set to the result of `vertical-motion' 0 on point's visual line.
+Invalidated (set to nil) whenever point leaves the range
+`[face-extra--vline-beg, face-extra--vline-end)'.")
+
+(defvar-local face-extra--vline-end nil
+  "Cached visual-line end position for `face-extra--pre-command'.
+Set to the position after `vertical-motion' 1 from `face-extra--vline-beg'.
+Recomputed together with `face-extra--vline-beg' whenever point leaves
+the range [vline-beg, vline-end).")
 
 (defvar-local face-extra--pass3-geometry-unsettled nil
   "Non-nil while the pass-3 visual-line walk is executing in this buffer.
@@ -937,13 +964,14 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
       (let ((para (face-extra--paragraph-bounds beg end)))
         (face-extra--schedule-pass3-flush (current-buffer)
                                           (car para) (cdr para)))
-      ;; Narrow beg/end to point's visual line — but check paragraph-final
-      ;; FIRST using only cheap logical-line functions (no vertical-motion).
-      ;;
-      ;; The previous ordering called vertical-motion 0 + 1 to find visual
-      ;; line bounds, then detected paragraph-final and discarded the result.
-      ;; That wasted 2 vertical-motion calls per keystroke even in the most
-      ;; common case (typing at end of paragraph).
+      ;; Narrow beg/end to point's visual line, unless force-full is set.
+      ;; force-full is consumed here (reset to nil) so it applies to
+      ;; exactly this one jit-lock cycle; the full logical-line region
+      ;; is then passed to face-extra--expand-to-lines below.
+      (if (prog1 face-extra--pass3-force-full
+            (setq face-extra--pass3-force-full nil))
+          nil  ; skip narrowing — let expand-to-lines cover the full line
+      ;; Normal narrowing path: reduce to point's visual line.
       ;;
       ;; New ordering:
       ;;   1. Point outside chunk → skip (no vertical-motion).
@@ -951,14 +979,6 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
       ;;      → skip (no vertical-motion).
       ;;   3. Non-final line → narrow with vertical-motion 0 + 1.
       ;;   4. Visual-final wrap of non-final logical line → skip.
-      ;;
-      ;; The logical-line check (step 2) detects the common case: the
-      ;; current logical line is followed by a blank line (\\n\\n) or EOB.
-      ;; It is correct for non-wrapped final lines.  For wrapped non-final
-      ;; logical lines it always falls through to step 3 (correct).  For
-      ;; wrapped final logical lines the visual-final wrap is caught by
-      ;; step 4; earlier wraps of the same logical line still justify
-      ;; (also correct).
       (let ((pt (point)))
         (cond
          ;; Point outside the jit-lock chunk: skip entirely.
@@ -984,7 +1004,7 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
           ;; Visual-final line of a non-final logical line: skip.
           (when (and (< beg end)
                      (eq (char-after (1- end)) ?\n))
-            (setq beg end))))))
+            (setq beg end)))))))  ; closes cond / let pt / if force-full
     ;; Walk the (possibly narrowed) region.  beg = end → loop never runs.
     (let ((region (face-extra--expand-to-lines beg end)))
       (when region
@@ -1071,14 +1091,61 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                   (goto-char rend)))))
           (face-extra--run-pass 3 line-spans)))))))) ; closes let/when/if
 
+(defun face-extra--pre-command ()
+  "Dispatch `:pre-command' callbacks for registered pass-3 properties.
+Added to `pre-command-hook' buffer-locally by
+`face-extra--enable-dispatch-pass3'.
+
+Fires only for self-inserting and deletion commands — the cases where a
+single keystroke may alter line width and cause a justified line to
+overflow before jit-lock can re-measure.  Other commands (navigation,
+etc.) are skipped immediately.
+
+Maintains a cached visual line in `face-extra--vline-beg' and
+`face-extra--vline-end':
+- If point is still within [vline-beg, vline-end) the cached values are
+  reused, saving two `vertical-motion' calls per keystroke.
+- If point has moved outside that range both are recomputed together."
+  (when (memq this-command
+              '(self-insert-command
+                org-self-insert-command
+                delete-backward-char
+                backward-delete-char-untabify
+                delete-forward-char))
+    (let* ((pt (point))
+           ;; Reuse cache if point is still on the same visual line;
+           ;; otherwise recompute both beg and end via vertical-motion.
+           (vbeg (if (and face-extra--vline-beg
+                          face-extra--vline-end
+                          (>= pt face-extra--vline-beg)
+                          (<  pt face-extra--vline-end))
+                     face-extra--vline-beg
+                   (save-excursion
+                     (let ((fontification-functions nil))
+                       (vertical-motion 0)
+                       (setq face-extra--vline-beg (point))
+                       (vertical-motion 1)
+                       (setq face-extra--vline-end (point)))
+                     face-extra--vline-beg)))
+           (vend face-extra--vline-end))
+      ;; Dispatch to each pass-3 property that registered :pre-command.
+      (dolist (prop (gethash 3 face-extra--pass-order))
+        (let* ((entry   (gethash (cons prop 3) face-extra--registry))
+               (pre-cmd (plist-get entry :pre-command)))
+          (when pre-cmd
+            (funcall pre-cmd vbeg vend)))))))
+
 (defun face-extra--enable-dispatch-pass3 ()
   "Register `face-extra--dispatch-pass3' as a jit-lock function.
+Also adds `face-extra--pre-command' to `pre-command-hook' buffer-locally.
 `jit-lock-register' is buffer-local; this must be called in each buffer
 that requires pass-3 dispatch.  Idempotent."
-  (jit-lock-register #'face-extra--dispatch-pass3))
+  (jit-lock-register #'face-extra--dispatch-pass3)
+  (add-hook 'pre-command-hook #'face-extra--pre-command nil t))
 
 (defun face-extra--disable-dispatch-pass3 ()
   "Unregister `face-extra--dispatch-pass3' from jit-lock in the current buffer.
+Also removes `face-extra--pre-command' from `pre-command-hook'.
 
 Only unregisters when no pass-3 properties remain active in this buffer
 — i.e. when `face-extra--local-properties' carries no pass-3 values and
@@ -1089,7 +1156,8 @@ while another mode still requires it in the same buffer."
                   (face-extra--active-backend))
               (gethash 3 face-extra--pass-order))))
     (unless still-needed
-      (jit-lock-unregister #'face-extra--dispatch-pass3))))
+      (jit-lock-unregister #'face-extra--dispatch-pass3)
+      (remove-hook 'pre-command-hook #'face-extra--pre-command t))))
 
 
 (provide 'face-extra)
