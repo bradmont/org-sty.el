@@ -551,46 +551,53 @@ width changes (which require a pass-3 re-stamp) and ignore pure
 height changes (minibuffer growth, vertico popup) which do not affect
 justification geometry.")
 
-(defvar-local text-align--space-width-cache nil
-  "Hash table caching natural space pixel widths keyed by face value.
-The key is the raw face property at the space position — a symbol, a
-list of symbols, or nil.  Different face combinations (e.g. text-body
-vs. a superscript run) get distinct entries with their own measured
-widths.  Cleared at the start of each `:pre-clear' pass so any
-font/scale change is picked up immediately.")
+(defvar-local text-align--char-width-cache nil
+  "Hash table: (face . char-code) → natural pixel width.
+Populated lazily on first encounter of each (face, char) pair via a
+single `window-text-pixel-size' call on that character's buffer position.
+Cleared on font or scale changes via `face-extra-invalidate-cache-functions'.")
 
-(defvar-local text-align--vline-slack nil
-  "Estimated remaining slack in pixels on point's current visual line.
-Set by `text-align--stamp' after justifying the line; decremented by
-`text-align--pre-command-justify' by the average char width on each
-self-inserting keystroke.  When it drops below zero an immediate
-pass-3 reflow is scheduled via `run-with-timer'.  Nil means no metrics
-are cached for the current visual line.")
+(defvar-local text-align--line-natural-px nil
+  "Running sum of natural character widths on point's current visual line.
+Initialised by `text-align--stamp' after each pass-3 flush; incremented
+in `text-align--post-command-ring-walk' on each self-insert keystroke.
+Nil means the state is stale — the next flush will rebuild it.")
 
-(defvar-local text-align--vline-avg-char-px nil
-  "Average character width in pixels for point's current visual line.
-Computed as text-px / char-count at last justify stamp and used by
-`text-align--pre-command-justify' to estimate slack cost per keystroke.")
+(defvar-local text-align--line-zone-px nil
+  "Zone width (avail − margins) at last pass-3 stamp of point's visual line.
+Paired with `text-align--line-natural-px' and `text-align--space-ring'.")
 
-(defvar-local text-align--vline-metrics-lbeg nil
-  "Visual BOL position for which `text-align--vline-slack' was computed.
-Pre-command compares this against `face-extra--vline-beg' to detect
-when point has moved to a different line, skipping the stale metrics.")
+(defvar-local text-align--space-ring nil
+  "List of (MARKER . EXTRA-PX) for the justified spaces on point's visual line.
+MARKER points to a space character; EXTRA-PX is the pixels above natural
+width currently stamped on it.  Invariant while valid:
+  sum(extra-px) = text-align--line-zone-px - text-align--line-natural-px
+Built by `text-align--stamp'; consumed by `text-align--post-command-ring-walk'.
+Nil when stale — flush will rebuild.")
+
+(defvar-local text-align--ring-lbeg nil
+  "Visual BOL for which `text-align--space-ring' was built.
+`text-align--post-command-ring-walk' checks this against
+`face-extra--vline-beg' to detect when point has moved to a different line.")
+
+(defvar-local text-align--ring-cursor-idx nil
+  "Index into `text-align--space-ring' of the next space to reduce.
+Initialised to the last long-space (remainder − 1) when the ring is built.
+Advances backward by 1 for each pixel removed; wraps from 0 to (1- n).")
 
 (defun text-align--natural-space-px (win pos avail)
   "Return the natural pixel width of the space character at POS in WIN.
-Checks `text-align--space-width-cache' keyed by the face at POS; on a
-miss, measures via `window-text-pixel-size' and caches the result.
-This reduces the per-line measurement to O(1) amortised once each
-distinct face combination has been seen in the current dispatch cycle."
+Uses `text-align--char-width-cache' keyed by (face . ?\\s); on a miss,
+measures via `window-text-pixel-size' and caches the result."
   (let* ((face  (or (get-text-property pos 'font-lock-face)
                     (get-text-property pos 'face)))
-         (cache (or text-align--space-width-cache
-                    (setq text-align--space-width-cache
+         (key   (cons face ?\s))
+         (cache (or text-align--char-width-cache
+                    (setq text-align--char-width-cache
                           (make-hash-table :test #'equal)))))
-    (or (gethash face cache)
+    (or (gethash key cache)
         (let ((w (car (window-text-pixel-size win pos (1+ pos) (* 2 avail)))))
-          (puthash face w cache)
+          (puthash key w cache)
           w))))
 
 (defconst text-align--line-hash-prop 'text-align--line-hash
@@ -607,14 +614,15 @@ do not survive a font or scale change.")
 background on the last character of each justified visual line so the
 lend boundary is visible during debugging.")
 
-(defun text-align--clear-space-width-cache ()
-  "Clear `text-align--space-width-cache' in the current buffer.
-Registered on `face-extra-invalidate-cache-functions' so the cache is
-flushed whenever font metrics change — after `org-sty-apply',
-font-family changes, or `text-scale-mode'.  The cache maps face to
-natural space pixel width; it is stable across keystrokes but stale
-after any change that affects rendered character widths."
-  (setq text-align--space-width-cache nil))
+(defun text-align--clear-char-width-cache ()
+  "Clear `text-align--char-width-cache' and invalidate ring state.
+Registered on `face-extra-invalidate-cache-functions' alongside
+`text-align--clear-space-width-cache'.  Any font or scale change makes
+cached character widths and the derived ring state stale."
+  (setq text-align--char-width-cache  nil
+        text-align--line-natural-px   nil
+        text-align--space-ring        nil
+        text-align--ring-cursor-idx   nil))
 
 (defun text-align--justify-clear (beg end)
   "Remove stale justify display stamps from space characters in BEG..END.
@@ -693,9 +701,9 @@ not modify `line-prefix', this restoration is a no-op."
           ;; sentinel so they're not caught by text-align--prop above).
           (text-align--justify-clear pos next)
           (setq pos next))))
-    ;; Full clear also invalidates the space-width cache: mode disable or
+    ;; Full clear also invalidates the char-width cache: mode disable or
     ;; explicit text-align-clear means a clean slate on next enable/flush.
-    (setq text-align--space-width-cache nil)))
+    (setq text-align--char-width-cache nil)))
 
 (defun text-align--stamp (lbeg lend value)
   "Stamp a margin-aware alignment prefix for the visual line LBEG..LEND.
@@ -812,16 +820,6 @@ is explicitly neutralised before measuring to keep measurements clean."
                                 (overlays-at (1- lbeg))))
             (let ((slack (- zone text-px)))
               (when (> slack 0)
-                ;; Cache metrics for pre-command overflow detection, but
-                ;; only for the visual line that contains point.  Stamping
-                ;; runs over the full flush region; storing for every line
-                ;; would leave stale metrics from whichever line was stamped
-                ;; last.
-                (when (and (>= (point) lbeg) (< (point) lend))
-                  (setq text-align--vline-slack        slack
-                        text-align--vline-avg-char-px  (/ (float text-px)
-                                                           (max 1 (- lend lbeg 1)))
-                        text-align--vline-metrics-lbeg lbeg))
                 ;; Collect interword space positions in the visual line,
                 ;; excluding the wrap character at (1- lend).
                 ;; Skip spaces that lie inside an overlay whose `display'
@@ -864,11 +862,15 @@ is explicitly neutralised before measuring to keep measurements clean."
                         ;; natural-px inflates the line beyond zone.
                         ;; `window-text-pixel-size' on a buffer position
                         ;; sees the full face-remapping-alist in context.
-                        (let* ((natural-px (text-align--natural-space-px
-                                                 win (car ordered) avail))
-                               (base-extra (/ slack n))
-                               (remainder  (% slack n))
-                               (i          0))
+                        (let* ((natural-px   (text-align--natural-space-px
+                                                   win (car ordered) avail))
+                               (base-extra   (/ slack n))
+                               (remainder    (% slack n))
+                               (i            0)
+                               ;; Ring entries collected only for point's line.
+                               (on-point-line (and (>= (point) lbeg)
+                                                   (< (point) lend)))
+                               (ring-entries nil))
                           ;; Distribute: first `remainder' spaces get
                           ;; base-extra+1 px, the rest get base-extra
                           ;; (Bresenham — every slack pixel is used).
@@ -881,8 +883,23 @@ is explicitly neutralised before measuring to keep measurements clean."
                                                    'display
                                                    `(space :width (,new-px)))
                                 (put-text-property sp (1+ sp)
-                                                   text-align--justify-prop t)))
-                            (setq i (1+ i)))))))))))))))))))  ; closes unless
+                                                   text-align--justify-prop t))
+                              ;; Collect ring entry for every space; extra=0
+                              ;; entries are included so the invariant holds.
+                              (when on-point-line
+                                (push (cons (copy-marker sp t) extra)
+                                      ring-entries)))
+                            (setq i (1+ i)))
+                          ;; Store ring and line state for point's line only.
+                          (when on-point-line
+                            (setq text-align--space-ring      (nreverse ring-entries)
+                                  text-align--line-natural-px (float text-px)
+                                  text-align--line-zone-px    (float zone)
+                                  text-align--ring-lbeg       lbeg
+                                  ;; Cursor starts at the last long space
+                                  ;; (index remainder-1), where remainder
+                                  ;; is the number of +1 spaces.
+                                  text-align--ring-cursor-idx (max 0 (1- (max remainder 1)))))))))))))))))))))  ; closes unless
 
 ;;;; ================================================================
 ;;;; Section 6b — justify debug mode
@@ -1014,6 +1031,37 @@ Per-buffer text properties are cleaned up by `text-align-clear'
 on mode disable or the next dispatch cycle."
   nil)
 
+(defun text-align--ring-walk (char-px natural-px)
+  "Reduce `text-align--space-ring' by CHAR-PX pixels, updating display stamps.
+NATURAL-PX is the natural (unstamped) width of one space on this line.
+
+Removes 1 pixel per step, advancing `text-align--ring-cursor-idx' backward
+by 1 on each step (wrapping from 0 to n-1).  Starting from the last long
+space (remainder-1) and working backward, this matches the Bresenham
+stamp direction: the last long space loses its extra pixel first, then
+the one before it, etc., producing the same distribution as a full reflow."
+  (let* ((ring text-align--space-ring)
+         (n    (length ring))
+         (idx  (or text-align--ring-cursor-idx (1- n))))
+    (dotimes (_ char-px)
+      (let* ((cell  (nth idx ring))
+             (extra (cdr cell)))
+        (when (> extra 0)
+          (setcdr cell (1- extra))
+          (let ((pos (marker-position (car cell))))
+            (when pos
+              (with-silent-modifications
+                (if (> (cdr cell) 0)
+                    (put-text-property pos (1+ pos)
+                                       'display
+                                       `(space :width (,(+ natural-px (cdr cell)))))
+                  (remove-text-properties pos (1+ pos)
+                                          (list 'display             nil
+                                                text-align--justify-prop nil)))))))
+        ;; Advance cursor backward on every step, wrapping at 0.
+        (setq idx (if (> idx 0) (1- idx) (1- n)))))
+    (setq text-align--ring-cursor-idx idx)))
+
 (defun text-align--post-command-reflow ()
   "One-shot post-command hook: reflow the paragraph at point after overflow.
 Removes itself on first run, then performs a full-paragraph pass-3 walk
@@ -1023,44 +1071,139 @@ so the cascade from a line overflow is corrected before redisplay."
     (setq face-extra--pass3-force-full t)
     (face-extra--dispatch-pass3 (car para) (cdr para))))
 
+(defun text-align--post-command-ring-walk ()
+  "One-shot post-command: update justify stamps after a self-insert.
+Removes itself, then looks up the just-typed character's pixel width
+(caching on miss), increments `text-align--line-natural-px', and either:
+- walks `text-align--space-ring' to redistribute slack if the line still fits,
+- or triggers overflow handling (clear next line + full reflow) if it does not."
+  (remove-hook 'post-command-hook #'text-align--post-command-ring-walk t)
+  (when (and text-align--line-natural-px
+             text-align--line-zone-px
+             text-align--space-ring
+             text-align--ring-lbeg
+             face-extra--vline-beg
+             (= text-align--ring-lbeg face-extra--vline-beg))
+    (let* ((pos       (1- (point)))
+           (win       (get-buffer-window (current-buffer)))
+           (avail     (and win (window-body-width win t))))
+      (when (and (>= pos 0) avail)
+        (let* ((face     (or (get-text-property pos 'font-lock-face)
+                             (get-text-property pos 'face)))
+               (char-code (char-after pos))
+               (cache    (or text-align--char-width-cache
+                             (setq text-align--char-width-cache
+                                   (make-hash-table :test #'equal))))
+               (key      (cons face char-code))
+               (char-px  (or (gethash key cache)
+                             (let ((w (car (window-text-pixel-size
+                                            win pos (1+ pos) (* 2 avail)))))
+                               (puthash key w cache)
+                               w)))
+               (new-natural (+ text-align--line-natural-px char-px)))
+          (if (> new-natural text-align--line-zone-px)
+              ;; Overflow: invalidate ring, clear next line, schedule reflow.
+              (progn
+                (setq text-align--line-natural-px  nil
+                      text-align--space-ring        nil
+                      text-align--ring-cursor-idx   nil)
+                (let ((next-end (save-excursion
+                                  (goto-char face-extra--vline-end)
+                                  (let ((fontification-functions nil))
+                                    (vertical-motion 1))
+                                  (point))))
+                  (text-align--justify-clear face-extra--vline-end next-end))
+                ;; Call reflow directly — we are already in post-command-hook,
+                ;; so adding it as another hook would defer it one cycle.
+                (text-align--post-command-reflow))
+            ;; Fits: update natural-px and walk ring to reclaim char-px of slack.
+            (setq text-align--line-natural-px new-natural)
+            (let ((natural-space-px
+                   (when (and text-align--space-ring text-align--char-width-cache)
+                     (let* ((sp  (marker-position (caar text-align--space-ring)))
+                            (f   (and sp (or (get-text-property sp 'font-lock-face)
+                                             (get-text-property sp 'face)))))
+                       (and f (gethash (cons f ?\s) text-align--char-width-cache))))))
+              (when natural-space-px
+                (text-align--ring-walk char-px natural-space-px)))))))))
+
 (defun text-align--pre-command-justify (vbeg vend)
-  "Pre-command callback for justify: clear stamps and check for overflow.
+  "Pre-command callback for justify: clear stamps and schedule ring walk.
 VBEG and VEND are the visual-line bounds supplied by `face-extra--pre-command'.
 
-Clears justify space stamps on the current visual line so the inserted
-character renders into naturally-spaced text.
+When the ring is warm, skips clearing so the line stays justified
+throughout; the ring-walk redistributes slack in post-command.
+When the ring is stale, clears stamps as a fallback.
 
-For self-inserting commands, also decrements the cached slack by the
-average character width.  When slack drops below zero the line is full;
-an immediate pass-3 reflow is scheduled via `run-with-timer' so it fires
-after the character is inserted but before Emacs waits for input."
-  (text-align--justify-clear vbeg vend)
-  (when (and (memq this-command '(self-insert-command
-                                  org-self-insert-command))
-             text-align--vline-slack
-             text-align--vline-avg-char-px
-             text-align--vline-metrics-lbeg
-             (= text-align--vline-metrics-lbeg vbeg))
-    (setq text-align--vline-slack
-          (- text-align--vline-slack text-align--vline-avg-char-px))
-    (message "justify slack: %.1fpx" text-align--vline-slack)
-    ;; Trigger when slack drops below one avg-char-px of headroom, not just
-    ;; at zero.  Wide-than-average characters drain real slack faster than
-    ;; the estimate; the one-character buffer catches those before they
-    ;; cause an undetected overflow and cascade.
-    ;; 1.5× avg approximates max char width; replace with per-char cache.
-    (when (< text-align--vline-slack (* 1.5 text-align--vline-avg-char-px))
-      ;; Clear the next visual line's justify stamps too.  The overflowing
-      ;; word is about to wrap onto it; if its spaces are still expanded
-      ;; the cascade continues.  One extra vertical-motion call on near-
-      ;; overflow (an infrequent event) is acceptable.
-      (let ((next-end (save-excursion
-                        (goto-char vend)
-                        (let ((fontification-functions nil))
-                          (vertical-motion 1))
-                        (point))))
-        (text-align--justify-clear vend next-end))
-      (add-hook 'post-command-hook #'text-align--post-command-reflow nil t))))
+For self-inserting commands:
+- If ring state is valid for this line, schedules
+  `text-align--post-command-ring-walk' for exact overflow detection and
+  ring redistribution.
+- Otherwise falls back to an avg-char-px heuristic for overflow detection."
+  (when (memq this-command '(self-insert-command org-self-insert-command))
+    (let* ((ring-warm (and text-align--line-natural-px
+                           text-align--line-zone-px
+                           text-align--space-ring
+                           text-align--ring-lbeg
+                           (= text-align--ring-lbeg vbeg)))
+           ;; When ring is warm, look up the about-to-be-typed character in
+           ;; the cache.  On a hit we can detect overflow before insertion.
+           ;; On a miss use ?W width if cached, else 1.5× space-width as a
+           ;; conservative bound; the ring-walk will do the exact check in
+           ;; post-command regardless.
+           (char-px  (and ring-warm
+                          text-align--char-width-cache
+                          (characterp last-command-event)
+                          (let* ((face (or (get-text-property (point) 'font-lock-face)
+                                           (get-text-property (point) 'face)))
+                                 (cache text-align--char-width-cache)
+                                 (exact (gethash (cons face last-command-event) cache)))
+                            (or exact
+                                (gethash (cons face ?W) cache)
+                                (let ((sp (gethash (cons face ?\s) cache)))
+                                  (and sp (* 1.5 sp)))))))
+           (overflow (and char-px
+                          (> (+ text-align--line-natural-px char-px)
+                             text-align--line-zone-px))))
+      (cond
+       ;; Cache hit + overflow: clear next line before insertion so the
+       ;; wrapping word doesn't land on expanded spaces.  Schedule reflow.
+       (overflow
+        (let ((next-end (save-excursion
+                          (goto-char vend)
+                          (let ((fontification-functions nil))
+                            (vertical-motion 1))
+                          (point))))
+          (text-align--justify-clear vend next-end))
+        (add-hook 'post-command-hook #'text-align--post-command-reflow nil t))
+       ;; Cache hit, no overflow, or cache miss with warm ring.
+       ;; Space character: the ring doesn't include the new gap, so
+       ;; invalidate and do a full reflow to rebuild with the new space count.
+       ;; Non-space: ring-walk redistributes slack in post-command.
+       (ring-warm
+        (if (eq last-command-event ?\s)
+            (progn
+              (setq text-align--space-ring       nil
+                    text-align--ring-cursor-idx  nil
+                    text-align--line-natural-px  nil)
+              (add-hook 'post-command-hook #'text-align--post-command-reflow nil t))
+          (add-hook 'post-command-hook #'text-align--post-command-ring-walk nil t)))
+       ;; Ring stale: avg-based overflow fallback until flush rebuilds ring.
+       ;; 1.5× avg approximates max char width; replaced by ring once warm.
+       ((and text-align--line-natural-px text-align--line-zone-px)
+        (text-align--justify-clear vbeg vend)
+        (let* ((avg-char-px (/ text-align--line-natural-px
+                               (max 1.0 (- (float vend) vbeg 1))))
+               (slack (- text-align--line-zone-px text-align--line-natural-px)))
+          (when (< slack (* 1.5 avg-char-px))
+            (let ((next-end (save-excursion
+                              (goto-char vend)
+                              (let ((fontification-functions nil))
+                                (vertical-motion 1))
+                              (point))))
+              (text-align--justify-clear vend next-end))
+            (add-hook 'post-command-hook
+                      #'text-align--post-command-reflow nil t))))))))
 
 
 ;;;; ================================================================
@@ -1120,7 +1263,7 @@ is registered and handles cleanup on disable."
 ;; text-scale-mode, since variable-spacing-mode advises it and calls
 ;; face-extra--invalidate-cache via font-lock-flush → face-extra--dispatch.
 (add-hook 'face-extra-invalidate-cache-functions
-          #'text-align--clear-space-width-cache)
+          #'text-align--clear-char-width-cache)
 
 ;; ---- Window resize: flush stale justify stamps when window width changes ----
 ;;

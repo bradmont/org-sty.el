@@ -845,7 +845,17 @@ during that burst."
           (if face-extra--pass3-flush-end
               (max end face-extra--pass3-flush-end)
             end))
-    (unless face-extra--pass3-flush-timer
+    ;; Do not create a new timer while a pass-3 walk is already in progress
+    ;; (geometry-unsettled = t).  The walk was triggered by a flush; creating
+    ;; another timer here would cause it to fire immediately once the current
+    ;; flush callback returns (Emacs is already past the idle threshold), and
+    ;; the flush would reschedule itself on every jit-lock or font-lock call
+    ;; that happens inside the walk (e.g. from vertical-motion), producing a
+    ;; 100% CPU busy loop.  The beg/end accumulation above is still done so
+    ;; that if a timer already exists it will cover the full union; but the
+    ;; walk itself will process the region correctly before returning.
+    (unless (or face-extra--pass3-flush-timer
+                face-extra--pass3-geometry-unsettled)
       (setq face-extra--pass3-flush-timer
             (run-with-idle-timer face-extra--pass3-flush-delay nil
                                  #'face-extra--pass3-flush-callback buf)))))

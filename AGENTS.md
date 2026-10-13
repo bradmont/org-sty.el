@@ -733,6 +733,85 @@ Before optimisation, a typical typing profile showed:
   Now a buffer-local `face-extra--line-spans-table` is allocated once and
   `clrhash`ed between walks, eliminating per-walk GC allocation.
 
+**Pre-command hook infrastructure** (`face-extra.el`, `horizontal-layout.el`):
+- `face-extra-define-property` gains a `:pre-command` slot.
+  `face-extra--pre-command` is added to `pre-command-hook` buffer-locally
+  when pass-3 is enabled; it fires only for self-insert and delete commands,
+  maintains a cached visual BOL/EOL in `face-extra--vline-beg/end`
+  (recomputed via `vertical-motion` only when point leaves the cached range),
+  and dispatches to any pass-3 property that registered `:pre-command`.
+- `face-extra--pass3-force-full`: buffer-local flag consumed by
+  `face-extra--dispatch-pass3` on the next jit-lock cycle.  When set,
+  the visual-line narrowing is bypassed so `face-extra--expand-to-lines`
+  sees the full logical line (= paragraph for soft-wrapped text).  Set by
+  overflow handlers to force a full paragraph re-justify.
+
+**Live justify: pre-command stamps + space ring** (`horizontal-layout.el`):
+The idle-flush reflow is now complemented by a per-keystroke path that
+keeps the line at point justified in real time without any
+`window-text-pixel-size` call per keystroke (after the cache warms up).
+
+*Data structures (buffer-local):*
+- `text-align--char-width-cache` — `(face . char-code) → pixel-width`.
+  Natural space width (`(face . ?\s)`) replaces the old
+  `text-align--space-width-cache`, which has been removed.  Cleared on font
+  or scale change via `face-extra-invalidate-cache-functions`.
+- `text-align--line-natural-px` — running total of natural character widths
+  on point's visual line.  `nil` = stale; defers to idle flush.
+- `text-align--line-zone-px` — zone width (avail − margins) at last stamp.
+- `text-align--space-ring` — list of `(marker . extra-px)` for every
+  interword space on point's visual line; built by `text-align--stamp` for
+  point's line only.  Invariant: `sum(extra-px) = zone − line-natural-px`.
+- `text-align--ring-lbeg` — visual BOL when the ring was built; used to
+  detect when point has moved to a different line (stale ring).
+- `text-align--ring-cursor-idx` — integer index of the next space to reduce;
+  initialised to `remainder − 1` (last long space in the Bresenham
+  distribution); advances backward by 1 for each pixel removed, wrapping
+  from 0 to `n − 1`.
+
+*Pre-command path (`text-align--pre-command-justify`):*
+- When the ring is **warm** (valid for point's line): looks up
+  `last-command-event` in the char-width cache.  Cache hit → exact overflow
+  check before the character is inserted; on overflow, clears the next
+  visual line's stamps and schedules `text-align--post-command-reflow`
+  buffer-locally (fires before redisplay).  No-overflow → schedules
+  `text-align--post-command-ring-walk`.  Cache miss → uses `?W` width or
+  1.5 × space-width as a conservative bound.  Space character → ring is
+  stale after insertion (new gap added); invalidate ring and schedule full
+  reflow.  Does **not** clear the current line's stamps when the ring is
+  warm — the ring-walk re-stamps correctly in post-command.
+- When the ring is **stale**: clears the current line's stamps and falls
+  back to the avg-based overflow heuristic (1.5 × avg-char-px).
+
+*Post-command ring walk (`text-align--post-command-ring-walk`):*
+  One-shot; removes itself, then:
+  1. Measures the just-typed character at `(1- (point))` via the cache
+     (O(1) hit; one `window-text-pixel-size` call on first encounter).
+  2. Increments `line-natural-px` by char-px.
+  3. Overflow: invalidate ring, clear next visual line, call
+     `text-align--post-command-reflow` directly (same post-command cycle,
+     before redisplay).
+  4. No overflow: call `text-align--ring-walk` to reclaim char-px pixels of
+     slack from the ring.
+
+*Ring walk (`text-align--ring-walk`):*
+  Removes 1 px per step, advancing `ring-cursor-idx` backward by 1 on each
+  step (wrapping 0 → n−1).  Starting from the last long space and working
+  left mirrors the Bresenham stamp direction — the last long space loses its
+  extra pixel first, matching what the idle reflow would produce and
+  minimising the visual shift when the flush fires.  Updates `display`
+  properties in place; spaces that reach `extra-px = 0` have their stamp
+  removed.
+
+*Overflow cascade prevention:*
+  On near-overflow in pre-command (slack < 1.5 × avg-char-px for the stale
+  path, or exact detection for the cache-hit path), the next visual line's
+  justify stamps are cleared before the character is inserted.  This prevents
+  the wrapping word from landing on expanded spaces and cascading through the
+  paragraph.  When overflow is confirmed in post-command ring-walk,
+  `text-align--post-command-reflow` triggers a full-paragraph pass-3 walk
+  with `face-extra--pass3-force-full` set, firing before redisplay.
+
 ### Performance floor
 
 With the above changes, the per-keystroke cost for typing at the end of a
@@ -742,7 +821,12 @@ paragraph is approximately:
 - `face-extra--dispatch` (passes 1–2 narrow): ~6%.
 - Pass-3 narrow path (final line): near-zero (paragraph-final heuristic
   fires before any `vertical-motion`).
-- 2s flush: O(changed_lines × stamp_cost) with content hashing.
+- `face-extra--pass3-flush-delay`: 0.05 s (lowered from 0.15 s; faster
+  flush is needed to prevent metric drift in the live-justify ring from
+  accumulating across keystrokes and causing cascade overflows).
+- Ring-walk path (mid-paragraph non-final line): O(char-px) iterations over
+  ~5–10 spaces per keystroke; `nth` on a small list.  Effectively free after
+  the char-width cache warms up (~80 (face, char) pairs for Latin prose).
 
 The remaining ~6% overhead above Org's baseline is our unavoidable cost.
 Turning off `text-align-mode` still shows some lag, meaning passes 1–2
@@ -926,67 +1010,9 @@ run.
   next non-empty boundary via repeated `next-single-property-change` rather
   than processing each character individually.
 
-- **Live justify — zero-measurement keystroke path.** Currently justify
-  is deferred to 0.15 s idle; lines below point stay unjustified while
-  typing.  The following design keeps a line justified on every keystroke
-  without any `window-text-pixel-size` call:
-
-  **Per-character width cache** (`text-align--char-width-cache`):
-  buffer-local hash table `(face . char-code) → pixel-width`, populated
-  lazily on first encounter via a single `window-text-pixel-size` call on
-  that character's buffer position.  For Latin prose the cache saturates
-  after ~80 distinct (face, char) pairs and thereafter all lookups are O(1).
-  Cleared by `text-align--clear-space-width-cache` (same hook as the
-  space-width cache — both depend on font metrics).
-
-  **Per-visual-line state** (buffer-local, rebuilt by each idle flush):
-  - `text-align--line-natural-px`: running sum of natural character widths
-    on the current visual line (excludes current space inflation).
-  - `text-align--line-zone-px`: zone width at last flush (avail − margins).
-  - `text-align--space-ring`: circular list of `(marker . extra-px)` cons
-    cells, one per interword space on the current visual line.  `marker`
-    points into the buffer so it tracks insertions correctly; `extra-px` is
-    the number of pixels above natural width currently stamped on that space.
-
-  **Keystroke path** (inside `post-self-insert-hook` or equivalent,
-  fires only when `text-align-mode` is active and value is `justify`):
-  1. Look up the just-typed character's pixel width in
-     `text-align--char-width-cache` (O(1); populate on miss with one
-     `window-text-pixel-size` call on the new character's position).
-  2. Add to `text-align--line-natural-px`.
-  3. If `text-align--line-natural-px > text-align--line-zone-px`: natural
-     text overflows the zone — a word is about to wrap.  Clear the ring,
-     set `text-align--line-natural-px = nil` to signal stale state, and let
-     the idle flush rebuild from scratch.
-  4. Otherwise: the new character consumed `char-width` pixels of slack.
-     Walk the space ring, reducing each space's `extra-px` by 1 (or 2, to
-     be tuned) and updating the `display` property, until `char-width`
-     pixels have been reclaimed.  Skip spaces already at `extra-px = 0`
-     (natural width).  The ring is circular so distribution stays even.
-
-  **Correctness invariant:** `sum(extra-px over ring) = zone -
-  line-natural-px ≥ 0` at all times while the ring is valid.  Step 3
-  guarantees the sum never goes negative (which would require individual
-  spaces to go below natural width).  The guard fires on the first
-  character that would violate it, before any space is touched.
-
-  **Ring initialisation:** rebuilt by the idle flush after every
-  `face-extra--dispatch-pass3` run.  After flushing, `text-align--stamp`
-  records the space positions and their `extra-px` values into the ring
-  buffer, and sets `text-align--line-natural-px` to the measured
-  `text-px` (= `zone - total-extra`).
-
-  **Space insertion/deletion:** inserting a new space adds a ring entry;
-  deleting one removes it.  Both are handled in the
-  `post-self-insert-hook`/`post-command-hook` path before the ring walk.
-  If the ring becomes inconsistent (e.g. undo), the stale-state sentinel
-  (`text-align--line-natural-px = nil`) causes the next keystroke to defer
-  to the idle flush rather than corrupt the display.
-
-  **Tuning:** the step size (pixels removed per ring traversal step) trades
-  off between number of `put-text-property` calls per keystroke and visual
-  smoothness of the adjustment.  Start with 1 px/step; try 2 px/step if
-  profiling shows the ring walk is measurable.
+- **~~Live justify — zero-measurement keystroke path.~~** DONE — see
+  "Pre-command hook infrastructure" and "Live justify" in the Optimisations
+  implemented section above, and "Known limits" for remaining gaps.
 
 ## Architecture notes — `text-body` face model
 
