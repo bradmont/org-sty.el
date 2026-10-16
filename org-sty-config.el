@@ -158,7 +158,9 @@
                                                         (min (length numbering) 8))))))
                    (when (bound-and-true-p org-num-mode)
                      (org-num-mode -1)
-                     (org-num-mode 1))))
+                     (org-num-mode 1))
+                (flyspell-mode 1))
+                )
        (wp-faces '(;; :text-align left on headings suppresses justify/center/right
                    ;; inherited from text-body via the face-extra resolver.
                    ;; Must live here (after :eval) not in org-sty-default :faces,
