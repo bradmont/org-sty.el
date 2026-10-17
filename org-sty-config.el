@@ -149,6 +149,14 @@
                    ;; above.  Must come after variable-spacing-mode so the
                    ;; font remap is in place and frame-char-width is correct.
                    (page-metrics-mode 1)
+                   ;; ── Frame width guard ───────────────────────────────────
+                   ;; If the frame is narrower than the olivetti body width
+                   ;; (plus a small margin for fringes/borders), widen it to
+                   ;; 104 columns so the page is fully visible on first open.
+                   (when (and (boundp 'olivetti-body-width)
+                              olivetti-body-width
+                              (< (frame-width) 100))
+                     (set-frame-width (selected-frame) 104))
                    ;; ── Heading numbers ─────────────────────────────────────
                    (setq-local org-num-format-function
                                (lambda (numbering)
