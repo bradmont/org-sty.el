@@ -1320,5 +1320,64 @@ handles stale stamp removal atomically before re-stamping."
 
 (advice-add 'text-scale-set :after #'horizontal-layout--after-text-scale)
 
+;; ---- org-appear: clear justify stamps on the visual line at point ----
+;;
+;; org-appear--show-with-lock calls font-lock-ensure BEFORE show-invisible,
+;; so pass-3 runs and re-stamps with narrow (markers-hidden) geometry; then
+;; show-invisible makes the markers visible, widening the line.  Redisplay
+;; sees narrow stamps on a now-wider line → last word overflows → cascade.
+;;
+;; Fix for show: advise :after org-appear--show-invisible.  Markers are now
+;; visible; clear stamps on the visual line at point and schedule a scoped
+;; pass-3 flush for that line so the next redisplay sees natural spacing
+;; rather than an overflowed line.
+;;
+;; Fix for hide: advise :before org-appear--hide-invisible.  Clear stamps on
+;; the visual line before markers disappear; org-appear's own font-lock-flush/
+;; ensure then drives a clean pass-3 reflow at the new narrower width.
+;;
+;; Visual line bounds are computed with vertical-motion — safe in post-command
+;; (outside the pass-3 walk) and correctly scoped to one wrapped line.
+;; fontification-functions is bound to nil to prevent jit-lock re-entry.
+;;
+;; Advice is installed once when org-appear loads, not per-buffer.
+
+(defun horizontal-layout--org-appear-restamp (&rest _)
+  "Synchronously re-stamp the visual line at point after org-appear toggle.
+
+Called :after both `org-appear--show-invisible' and
+`org-appear--hide-invisible' so that justify stamps are recomputed at
+the correct geometry — wide with markers visible, narrow with markers
+hidden — before the next redisplay cycle.
+
+`face-extra--dispatch-pass3' is called directly rather than scheduling
+an idle flush.  We are in post-command (outside any pass-3 walk), so
+`face-extra--pass3-geometry-unsettled' is nil and `vertical-motion' is
+safe.  Pass-3's own :pre-clear removes stale stamps before
+re-measuring, so no separate clear step is needed.
+
+The visual line bounds passed here are consumed by pass-3's non-idle
+narrowing logic, which also computes them via `vertical-motion' — the
+two calls are redundant but cheap and make the intent explicit."
+  (when (bound-and-true-p text-align-mode)
+    (when-let ((vline (horizontal-layout--org-appear-vline)))
+      (face-extra--dispatch-pass3 (car vline) (cdr vline)))))
+
+(defun horizontal-layout--org-appear-vline ()
+  "Return (beg . end) of the visual line at point, or nil if no window."
+  (when (get-buffer-window (current-buffer) t)
+    (save-excursion
+      (let ((fontification-functions nil))
+        (vertical-motion 0)
+        (let ((vbeg (point)))
+          (vertical-motion 1)
+          (cons vbeg (point)))))))
+
+(with-eval-after-load 'org-appear
+  (advice-add 'org-appear--show-invisible :after
+              #'horizontal-layout--org-appear-restamp)
+  (advice-add 'org-appear--hide-invisible :after
+              #'horizontal-layout--org-appear-restamp))
+
 (provide 'horizontal-layout)
 ;;; horizontal-layout.el ends here
