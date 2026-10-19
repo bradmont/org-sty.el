@@ -22,6 +22,7 @@
 ;;; Code:
 
 (require 'page-metrics)
+(require 'org-footnote-extra)
 
 ;; ---------------------------------------------------------------------------
 ;; Default style (applies to all Org buffers as a base layer)
@@ -167,8 +168,11 @@
                    (when (bound-and-true-p org-num-mode)
                      (org-num-mode -1)
                      (org-num-mode 1))
-                (flyspell-mode 1))
-                )
+                   (flyspell-mode 1)
+                   (org-footnote-extra-mode 1)
+                   (setq-local org-footnote-section "*paragraph*")
+                   (setq-local org-footnote-auto-adjust 'renumber))
+               )
        (wp-faces '(;; :text-align left on headings suppresses justify/center/right
                    ;; inherited from text-body via the face-extra resolver.
                    ;; Must live here (after :eval) not in org-sty-default :faces,
@@ -189,6 +193,12 @@
                    ;; where variable-spacing-mode remaps `default' to 6pt.
                    (org-property-value  . (:height 60))
                    (org-special-keyword . (:height 60))
+                   ;; Footnote definitions: ~8pt (0.67 × 12pt body).
+                   ;; The (:inherit text-body) remap is installed by
+                   ;; org-footnote-extra-mode; this height sits on top of
+                   ;; it as a relative multiplier.  :underline nil suppresses
+                   ;; the link-style underline org-footnote carries by default.
+                   (org-footnote        . (:height 0.67 :underline nil))
                    ;; Center the document title.  Declared here (in :faces)
                    ;; rather than via face-extra-add-relative in :eval so
                    ;; that it runs in the :faces phase — after :eval — and
