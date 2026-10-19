@@ -74,6 +74,21 @@ To change the body size, adjust the ratio:
   (set-face-attribute \\='text-body nil :height 2.2)  ; ~13 pt at 6 pt floor"
   :group 'variable-spacing)
 
+(defface variable-spacing--default
+  '((t :inherit default))
+  "Internal face for unstyled gaps left by Org's font-lock keywords.
+
+Org's property-line keyword covers only the :KEY: and VALUE subgroups
+of `org-property-re', leaving the whitespace between them — and any
+trailing whitespace after the value — with no face at all.  Without
+this face those characters are stamped `text-body' by the stamp pass
+and rendered at body-text height.
+
+This face inherits `default' so it is floor-sized in
+`variable-spacing-mode' and otherwise invisible.  It may be reused
+wherever Org leaves other structural whitespace unstyled."
+  :group 'variable-spacing)
+
 (defcustom variable-spacing-floor-height 60
   "Buffer-local floor `:height' applied to `default' in `variable-spacing-mode'.
 
@@ -146,6 +161,8 @@ feature."
     org-drawer
     org-special-keyword
     org-property-value
+    ;; Internal gap face — whitespace in property lines left unstyled by Org.
+    variable-spacing--default
     ;; Block delimiter lines (#+begin_X / #+end_X).  These are
     ;; structural markers, not block content.
     org-block-begin-line
@@ -481,11 +498,29 @@ carries a `variable-spacing-ratio'."
                     #'variable-spacing--text-scale-refresh)
         (advice-add 'set-face-attribute :after
                     #'variable-spacing--text-body-face-refresh)
+        ;; Cover whitespace gaps that Org's property-line font-lock keyword
+        ;; leaves unstyled: the [ \t]+ between :KEY: and VALUE, and any
+        ;; trailing [ \t]+ after VALUE.  Without this the stamp pass treats
+        ;; them as bare body text.  `keep' is character-by-character so we
+        ;; never clobber anything Org already stamped.
+        (font-lock-add-keywords nil
+          '(("^[ \t]*:[^:\n]+:\\([ \t]+\\)[^\n]*\\([ \t]+\\)$"
+             (1 'variable-spacing--default keep)
+             (2 'variable-spacing--default keep))
+            ("^[ \t]*:[^:\n]+:\\([ \t]+\\)\\S-"
+             (1 'variable-spacing--default keep)))
+          t)
         ;; Flush to trigger dispatch on already-fontified text.
         (font-lock-flush))
     (variable-spacing--remove-body-remaps)
     (variable-spacing-clear)
     (variable-spacing--remove-body-face (point-min) (point-max))
+    (font-lock-remove-keywords nil
+      '(("^[ \t]*:[^:\n]+:\\([ \t]+\\)[^\n]*\\([ \t]+\\)$"
+         (1 'variable-spacing--default keep)
+         (2 'variable-spacing--default keep))
+        ("^[ \t]*:[^:\n]+:\\([ \t]+\\)\\S-"
+         (1 'variable-spacing--default keep))))
     (advice-remove 'text-scale-mode
                    #'variable-spacing--text-scale-refresh)
     (advice-remove 'set-face-attribute
