@@ -225,6 +225,18 @@ to exactly one jit-lock cycle.  Set by callers such as
 `text-align--pre-command-justify' when overflow is detected and the full
 logical-line walk is needed on the very next redisplay cycle.")
 
+(defvar-local face-extra--pass3-last-flushed-beg nil
+  "Buffer position BEG of the most recently completed pass-3 flush region.
+Updated by `face-extra--pass3-flush-callback' after dispatch completes.
+Used by `face-extra--window-scroll' to suppress re-scheduling when the
+new visible region is already covered by the last flush — breaking the
+feedback loop where stamping display properties changes line heights,
+causing Emacs to fire `window-scroll-functions', scheduling another flush.")
+
+(defvar-local face-extra--pass3-last-flushed-end nil
+  "Buffer position END of the most recently completed pass-3 flush region.
+See `face-extra--pass3-last-flushed-beg'.")
+
 (defvar-local face-extra--vline-beg nil
   "Cached visual-line beginning position for `face-extra--pre-command'.
 Set to the result of `vertical-motion' 0 on point's visual line.
@@ -751,9 +763,20 @@ gets stamped when scrolled into view."
         (when (and (or face-extra--local-properties
                        (face-extra--active-backend))
                    (gethash 3 face-extra--pass-order))
-          (face-extra--schedule-pass3-flush buf
-                                            (window-start win)
-                                            (window-end win t)))))))
+          (let ((wstart (window-start win))
+                (wend   (window-end win t)))
+            ;; Only schedule if the new visible region is not already covered
+            ;; by the last completed flush.  Display-property stamping changes
+            ;; line heights, causing Emacs to fire `window-scroll-functions'
+            ;; even when the user hasn't scrolled; without this guard that
+            ;; produces a flush → scroll-event → flush → … feedback loop.
+            ;; 20-char slack absorbs `window-end' jitter (~a word) from line
+            ;; height changes near the bottom of the screen.
+            (unless (and face-extra--pass3-last-flushed-beg
+                         face-extra--pass3-last-flushed-end
+                         (>= wstart face-extra--pass3-last-flushed-beg)
+                         (<= wend   (+ face-extra--pass3-last-flushed-end 20)))
+              (face-extra--schedule-pass3-flush buf wstart wend))))))))
 
 (defun face-extra--enable-dispatch ()
   "Add `face-extra--dispatch' as :after advice on fontification.
@@ -826,7 +849,11 @@ allocating a new closure on every keystroke."
         (setq face-extra--pass3-flush-beg nil
               face-extra--pass3-flush-end nil)
         (when (and b e)
-          (face-extra--dispatch-pass3 b e))))))
+          (face-extra--dispatch-pass3 b e)
+          ;; Record the flushed region so `face-extra--window-scroll'
+          ;; can suppress re-scheduling for the same on-screen region.
+          (setq face-extra--pass3-last-flushed-beg b
+                face-extra--pass3-last-flushed-end e))))))
 
 (defun face-extra--schedule-pass3-flush (buf beg end)
   "Accumulate BEG..END into the pending pass-3 flush region for BUF.

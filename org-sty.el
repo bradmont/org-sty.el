@@ -493,13 +493,15 @@ cheap `org-cite' face and schedules an idle-0 flush."
       (when (timerp org-sty--cite-defer-timer)
         (cancel-timer org-sty--cite-defer-timer))
       (setq org-sty--cite-defer-timer
-            (run-with-idle-timer
-             0 nil
-             (lambda ()
-               (when (buffer-live-p buf)
-                 (with-current-buffer buf
-                   (setq org-sty--cite-defer-timer nil)
-                   (font-lock-flush)))))))))
+            (run-with-idle-timer 0 nil
+                                 #'org-sty--cite-defer-callback buf)))))
+
+(defun org-sty--cite-defer-callback (buf)
+  "Idle timer callback: full cite activation via font-lock-flush for BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq org-sty--cite-defer-timer nil)
+      (font-lock-flush))))
 
 (defun org-sty--citar-local-bib-files-advice (orig &rest args)
   "Cache `citar-org-local-bib-files' result per buffer-chars-modified-tick.

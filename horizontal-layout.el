@@ -830,7 +830,7 @@ is explicitly neutralised before measuring to keep measurements clean."
                 (let ((spaces nil)
                       (pos    lbeg))
                   (while (< pos (1- lend))
-                    (when (and (eq (char-syntax (char-after pos)) ?\ )
+                    (when (and (= (char-after pos) ?\s)
                                (not (cl-some
                                      (lambda (ov) (overlay-get ov 'display))
                                      (overlays-at pos))))
@@ -940,7 +940,7 @@ Fires only when point is at visual-line beginning position."
           (let ((spaces nil)
                 (pos    lbeg))
             (while (< pos (1- lend))
-              (when (and (eq (char-syntax (char-after pos)) ?\ )
+              (when (and (= (char-after pos) ?\s)
                          (not (cl-some
                                (lambda (ov) (overlay-get ov 'display))
                                (overlays-at pos))))

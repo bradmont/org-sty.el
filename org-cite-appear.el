@@ -413,6 +413,12 @@ Stale queue entries (overlays deleted by edits) are discarded silently."
       (when org-cite-appear--pending
         (org-cite-appear--schedule-format)))))
 
+(defun org-cite-appear--format-timer-callback (buf)
+  "Idle timer callback for inter-cite formatting in BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (org-cite-appear--format-one))))
+
 (defun org-cite-appear--schedule-format ()
   "Schedule an idle formatting pass if one is not already pending."
   (unless org-cite-appear--format-timer
@@ -420,10 +426,7 @@ Stale queue entries (overlays deleted by edits) are discarded silently."
       (setq org-cite-appear--format-timer
             (run-with-idle-timer
              org-cite-appear-format-inter-cite-delay nil
-             (lambda ()
-               (when (buffer-live-p buf)
-                 (with-current-buffer buf
-                   (org-cite-appear--format-one)))))))))
+             #'org-cite-appear--format-timer-callback buf)))))
 
 (defun org-cite-appear--cancel-format-timer ()
   "Cancel any pending idle format timer."
@@ -436,6 +439,12 @@ Stale queue entries (overlays deleted by edits) are discarded silently."
 ;;; Deferred new-citation folding
 ;;; ----------------------------------------------------------------
 
+(defun org-cite-appear--new-cite-timer-callback (buf)
+  "Idle timer callback for folding new citations in BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (org-cite-appear--fold-new-cites))))
+
 (defun org-cite-appear--schedule-new-cite ()
   "Schedule an idle timer to fold any pending new citations."
   (unless org-cite-appear--new-cite-timer
@@ -443,10 +452,7 @@ Stale queue entries (overlays deleted by edits) are discarded silently."
       (setq org-cite-appear--new-cite-timer
             (run-with-idle-timer
              org-cite-appear-new-cite-delay nil
-             (lambda ()
-               (when (buffer-live-p buf)
-                 (with-current-buffer buf
-                   (org-cite-appear--fold-new-cites)))))))))
+             #'org-cite-appear--new-cite-timer-callback buf)))))
 
 (defun org-cite-appear--fold-new-cites ()
   "Fold any new citations in `org-cite-appear--new-cite-regions'.
@@ -660,6 +666,13 @@ explicit goto-char here is therefore omitted."
     (cancel-timer org-cite-appear--rehide-timer)
     (setq org-cite-appear--rehide-timer nil)))
 
+(defun org-cite-appear--rehide-timer-callback (buf)
+  "Idle timer callback for rehiding citations in BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq org-cite-appear--rehide-timer nil)
+      (org-cite-appear--do-rehide))))
+
 (defun org-cite-appear--schedule-rehide ()
   "Schedule `org-cite-appear--do-rehide' after 0.5 s of idle time.
 If a timer is already pending it is left unchanged — the existing
@@ -669,11 +682,7 @@ deadline is always earlier than or equal to a freshly scheduled one."
       (setq org-cite-appear--rehide-timer
             (run-with-idle-timer
              0.5 nil
-             (lambda ()
-               (when (buffer-live-p buf)
-                 (with-current-buffer buf
-                   (setq org-cite-appear--rehide-timer nil)
-                   (org-cite-appear--do-rehide)))))))))
+             #'org-cite-appear--rehide-timer-callback buf)))))
 
 
 ;;; ----------------------------------------------------------------
