@@ -883,7 +883,17 @@ is explicitly neutralised before measuring to keep measurements clean."
              (right-px (* char-w (or (and face (face-extra--resolve-property
                                                face 'horizontal-layout-margin-right))
                                      0)))
-             (zone     (- avail left-px right-px))
+             ;; For justify, word-wrap already constrains body text to
+             ;; avail - margin via line-prefix/wrap-prefix; zone must be
+             ;; `avail' so slack = avail - text-px is the leftover space
+             ;; relative to the full window (≈ margin_px, always positive).
+             ;; Using zone = avail - margin gives slack ≈ 0 because
+             ;; body_px ≈ avail - margin — nothing to distribute.
+             ;; For center/right the exact zone is needed to compute the
+             ;; correct alignment offset.
+             (zone     (if (eq value 'justify)
+                           avail
+                         (- avail left-px right-px)))
              ;; line-prefix fires at logical BOL; wrap-prefix fires at
              ;; continuation visual-line starts.
              (logical-bol-p (= lbeg (save-excursion
@@ -1039,21 +1049,9 @@ Fires only when point is at visual-line beginning position."
         (let* ((lbeg (point))
                (lend (save-excursion (vertical-motion 1)
                                      (min (point-max) (point))))
-               (f    (or (get-text-property lbeg 'font-lock-face)
-                         (get-text-property lbeg 'face)))
-               (face (cond ((symbolp f) f)
-                           ((listp f)   (cl-find-if #'symbolp f))
-                           (t           nil)))
-               (char-w   (frame-char-width))
-               (left-px  (* char-w
-                             (or (and face (face-extra--resolve-property
-                                           face 'horizontal-layout-margin-left))
-                                 0)))
-               (right-px (* char-w
-                             (or (and face (face-extra--resolve-property
-                                           face 'horizontal-layout-margin-right))
-                                 0)))
-               (zone     (- avail left-px right-px))
+               ;; Debug echoes justify metrics; use zone = avail so slack
+               ;; matches what text-align--stamp computes for justify.
+               (zone     avail)
                (text-px  (car (window-text-pixel-size win lbeg lend (* 2 avail))))
                (slack    (- zone text-px)))
           ;; Collect and trim spaces the same way the stamp function does.
