@@ -193,7 +193,9 @@ present."
     ;; Remove right-margin after-string overlays.
     (dolist (ov (overlays-in beg end))
       (when (overlay-get ov horizontal-layout--right-prop)
-        (delete-overlay ov))))))
+        (delete-overlay ov))))
+  ;; Clear hanging-wrap stamps (separate marker, separate pass).
+  (horizontal-layout--clear-hang-region beg end)))
 
 
 ;;;; ================================================================
@@ -271,6 +273,96 @@ Only runs when `horizontal-layout-mode' is active in the current buffer."
   "No-op `:clear' callback for `horizontal-layout-margin-left'.
 Per-buffer text properties are cleaned up by `horizontal-layout-clear'
 on mode disable or the next dispatch cycle."
+  nil)
+
+
+;;;; ================================================================
+;;;; Section 3a-ii — Hanging wrap (pass 2)
+;;;; ================================================================
+;;
+;; `horizontal-layout-hanging-wrap' sets ONLY `wrap-prefix' (never
+;; `line-prefix'), adding the hang width on top of whatever width
+;; `margin-left' has already placed in `wrap-prefix'.  The result is:
+;;
+;;   line-prefix  = (space :width left        :height H)  ; first-line
+;;   wrap-prefix  = (space :width left + hang :height H)  ; continuations
+;;
+;; This produces a hanging indent: the first line of a paragraph starts
+;; at `left', while wrapped continuation lines are indented by an
+;; additional `hang' character-widths.
+;;
+;; Typical use — footnote definitions, where the superscript label sits
+;; in the `hang' gutter and continuation lines align with the body text:
+;;
+;;   ¹ First sentence of the footnote, which might
+;;     wrap onto this continuation line.
+;;
+;; The `:clear' callback is a no-op; `horizontal-layout-clear' cleans
+;; up via a separate pass over `horizontal-layout--hang-prop' markers.
+
+(defconst horizontal-layout--hang-prop 'horizontal-layout--hang
+  "Marker text-property set on positions where a hanging wrap was stamped.
+Used by `horizontal-layout-clear' to find and restore those positions.")
+
+(defun horizontal-layout--apply-hanging-wrap (spans)
+  "Apply hanging-wrap to SPANS: widen wrap-prefix by VALUE, leave line-prefix.
+SPANS is a list of (beg end value) triples where VALUE is the extra
+indent width for continuation lines, in canonical character widths.
+Runs after `horizontal-layout-margin-left' (pass 2), so `wrap-prefix'
+already carries the left-margin width; this adds VALUE on top of it."
+  (when (bound-and-true-p horizontal-layout-mode)
+    (with-silent-modifications
+      ;; Clear stale hang stamps before re-applying.
+      (dolist (span spans)
+        (horizontal-layout--clear-hang-region (nth 0 span) (nth 1 span)))
+      (dolist (span spans)
+        (let ((beg   (nth 0 span))
+              (end   (nth 1 span))
+              (hang  (nth 2 span)))
+          (when (and (numberp hang) (> hang 0))
+            (let ((pos beg))
+              (while (< pos end)
+                (let* ((next     (min end (or (next-single-property-change
+                                               pos 'wrap-prefix nil end)
+                                              end)))
+                       (existing (get-text-property pos 'wrap-prefix))
+                       ;; Read current width (from margin-left, or 0) and add hang.
+                       (cur-w    (or (and (consp existing)
+                                          (eq (car existing) 'space)
+                                          (plist-get (cdr existing) :width))
+                                     0))
+                       (height   (and (consp existing)
+                                      (eq (car existing) 'space)
+                                      (plist-get (cdr existing) :height)))
+                       (new-w    (+ cur-w hang))
+                       (prefix   (if height
+                                     `(space :width ,new-w :height ,height)
+                                   `(space :width ,new-w))))
+                  (put-text-property pos next 'wrap-prefix prefix)
+                  (put-text-property pos next horizontal-layout--hang-prop t)
+                  (setq pos next))))))))))
+
+(defun horizontal-layout--clear-hang-region (beg end)
+  "Remove hanging-wrap from wrap-prefix in BEG..END.
+Restores wrap-prefix to match line-prefix (the margin-left width,
+without the hang addition), or removes it if line-prefix is absent."
+  (let ((pos beg))
+    (with-silent-modifications
+      (while (< pos end)
+        (let ((next (or (next-single-property-change
+                         pos horizontal-layout--hang-prop nil end)
+                        end)))
+          (when (get-text-property pos horizontal-layout--hang-prop)
+            (let ((lp (get-text-property pos 'line-prefix)))
+              (if lp
+                  (put-text-property pos next 'wrap-prefix lp)
+                (remove-text-properties pos next '(wrap-prefix nil))))
+            (remove-text-properties pos next
+                                    (list horizontal-layout--hang-prop nil)))
+          (setq pos next))))))
+
+(defun horizontal-layout--clear-hanging-wrap (_cookie)
+  "No-op `:clear' callback for `horizontal-layout-hanging-wrap'."
   nil)
 
 
@@ -510,6 +602,12 @@ owns pass 3 (right-margin expansion).  Both are managed here."
   :after '(horizontal-layout-margin-left)
   :apply  #'horizontal-layout--apply-margin-right-pass2
   :clear  #'horizontal-layout--clear-margin-right)
+
+(face-extra-define-property 'horizontal-layout-hanging-wrap
+  :pass  2
+  :after '(horizontal-layout-margin-left)
+  :apply  #'horizontal-layout--apply-hanging-wrap
+  :clear  #'horizontal-layout--clear-hanging-wrap)
 
 (face-extra-define-property 'horizontal-layout-margin-right
   :pass       3
