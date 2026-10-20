@@ -32,8 +32,9 @@
 ;; RENDERING  (forthcoming)
 ;; ------------------------
 ;; `org-footnote-extra-mode' will eventually also:
-;;   - Replace [fn:N] references in body text with superscript markers
-;;     via font-lock display properties.
+;;   - [fn:N] references in body text are rendered as raised, small-caps
+;;     markers (hiding the [fn: and ] delimiters) via font-lock display
+;;     properties and the `org-footnote-extra-reference' face.
 ;;   - Apply a dedicated `org-footnote-extra-body' face to definition
 ;;     paragraphs so they render at a smaller size with single spacing
 ;;     and justified alignment, distinct from body text.
@@ -61,6 +62,19 @@ Intended to be styled smaller than body text — e.g. 10 pt with single
 spacing and justified alignment — so footnote definitions are visually
 distinct from main paragraph content.  The default simply inherits
 `default' as a neutral starting point; customise to taste."
+  :group 'org-footnote-extra)
+
+(defface org-footnote-extra-reference
+  '((t :height 1.2))
+  "Face for footnote reference markers in body text.
+
+Applied to the label portion of `[fn:N]' references after the `[fn:'
+prefix and `]' suffix are hidden via display properties.  Sets the label to 1.2× the inherited (floor) size — the `org-footnote'
+remap chains through `text-body', so the effective size is relative to
+the floor face, not body text.  Raise 0.5 lifts it to roughly cap-height.  The vertical raise is applied separately as
+a `display' \\='(raise 0.7) property.  (`:raise' is not a valid face
+attribute; see AGENTS.md for planned face-extra support.)
+Inherits color, weight, and family from `org-footnote'."
   :group 'org-footnote-extra)
 
 ;;;; ----------------------------------------------------------------
@@ -213,6 +227,119 @@ Installed by `org-footnote-extra--install-styling' when
   "List of cookies from `face-extra-add-relative' for footnote properties.
 Installed by `org-footnote-extra--install-styling'; removed on disable.")
 
+;;;; ----------------------------------------------------------------
+;;;; Reference superscript rendering
+;;;; ----------------------------------------------------------------
+
+(defconst org-footnote-extra--ref-re
+  "\\(\\[fn:\\)\\([-_[:word:]]+\\)\\(\\]\\)"
+  "Regexp matching a named footnote reference (not a definition or inline).
+Group 1: `[fn:'  — hidden via `display' \"\".
+Group 2: the label — displayed with `org-footnote-extra-reference' face.
+Group 3: `]'     — hidden via `display' \"\".")
+
+(defconst org-footnote-extra--ref-prop 'org-footnote-extra--ref
+  "Marker text-property set on reference spans for cleanup.")
+
+(defun org-footnote-extra--fontify-references (limit)
+  "Font-lock matcher: apply superscript display to footnote references.
+Searches forward to LIMIT for `org-footnote-extra--ref-re', skipping
+any match whose `[' is at the beginning of a line (those are definitions,
+not references).  For each reference found, hides the `[fn:' prefix and
+`]' suffix via `display' \"\" properties and applies
+`org-footnote-extra-reference' face to the label.
+
+Returns t if a match was found (font-lock protocol), nil otherwise.
+The match data is left pointing at the full match so the caller can
+use `(0 nil)' as a no-op highlighter — all actual highlighting is done
+here as a side effect."
+  (catch 'found
+    (while (re-search-forward org-footnote-extra--ref-re limit t)
+      (let ((mbeg (match-beginning 0))
+            (pfx-beg  (match-beginning 1)) (pfx-end  (match-end 1))
+            (lbl-beg  (match-beginning 2)) (lbl-end  (match-end 2))
+            (sfx-beg  (match-beginning 3)) (sfx-end  (match-end 3)))
+        ;; Skip definition lines: `[' at column 0 is a definition.
+        (unless (= mbeg (line-beginning-position))
+          ;; Hide [fn:
+          (put-text-property pfx-beg pfx-end 'display "")
+          (put-text-property pfx-beg pfx-end org-footnote-extra--ref-prop t)
+          ;; Style the label as a superscript.  Use add-face-text-property
+          ;; so our face appends to the list rather than replacing it
+          ;; (Org's own org-activate-footnote-links also uses add-face-text-property).
+          (add-face-text-property lbl-beg lbl-end 'org-footnote-extra-reference)
+          ;; `:raise' is not a face attribute — apply it as a display spec.
+          (put-text-property lbl-beg lbl-end 'display '(raise 0.3))
+          (put-text-property lbl-beg lbl-end org-footnote-extra--ref-prop t)
+          ;; Hide ]
+          (put-text-property sfx-beg sfx-end 'display "")
+          (put-text-property sfx-beg sfx-end org-footnote-extra--ref-prop t)
+          ;; Mark multiline just in case a reference ever spans a line.
+          (put-text-property mbeg sfx-end 'font-lock-multiline t)
+          (throw 'found t))))
+    nil))
+
+(defun org-footnote-extra--clear-reference-display (beg end)
+  "Remove superscript display properties from reference spans in BEG..END.
+Only touches positions marked with `org-footnote-extra--ref-prop' to
+avoid disturbing `display' properties set by other packages.
+Does not remove `face' properties; those belong to font-lock and will
+be cleaned up naturally on the next refontification."
+  (with-silent-modifications
+    (let ((pos beg))
+      (while (< pos end)
+        (let ((next (next-single-property-change pos org-footnote-extra--ref-prop
+                                                 nil end)))
+          (when (get-text-property pos org-footnote-extra--ref-prop)
+            (remove-text-properties pos next
+                                    (list 'display nil
+                                          org-footnote-extra--ref-prop nil
+                                          'font-lock-multiline nil)))
+          (setq pos (or next end)))))))
+
+(defconst org-footnote-extra--ref-font-lock-keywords
+  ;; The matcher function does all the work (display, face, marker properties).
+  ;; The highlighter `(0 (progn ... nil))' returns nil so font-lock sets no
+  ;; face on the match — the face was already applied inside the matcher.
+  `((org-footnote-extra--fontify-references (0 (progn nil))))
+  "Font-lock keyword invoking `org-footnote-extra--fontify-references'.
+The matcher function applies all display and face properties as side
+effects; the `(0 (progn nil))' highlighter is a no-op (returns nil,
+so font-lock leaves the face property untouched).")
+
+;;;; ----------------------------------------------------------------
+;;;; Definition label styling
+;;;; ----------------------------------------------------------------
+
+(defun org-footnote-extra--fontify-definitions (limit)
+  "Font-lock matcher: hide `[fn:' and `]' delimiters on definition labels.
+Searches forward to LIMIT for `org-footnote-extra--ref-re', firing only
+when the match is at the beginning of a line.  Hides the `[fn:' prefix
+and `]' suffix via `display' \"\"; the label itself is left unstyled
+(inherits `org-footnote' from the definition-body keyword below)."
+  (catch 'found
+    (while (re-search-forward org-footnote-extra--ref-re limit t)
+      (let ((mbeg (match-beginning 0))
+            (pfx-beg (match-beginning 1)) (pfx-end (match-end 1))
+            (lbl-beg (match-beginning 2)) (lbl-end (match-end 2))
+            (sfx-beg (match-beginning 3)) (sfx-end (match-end 3)))
+        (when (= mbeg (line-beginning-position))
+          (put-text-property pfx-beg pfx-end 'display "")
+          (put-text-property pfx-beg pfx-end org-footnote-extra--ref-prop t)
+          (put-text-property lbl-beg lbl-end org-footnote-extra--ref-prop t)
+          (put-text-property sfx-beg sfx-end 'display ".")
+          (put-text-property sfx-beg sfx-end org-footnote-extra--ref-prop t)
+          (throw 'found t))))
+    nil))
+
+(defconst org-footnote-extra--def-font-lock-keywords
+  `((org-footnote-extra--fontify-definitions (0 (progn nil))))
+  "Font-lock keyword hiding `[fn:' and `]' delimiters on definition labels.")
+
+;;;; ----------------------------------------------------------------
+;;;; Definition body font-lock keyword
+;;;; ----------------------------------------------------------------
+
 (defconst org-footnote-extra--font-lock-keywords
   `((,(concat org-footnote-definition-re ".*")
      (0 'org-footnote prepend)))
@@ -224,8 +351,12 @@ list (e.g. `italic' from emphasis markup inside the definition), ensuring
 definition text with `text-body'.")
 
 (defun org-footnote-extra--install-styling ()
-  "Install font-lock keyword, face remap, and face-extra properties."
-  ;; 1. Stamp org-footnote across entire definition lines.
+  "Install font-lock keywords, face remap, and face-extra properties."
+  ;; 1a. Superscript display on reference markers.
+  (font-lock-add-keywords nil org-footnote-extra--ref-font-lock-keywords t)
+  ;; 1b. Hide [fn: and ] delimiters on definition labels.
+  (font-lock-add-keywords nil org-footnote-extra--def-font-lock-keywords t)
+  ;; 1c. Stamp org-footnote across entire definition lines.
   (font-lock-add-keywords nil org-footnote-extra--font-lock-keywords t)
   ;; 2. Register org-footnote as a content face buffer-locally so
   ;;    `variable-spacing--has-explicit-face-p' returns t for it and
@@ -247,7 +378,10 @@ definition text with `text-body'.")
   (font-lock-flush))
 
 (defun org-footnote-extra--uninstall-styling ()
-  "Remove font-lock keyword, face remap, and face-extra properties."
+  "Remove font-lock keywords, face remap, and face-extra properties."
+  (font-lock-remove-keywords nil org-footnote-extra--ref-font-lock-keywords)
+  (font-lock-remove-keywords nil org-footnote-extra--def-font-lock-keywords)
+  (org-footnote-extra--clear-reference-display (point-min) (point-max))
   (font-lock-remove-keywords nil org-footnote-extra--font-lock-keywords)
   (setq-local variable-spacing-content-faces
               (delq 'org-footnote variable-spacing-content-faces))
@@ -267,18 +401,20 @@ definition text with `text-body'.")
 (define-minor-mode org-footnote-extra-mode
   "Enhanced footnote placement and rendering for Org buffers.
 
-When enabled, advises `org-footnote-create-definition' to support the
+When enabled:
+
+PLACEMENT — advises `org-footnote-create-definition' to support the
 \"*paragraph*\" placement strategy: set `org-footnote-section' to the
 string \"*paragraph*\" and new footnote definitions will be placed
 immediately after the paragraph containing their reference, rather than
-at the end of the section or under a document-level heading.
+at the end of the section or under a document-level heading.  The other
+two standard strategies (nil and \"Footnotes\") continue to work as
+usual.
 
-The other two standard strategies continue to work as usual:
-  nil          — end of current outline section (before next heading)
-  \"Footnotes\" — collected under a dedicated heading (Org default)
-
-Rendering transforms (superscript reference markers, styled definition
-paragraphs) will be added in a future version."
+REFERENCE RENDERING — `[fn:N]' references in body text are displayed
+as raised, small superscript markers by hiding the `[fn:' and `]'
+delimiters and applying `org-footnote-extra-reference' face to the
+label.  The underlying text is unchanged."
   :lighter " FnX"
   (if org-footnote-extra-mode
       (progn
