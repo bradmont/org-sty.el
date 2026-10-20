@@ -211,11 +211,14 @@
                    ;; org-sty-remap to silently drop the key.
                    (org-quote . (:horizontal-layout-margin-left 4))
                    (org-verse . (:horizontal-layout-margin-left 4))
-                   ;; Footnote definition hanging indent: superscript label
-                   ;; sits in the hang gutter; continuation lines align with
-                   ;; the body text start.  3 canonical char-widths accommodates
-                   ;; up to 3-digit superscript indices.
-                   (org-footnote . (:horizontal-layout-hanging-wrap 4))))
+                   ;; Footnote definition indent: all continuation lines get a
+                   ;; full left margin of 4 canonical char-widths.  The label
+                   ;; line suppresses line-prefix via
+                   ;; `horizontal-layout-suppress-line-prefix' (stamped by
+                   ;; `org-footnote-extra--fontify-definitions') so the
+                   ;; superscript label sits at column 0 while wrap-prefix
+                   ;; still aligns any wrapped label-line text with the body.
+                   (org-footnote . (:horizontal-layout-margin-left 4))))
        (wp-style `(:font "Times New Roman"
                    :num-level 3 :indent nil
                    :faces ,wp-faces

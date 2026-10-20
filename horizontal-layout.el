@@ -88,6 +88,15 @@ Used by `horizontal-layout-clear' to remove exactly this package's
 display properties without disturbing Org's or other packages' uses of
 `line-prefix'/`wrap-prefix'.")
 
+(defconst horizontal-layout-suppress-line-prefix 'horizontal-layout-suppress-line-prefix
+  "Text property that suppresses `line-prefix' stamping by `margin-left'.
+When set at a buffer position, `horizontal-layout--apply-margin-left'
+skips the `line-prefix' put for that position while still stamping
+`wrap-prefix'.  Set by callers that need the left-margin indent to apply
+only to wrapped continuations, not to the first visual line — e.g. the
+label line of a footnote definition, where the label glyph sits at
+column zero and the body text hangs via the wrap-prefix.")
+
 (defconst horizontal-layout--right-prop 'horizontal-layout--right
   "Overlay property key for right-margin after-string overlays.
 Set on overlays created by `horizontal-layout--apply-margin-right-pass3'.
@@ -258,12 +267,25 @@ Only runs when `horizontal-layout-mode' is active in the current buffer."
                   (let* ((next     (min end
                                         (or (next-single-property-change
                                              pos 'line-prefix nil end)
+                                            end)
+                                        ;; Also break at suppress-property
+                                        ;; boundaries so the suppress on the
+                                        ;; label-line `[' only skips line-prefix
+                                        ;; for that one char; subsequent BOLs
+                                        ;; (continuation lines) are processed
+                                        ;; separately and receive line-prefix.
+                                        (or (next-single-property-change
+                                             pos
+                                             horizontal-layout-suppress-line-prefix
+                                             nil end)
                                             end)))
                          (existing (get-text-property pos 'line-prefix))
                          (prefix   (horizontal-layout--compose-prefix
                                     width existing)))
                     (when prefix
-                      (put-text-property pos next 'line-prefix  prefix)
+                      (unless (get-text-property pos
+                                                 horizontal-layout-suppress-line-prefix)
+                        (put-text-property pos next 'line-prefix prefix))
                       (put-text-property pos next 'wrap-prefix  prefix)
                       (put-text-property pos next
                                          horizontal-layout--prop t))

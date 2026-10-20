@@ -45,6 +45,7 @@
 (require 'org-footnote)
 (require 'face-extra)
 (require 'variable-spacing)
+(require 'horizontal-layout)
 
 ;;;; ----------------------------------------------------------------
 ;;;; Group and faces
@@ -334,13 +335,18 @@ following `]' in the buffer acts as the label/body separator."
           (put-text-property lbl-beg lbl-end 'display '(raise 0.3))
           (put-text-property lbl-beg lbl-end org-footnote-extra--ref-prop t)
           ;; Replace ] with a pixel-precise gap so body text always aligns
-          ;; with the hanging-indent column regardless of label width.
+          ;; with the left-margin column regardless of label width.
           ;; ] is char 93 (not ?\s) so justify's space-ring builder never
           ;; collects it — the gap is stable across justify passes.
           ;; The actual space char after ] is hidden so it too is excluded
           ;; from justify and the alignment never varies.
+          ;; Suppress line-prefix on this line so pass-2 margin-left only
+          ;; applies wrap-prefix here; the gap ensures body text aligns.
+          (put-text-property mbeg (1+ mbeg)
+                             horizontal-layout-suppress-line-prefix t)
+          (put-text-property mbeg (1+ mbeg) org-footnote-extra--ref-prop t)
           (let* ((hang-chars (face-extra--resolve-property
-                              'org-footnote 'horizontal-layout-hanging-wrap))
+                              'org-footnote 'horizontal-layout-margin-left))
                  (hang-px    (if (numberp hang-chars)
                                  (* hang-chars (frame-char-width))
                                0))
@@ -371,15 +377,69 @@ pixel-precise gap so body text aligns with the hanging-indent column.")
 ;;;; Definition body font-lock keyword
 ;;;; ----------------------------------------------------------------
 
+(defun org-footnote-extra--fontify-def-body (limit)
+  "Font-lock matcher: stamp `org-footnote' on footnote definition body text.
+Searches forward to LIMIT for a definition label at BOL (matched via
+`org-footnote-definition-re'), then stamps `org-footnote' (prepended)
+on all body text: the rest of the label line plus every continuation
+line.  A continuation line is any non-blank line that does not begin a
+new `[fn:' definition and is not an Org heading (`*').  Stamping stops
+at the first blank line, new definition, or heading encountered.
+
+Sets `font-lock-multiline' across the whole block so jit-lock
+refontifies it as a unit when any line in it changes.
+
+Returns t if a match was found (font-lock protocol); the match data is
+left as `org-footnote-definition-re' last matched, and the
+`(0 (progn nil))' highlighter in `org-footnote-extra--font-lock-keywords'
+is a no-op — all stamping is done here as a side effect."
+  (catch 'found
+    (while (re-search-forward org-footnote-definition-re limit t)
+      ;; `org-footnote-definition-re' has a BOL anchor; match-end 0 is just
+      ;; after the closing `]' of the label.
+      (let* ((block-beg  (match-beginning 0))
+             (first-body (match-end 0))
+             (block-end  (line-end-position)))
+        ;; Extend block-end over non-blank continuation lines.
+        ;; Intentionally not bounded by LIMIT: font-lock matchers may stamp
+        ;; text properties beyond the chunk boundary, and doing so here
+        ;; ensures font-lock-multiline covers the full block on first
+        ;; fontification even when the chunk boundary falls mid-block.
+        ;; Without this, a font-lock-flush (e.g. triggered by face-extra
+        ;; cache invalidation) can split the label line into one chunk and
+        ;; continuation lines into another; the second chunk finds no
+        ;; definition label and never stamps org-footnote on those lines.
+        (save-excursion
+          (forward-line 1)
+          (while (and (not (eobp))
+                      (not (looking-at "^[ \t]*$"))
+                      (not (looking-at "^\\[fn:"))
+                      (not (looking-at "^\\*")))
+            (setq block-end (line-end-position))
+            (forward-line 1)))
+        ;; Stamp org-footnote on body text from after `]' to end of block.
+        ;; The `[fn:N]' label span is intentionally excluded — left to
+        ;; `org-activate-footnote-links' to avoid face duplication that
+        ;; caused hanging-wrap double-application.
+        (when (< first-body (point-max))
+          (add-face-text-property first-body (min block-end (point-max))
+                                  'org-footnote))
+        ;; Mark the full block as multiline so jit-lock treats it as one unit.
+        (put-text-property block-beg (min (1+ block-end) (point-max))
+                           'font-lock-multiline t)
+        (throw 'found t)))
+    nil))
+
 (defconst org-footnote-extra--font-lock-keywords
-  `((,(concat org-footnote-definition-re "\\(.*\\)")
-     (2 'org-footnote prepend)))
+  `((org-footnote-extra--fontify-def-body (0 (progn nil))))
   "Font-lock keywords stamping `org-footnote' on footnote definition body text.
-Matches `[fn:N]' (group 1, skipped) plus the rest of the line (group 2).
-Stamps `org-footnote' on group 2 only — the body text after `]' — so
-`has-explicit-face-p' returns t for it and the stamp pass never overwrites
-it with `text-body'.  The `[fn:N]' span is left to `org-activate-footnote-links'
-alone, avoiding the face duplication that caused hanging-wrap double-application.")
+Uses `org-footnote-extra--fontify-def-body' as the matcher, which stamps
+`org-footnote' on the rest of the label line and all continuation lines
+(non-blank lines that are not a new `[fn:' definition or heading).
+Sets `font-lock-multiline' across the full block so jit-lock refontifies
+it as a unit when any line changes.
+The `[fn:N]' label span is left to `org-activate-footnote-links' alone,
+avoiding the face duplication that caused hanging-wrap double-application.")
 
 (defun org-footnote-extra--install-styling ()
   "Install font-lock keywords, face remap, and face-extra properties."
