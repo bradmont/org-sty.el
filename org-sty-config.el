@@ -86,10 +86,8 @@
          ;; 0 as the explicit suppressor value stops the resolver at level 1
          ;; (buffer-local face-extra--local-properties) before it reaches
          ;; the inherited chain.
-         (org-quote           . (:slant italic :variable-spacing-ratio 0
-                                 :horizontal-layout-margin-left 4))
-         (org-verse           . (:slant italic :variable-spacing-ratio 0
-                                 :horizontal-layout-margin-left 4))
+         (org-quote           . (:slant italic :variable-spacing-ratio 0))
+         (org-verse           . (:slant italic :variable-spacing-ratio 0))
          (org-block           . (:variable-spacing-ratio 0)))
         :eval
         ((org-sty-remap
@@ -203,7 +201,16 @@
                    ;; rather than via face-extra-add-relative in :eval so
                    ;; that it runs in the :faces phase — after :eval — and
                    ;; cannot be clobbered by a base-style suppressor.
-                   (org-document-title . (:text-align center))))
+                   (org-document-title . (:text-align center))
+                   ;; Quote / verse blocks: left indent.  Must live here
+                   ;; (after :eval) for the same reason as :text-align on
+                   ;; headings — horizontal-layout.el registers
+                   ;; horizontal-layout-margin-left with face-extra only
+                   ;; when horizontal-layout-mode is enabled in :eval above.
+                   ;; Placing this in org-sty-default :faces causes
+                   ;; org-sty-remap to silently drop the key.
+                   (org-quote . (:horizontal-layout-margin-left 4))
+                   (org-verse . (:horizontal-layout-margin-left 4))))
        (wp-style `(:font "Times New Roman"
                    :num-level 3 :indent nil
                    :faces ,wp-faces
