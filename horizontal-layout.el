@@ -326,7 +326,6 @@ already carries the left-margin width; this adds VALUE on top of it."
                                                pos 'wrap-prefix nil end)
                                               end)))
                        (existing (get-text-property pos 'wrap-prefix))
-                       ;; Read current width (from margin-left, or 0) and add hang.
                        (cur-w    (or (and (consp existing)
                                           (eq (car existing) 'space)
                                           (plist-get (cdr existing) :width))
@@ -342,12 +341,14 @@ already carries the left-margin width; this adds VALUE on top of it."
                   (put-text-property pos next horizontal-layout--hang-prop t)
                   (setq pos next))))))))))
 
+
+
 (defun horizontal-layout--clear-hang-region (beg end)
-  "Remove hanging-wrap from wrap-prefix in BEG..END.
-Restores wrap-prefix to match line-prefix (the margin-left width,
-without the hang addition), or removes it if line-prefix is absent."
-  (let ((pos beg))
-    (with-silent-modifications
+  "Remove hanging-wrap stamps from wrap-prefix in BEG..END.
+Restores wrap-prefix to match line-prefix (removing the hang addition),
+or removes it if line-prefix is absent."
+  (with-silent-modifications
+    (let ((pos beg))
       (while (< pos end)
         (let ((next (or (next-single-property-change
                          pos horizontal-layout--hang-prop nil end)
@@ -929,6 +930,7 @@ is explicitly neutralised before measuring to keep measurements clean."
                       (pos    lbeg))
                   (while (< pos (1- lend))
                     (when (and (= (char-after pos) ?\s)
+                               (not (get-text-property pos 'display))
                                (not (cl-some
                                      (lambda (ov) (overlay-get ov 'display))
                                      (overlays-at pos))))
