@@ -312,11 +312,13 @@ so font-lock leaves the face property untouched).")
 ;;;; ----------------------------------------------------------------
 
 (defun org-footnote-extra--fontify-definitions (limit)
-  "Font-lock matcher: hide `[fn:' and `]' delimiters on definition labels.
+  "Font-lock matcher: render definition labels as superscripts.
 Searches forward to LIMIT for `org-footnote-extra--ref-re', firing only
-when the match is at the beginning of a line.  Hides the `[fn:' prefix
-and `]' suffix via `display' \"\"; the label itself is left unstyled
-(inherits `org-footnote' from the definition-body keyword below)."
+when the match is at the beginning of a line (definition label, not an
+inline reference).  Hides `[fn:' and `]' via `display' \"\"; applies
+`org-footnote-extra-reference' face and `display' \\='(raise 0.3) to
+the label — matching inline reference rendering.  The space character
+following `]' in the buffer acts as the label/body separator."
   (catch 'found
     (while (re-search-forward org-footnote-extra--ref-re limit t)
       (let ((mbeg (match-beginning 0))
@@ -324,17 +326,46 @@ and `]' suffix via `display' \"\"; the label itself is left unstyled
             (lbl-beg (match-beginning 2)) (lbl-end (match-end 2))
             (sfx-beg (match-beginning 3)) (sfx-end (match-end 3)))
         (when (= mbeg (line-beginning-position))
+          ;; Hide [fn: prefix.
           (put-text-property pfx-beg pfx-end 'display "")
           (put-text-property pfx-beg pfx-end org-footnote-extra--ref-prop t)
+          ;; Raise and shrink the label.
+          (add-face-text-property lbl-beg lbl-end 'org-footnote-extra-reference)
+          (put-text-property lbl-beg lbl-end 'display '(raise 0.3))
           (put-text-property lbl-beg lbl-end org-footnote-extra--ref-prop t)
-          (put-text-property sfx-beg sfx-end 'display ".")
-          (put-text-property sfx-beg sfx-end org-footnote-extra--ref-prop t)
+          ;; Replace ] with a pixel-precise gap so body text always aligns
+          ;; with the hanging-indent column regardless of label width.
+          ;; ] is char 93 (not ?\s) so justify's space-ring builder never
+          ;; collects it — the gap is stable across justify passes.
+          ;; The actual space char after ] is hidden so it too is excluded
+          ;; from justify and the alignment never varies.
+          (let* ((hang-chars (face-extra--resolve-property
+                              'org-footnote 'horizontal-layout-hanging-wrap))
+                 (hang-px    (if (numberp hang-chars)
+                                 (* hang-chars (frame-char-width))
+                               0))
+                 (win        (selected-window))
+                 ;; pfx has display "" → 0px; lbl has face+raise → label_px.
+                 (label-px   (car (window-text-pixel-size win pfx-beg sfx-end)))
+                 (gap-px     (max 1 (round (- hang-px label-px)))))
+            (put-text-property sfx-beg sfx-end
+                               'display `(space :width (,gap-px)))
+            (put-text-property sfx-beg sfx-end org-footnote-extra--ref-prop t)
+            ;; Hide the space after ] so it doesn't participate in justify.
+            (let ((sp-pos sfx-end))
+              (when (and (< sp-pos (point-max))
+                         (= (char-after sp-pos) ?\s))
+                (put-text-property sp-pos (1+ sp-pos) 'display "")
+                (put-text-property sp-pos (1+ sp-pos)
+                                   org-footnote-extra--ref-prop t))))
           (throw 'found t))))
     nil))
 
 (defconst org-footnote-extra--def-font-lock-keywords
   `((org-footnote-extra--fontify-definitions (0 (progn nil))))
-  "Font-lock keyword hiding `[fn:' and `]' delimiters on definition labels.")
+  "Font-lock keyword rendering definition labels as superscripts.
+`[fn:' and the post-label space are hidden; `]' is replaced with a
+pixel-precise gap so body text aligns with the hanging-indent column.")
 
 ;;;; ----------------------------------------------------------------
 ;;;; Definition body font-lock keyword
