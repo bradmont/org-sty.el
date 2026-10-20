@@ -655,6 +655,41 @@ regression test point.
 - **Generalising `variable-spacing-mode`** beyond Org via pluggable backends
   is partially done (text backend exists) but not fully exercised outside Org.
 
+- **`raise` and `lower` as synthetic face properties (`face-extra`):**
+  Superscript and subscript positioning cannot be expressed as standard Emacs
+  face attributes — `:raise` is silently ignored by `face-remap-add-relative`
+  and `defface`.  Vertical offset must be applied as a `display` text property
+  (`(raise N)`, where N is a float in units of the character's own font
+  height).
+
+  Currently `org-footnote-extra` hard-codes `(raise 0.5)` directly on the
+  label span.  The right long-term home is a face-extra synthetic property:
+
+  ```elisp
+  (face-extra-define-property 'raise
+    :pass 1   ; vertical metrics, no line-break dependency
+    :apply #'face-extra--apply-raise
+    :clear #'face-extra--clear-raise)
+
+  ;; then, in org-footnote-extra--install-styling:
+  (face-extra-add-relative 'org-footnote-extra-reference 'raise 0.3)
+  ```
+
+  The `:apply` function walks `spans` and calls
+  `(put-text-property beg end 'display \`(raise ,value))` on each span.
+  `:clear` removes those `display` properties.
+
+  `lower` is syntactic sugar for a negative `raise` value and can share the
+  same implementation (`(raise -N)` drops text below the baseline for
+  subscripts); expose it as an alias or a separate property that negates its
+  value before delegating to `raise`.
+
+  When implemented, both properties should compose cleanly with
+  `variable-spacing-ratio` (a raised span in a double-spaced paragraph should
+  not inflate the visual line height above the surrounding line rhythm) — this
+  may require the `:apply` function to check whether a `line-prefix` spacer
+  is already present and leave it undisturbed.
+
 ## Pass-3 performance architecture — decisions and known issues
 
 This section records the design decisions made during the justify
