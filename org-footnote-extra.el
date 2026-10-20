@@ -372,14 +372,14 @@ pixel-precise gap so body text aligns with the hanging-indent column.")
 ;;;; ----------------------------------------------------------------
 
 (defconst org-footnote-extra--font-lock-keywords
-  `((,(concat org-footnote-definition-re ".*")
-     (0 'org-footnote prepend)))
-  "Font-lock keywords stamping `org-footnote' on footnote definition lines.
-Matches the label `[fn:N]' plus the rest of the first line.  Uses
-`prepend' so `org-footnote' is added to the front of any existing face
-list (e.g. `italic' from emphasis markup inside the definition), ensuring
-`has-explicit-face-p' always finds it and the stamp pass never overwrites
-definition text with `text-body'.")
+  `((,(concat org-footnote-definition-re "\\(.*\\)")
+     (2 'org-footnote prepend)))
+  "Font-lock keywords stamping `org-footnote' on footnote definition body text.
+Matches `[fn:N]' (group 1, skipped) plus the rest of the line (group 2).
+Stamps `org-footnote' on group 2 only — the body text after `]' — so
+`has-explicit-face-p' returns t for it and the stamp pass never overwrites
+it with `text-body'.  The `[fn:N]' span is left to `org-activate-footnote-links'
+alone, avoiding the face duplication that caused hanging-wrap double-application.")
 
 (defun org-footnote-extra--install-styling ()
   "Install font-lock keywords, face remap, and face-extra properties."

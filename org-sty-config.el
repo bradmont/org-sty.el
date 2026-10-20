@@ -215,7 +215,7 @@
                    ;; sits in the hang gutter; continuation lines align with
                    ;; the body text start.  3 canonical char-widths accommodates
                    ;; up to 3-digit superscript indices.
-                   (org-footnote . (:horizontal-layout-hanging-wrap 3))))
+                   (org-footnote . (:horizontal-layout-hanging-wrap 4))))
        (wp-style `(:font "Times New Roman"
                    :num-level 3 :indent nil
                    :faces ,wp-faces

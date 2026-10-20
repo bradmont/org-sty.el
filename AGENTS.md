@@ -942,6 +942,33 @@ to determine which jit-lock chunks are processed, at what idle state, and
 whether the affected paragraphs are ever included in a full-region passes 1–2
 run.
 
+**Footnote definition gap collapses when org-cite-appear expands a citation** (UNFIXED):
+When `org-cite-appear-mode` is active and the cursor moves into a footnote
+definition that contains a citation, `org-cite-appear` re-renders the citation
+from its collapsed `(...)` form to the full inline form.  This re-fontification
+fires `--fontify-definitions` again, and the `window-text-pixel-size` call
+that computes the gap on `]` appears to run at a moment when the citation
+overlay has already altered visual layout — the resulting gap pixel value is
+wrong (collapses to near zero).  Additionally, while typing in a footnote
+that contains a citation, each keystroke triggers a citation re-render, and
+the gap oscillates visibly between correct and collapsed sizes (jitter).
+
+The core issue: `--fontify-definitions` computes the gap during font-lock
+fontification using `window-text-pixel-size`, but `org-cite-appear` overlays
+change the rendered width of the line at an unpredictable point relative to
+when font-lock fires, making the measurement unstable.
+
+Possible approaches:
+  1. Move the gap stamp out of the font-lock function and into a pass-2
+     face-extra property that runs after `org-cite-appear` has settled
+     (i.e. after idle, not inline).  Requires the gap stamp to coexist with
+     justify without participating in justify's space ring — the existing
+     `(not (get-text-property pos 'display))` guard in the space collector
+     already handles this.
+  2. Re-run `--fontify-definitions` on the affected line via a post-command
+     hook that fires after `org-cite-appear` finishes, so the measurement
+     sees the final rendered state.
+
 ### Potential next optimisations
 
 - **Skip pass-3 flush for lines unchanged since last justify.** DONE via
