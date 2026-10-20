@@ -210,7 +210,12 @@
                    ;; Placing this in org-sty-default :faces causes
                    ;; org-sty-remap to silently drop the key.
                    (org-quote . (:horizontal-layout-margin-left 4))
-                   (org-verse . (:horizontal-layout-margin-left 4))))
+                   (org-verse . (:horizontal-layout-margin-left 4))
+                   ;; Footnote definition hanging indent: superscript label
+                   ;; sits in the hang gutter; continuation lines align with
+                   ;; the body text start.  3 canonical char-widths accommodates
+                   ;; up to 3-digit superscript indices.
+                   (org-footnote . (:horizontal-layout-hanging-wrap 3))))
        (wp-style `(:font "Times New Roman"
                    :num-level 3 :indent nil
                    :faces ,wp-faces
