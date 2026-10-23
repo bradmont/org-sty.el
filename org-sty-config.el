@@ -24,6 +24,11 @@
 (require 'page-metrics)
 (require 'org-footnote-extra)
 
+;; Tracks the currently installed inline-quote font-lock keyword so that
+;; re-applying the style (e.g. after a theme change) can remove the old
+;; keyword before installing a fresh one with the updated background colour.
+(defvar-local org-sty-config--inline-quote-keyword nil)
+
 ;; ---------------------------------------------------------------------------
 ;; Default style (applies to all Org buffers as a base layer)
 ;; ---------------------------------------------------------------------------
@@ -103,6 +108,19 @@
           'org-verse
           :background (color-darken-name (face-background 'default) 5)
           :extend t)
+         ;; Inline quoted spans — same background as org-quote blocks.
+         ;; Covers guillemets «»,  typographic double "…", typographic single '…'.
+         ;; Content group (1) excludes newlines so unmatched quotes don't run on.
+         ;; `prepend' means Org's own faces (links, emphasis) win on foreground
+         ;; while the background still shows through.
+         (when org-sty-config--inline-quote-keyword
+           (font-lock-remove-keywords nil org-sty-config--inline-quote-keyword))
+         (let* ((bg (color-darken-name (face-background 'default) 5))
+                (kw `(("[«\u201C\u2018]\\([^»\u201D\u2019\n]*\\)[»\u201D\u2019]"
+                       (1 '(:background ,bg) prepend)))))
+           (setq-local org-sty-config--inline-quote-keyword kw)
+           (font-lock-add-keywords nil kw 'append)
+           (font-lock-flush))
          (hl-line-mode -1))))
 
 ;; ---------------------------------------------------------------------------
@@ -167,7 +185,8 @@
                      (org-num-mode -1)
                      (org-num-mode 1))
                    (flyspell-mode 1)
-                   (org-footnote-extra-mode 1)
+                   (setq org-pretty-entities t)
+                   (org-toggle-pretty-entities)
                    (setq-local org-footnote-section "*paragraph*")
                    (setq-local org-footnote-auto-adjust 'renumber))
                )
