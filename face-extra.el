@@ -393,7 +393,15 @@ variable-spacing).  Global library-level defaults should use
          (old-real (if (eq old :face-extra-unset) :face-extra-unset old))
          (buf      (current-buffer)))
     (puthash key value face-extra--local-properties)
-    (face-extra--invalidate-face face)
+    ;; Invalidate the whole cache, not just the entry for FACE.  Any face
+    ;; that inherits from FACE through face-remapping-alist or face :inherit
+    ;; may have cached a stale value resolved before this change was made.
+    ;; Single-face invalidation (`face-extra--invalidate-face') is
+    ;; insufficient when the changed face is a base like `text-body' whose
+    ;; properties propagate transitively to dozens of inheriting faces (e.g.
+    ;; `org-list-dt', all `org-level-*', etc.).  A full wipe is safe because
+    ;; the cache is rebuilt lazily on next access.
+    (face-extra--invalidate-cache)
     (list 'local face property old-real buf)))
 
 ;;;###autoload
@@ -414,11 +422,12 @@ unset)."
                                    unless (eq k property)
                                    append (list k v)))
          (put face property old))
-       ;; Invalidate per-face entry in every buffer.
+       ;; Invalidate the whole cache in every buffer — removing a global
+       ;; property may affect all faces that inherited it transitively.
        (dolist (buf (buffer-list))
          (when (buffer-live-p buf)
            (with-current-buffer buf
-             (face-extra--invalidate-face face))))))
+             (face-extra--invalidate-cache))))))
     ('local
      (let ((face     (nth 1 cookie))
            (property (nth 2 cookie))
@@ -430,7 +439,9 @@ unset)."
              (if (eq old :face-extra-unset)
                  (remhash key face-extra--local-properties)
                (puthash key old face-extra--local-properties)))
-           (face-extra--invalidate-face face)))))
+           ;; Full cache wipe for the same reason as face-extra-add-relative:
+           ;; inherited faces cached before this removal are now stale.
+           (face-extra--invalidate-cache)))))
     (_
      (error "face-extra-remove: unrecognised cookie format: %S" cookie))))
 
@@ -785,11 +796,14 @@ after Org (and all other font-lock keywords) have fully annotated the
 region.  Also advises `font-lock-ensure' so that `font-lock-update'
 (which bypasses jit-lock) still triggers pass-3.  Adds a
 `window-scroll-functions' hook to flush pass-3 on scroll for regions
-that jit-lock never re-dirtied.  Idempotent."
+that jit-lock never re-dirtied, and a `window-selection-change-functions'
+hook to reschedule deferred flushes when a buffer regains focus.
+Idempotent."
   (advice-add 'font-lock-fontify-keywords-region :after
               #'face-extra--dispatch)
   (advice-add 'font-lock-ensure :after #'face-extra--after-ensure)
-  (add-hook 'window-scroll-functions #'face-extra--window-scroll))
+  (add-hook 'window-scroll-functions #'face-extra--window-scroll)
+  (add-hook 'window-selection-change-functions #'face-extra--window-selected))
 
 (defun face-extra--disable-dispatch ()
   "Remove the `face-extra--dispatch' advice.
@@ -810,7 +824,8 @@ backend matches any live buffer's major mode."
                      #'face-extra--dispatch)
       (advice-remove 'font-lock-ensure
                      #'face-extra--after-ensure)
-      (remove-hook 'window-scroll-functions #'face-extra--window-scroll))))
+      (remove-hook 'window-scroll-functions #'face-extra--window-scroll)
+      (remove-hook 'window-selection-change-functions #'face-extra--window-selected))))
 
 ;;;; ------ Pass-3 jit-lock dispatch ------
 
@@ -840,20 +855,63 @@ Returns a (BEG . END) cons, or nil if the region is empty after clipping."
   "Idle timer callback: run the deferred pass-3 flush for BUF.
 Reads the pending region from buffer-local `face-extra--pass3-flush-beg'
 and `face-extra--pass3-flush-end'.  Using a named function avoids
-allocating a new closure on every keystroke."
+allocating a new closure on every keystroke.
+
+If BUF is not currently visible in the selected frame (e.g. the user
+has switched focus to another frame), the flush is deferred: the
+pending region is left intact and the timer cleared so no CPU is spent
+on `vertical-motion' and `window-text-pixel-size' calls for a buffer
+the user is not looking at.  `face-extra--window-selected' reschedules
+the flush when the buffer's frame regains focus.
+
+Existing justify/alignment stamps are intentionally preserved in this
+case — the `:pre-clear' in `face-extra--dispatch-pass3' would strip
+them before re-applying, so leaving the function early without calling
+dispatch keeps the buffer correctly stamped until focus returns."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (setq face-extra--pass3-flush-timer nil)
-      (let ((b face-extra--pass3-flush-beg)
-            (e face-extra--pass3-flush-end))
-        (setq face-extra--pass3-flush-beg nil
-              face-extra--pass3-flush-end nil)
-        (when (and b e)
-          (face-extra--dispatch-pass3 b e)
-          ;; Record the flushed region so `face-extra--window-scroll'
-          ;; can suppress re-scheduling for the same on-screen region.
-          (setq face-extra--pass3-last-flushed-beg b
-                face-extra--pass3-last-flushed-end e))))))
+      (when (and face-extra--pass3-flush-beg face-extra--pass3-flush-end)
+        (if (not (get-buffer-window buf))
+            ;; Buffer not visible in the selected frame.  Leave the pending
+            ;; beg/end in place so `face-extra--window-selected' can
+            ;; reschedule the flush when focus returns.  Do NOT call
+            ;; `face-extra--dispatch-pass3': that would run `:pre-clear'
+            ;; (stripping justify stamps) and then fail to re-apply them
+            ;; because `window-text-pixel-size' needs a live window.
+            nil
+          ;; Buffer is visible: run the flush normally.
+          (let ((b face-extra--pass3-flush-beg)
+                (e face-extra--pass3-flush-end))
+            (setq face-extra--pass3-flush-beg nil
+                  face-extra--pass3-flush-end nil)
+            (face-extra--dispatch-pass3 b e)
+            ;; Record the flushed region so `face-extra--window-scroll'
+            ;; can suppress re-scheduling for the same on-screen region.
+            (setq face-extra--pass3-last-flushed-beg b
+                  face-extra--pass3-last-flushed-end e)))))))
+
+(defun face-extra--window-selected (frame)
+  "Reschedule any pending pass-3 flush when a buffer gains focus.
+Added to `window-selection-change-functions' by `face-extra--enable-dispatch'.
+
+Fires whenever the selected window changes — including when an Emacs
+frame gains OS focus.  If the newly-selected buffer has a pending
+flush region that was deferred by `face-extra--pass3-flush-callback'
+(because the buffer was not visible in the selected frame at the time),
+this schedules a new idle timer to run it now that the buffer is focused.
+
+FRAME is the frame whose selected window changed (passed by Emacs)."
+  (let* ((win (frame-selected-window frame))
+         (buf (window-buffer win)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and face-extra--pass3-flush-beg
+                   face-extra--pass3-flush-end
+                   (not face-extra--pass3-flush-timer))
+          (setq face-extra--pass3-flush-timer
+                (run-with-idle-timer face-extra--pass3-flush-delay nil
+                                     #'face-extra--pass3-flush-callback buf)))))))
 
 (defun face-extra--schedule-pass3-flush (buf beg end)
   "Accumulate BEG..END into the pending pass-3 flush region for BUF.
@@ -952,35 +1010,27 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
     ;; original chunk.  Without this, the tail of a multi-line block never
     ;; gets pass-3 treatment because font-lock already marked it fontified.
     ;;
-    ;; Debounce: when Emacs is not idle (active typing), always defer to
-    ;; idle rather than walking visual lines now.
-    ;;
-    ;; DESIGN NOTE — why the check is unconditional (not gated on pending):
-    ;; `face-extra--dispatch' (passes 1+2) sets `face-extra--pass3-pending'
-    ;; and then calls this function inline for the same beg/end.  That inline
-    ;; call sees pending, clears it, and defers.  But jit-lock-register ALSO
-    ;; calls this function independently for the same chunk.  By the time
-    ;; that registered call fires, pending is nil (cleared by the inline
-    ;; call), so a `(when face-extra--pass3-pending ...)' guard would fall
-    ;; through and run pass-3 immediately — defeating the debounce entirely.
-    ;; Checking (null (current-idle-time)) unconditionally fixes this: the
-    ;; registered call is also deferred when not idle, regardless of pending.
+    ;; Debounce: during active typing, defer pass 3 to idle so that
+    ;; `vertical-motion' and `window-text-pixel-size' see settled geometry.
+    ;; For non-typing events (scroll, window-focus change, initial fontify)
+    ;; pass 3 runs immediately — no feedback loop risk when the buffer is
+    ;; not being modified.
     ;;
     ;; Org's font-lock-extend-region-functions pre-expand the jit-lock chunk
     ;; to the full paragraph element before face-extra sees it, so the
     ;; pending region always ≈ chunk — making a size-based threshold useless.
     ;;
-    ;; The flush fires immediately when Emacs goes idle (idle-0 timer via
-    ;; face-extra--schedule-pass3-flush), so justification settles as soon
-    ;; as the user pauses with no perceptible lag.
+    ;; When deferred, the flush fires immediately when Emacs goes idle
+    ;; (idle-0 timer via face-extra--schedule-pass3-flush), so justification
+    ;; settles as soon as the user pauses with no perceptible lag.
 
     ;; First, merge any pending region accumulated by face-extra--dispatch.
     (when face-extra--pass3-pending
       (setq beg (min beg (car face-extra--pass3-pending))
             end (max end (cdr face-extra--pass3-pending)))
       (setq face-extra--pass3-pending nil))
-    ;; Debounce: when not idle (active typing), narrow the walk to the
-    ;; single visual line containing point rather than skipping entirely.
+    ;; Debounce: during active typing, narrow the walk to the single visual
+    ;; line containing point rather than walking the full paragraph.
     ;;
     ;; This gives O(1) vertical-motion calls per keystroke (2: one to find
     ;; BOL, one to find EOL of point's line) instead of O(paragraph_lines).
@@ -992,7 +1042,16 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
     ;; `face-extra--pass3-flush-delay' seconds of idle, so justification
     ;; settles correctly on any genuine pause.  Brief inter-keystroke
     ;; hesitations (< flush-delay) do not trigger the full-paragraph walk.
-    (when (null (current-idle-time))
+    ;;
+    ;; The deferral is gated on `face-extra--typing-commands' (not on
+    ;; (current-idle-time) alone) so that scroll, window-focus, and other
+    ;; non-typing events run pass 3 immediately.  The measurement-mid-keystroke
+    ;; feedback loop that originally motivated the unconditional idle-gate
+    ;; only arises when buffer content is being modified; for read-only
+    ;; events (scroll, focus change) running pass 3 synchronously is safe
+    ;; and eliminates the visible snap/jitter after scrolling.
+    (when (and (null (current-idle-time))
+               (memq this-command face-extra--typing-commands))
       ;; Schedule full-paragraph flush for idle.
       ;; The jit-lock chunk only covers the lines around point; lines below
       ;; in the same paragraph are never re-dirtified by jit-lock.  Expand
@@ -1126,7 +1185,17 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                             (gethash (car pair) line-spans)))))
                 (when (zerop moved)
                   (goto-char rend)))))
-          (face-extra--run-pass 3 line-spans)))))))) ; closes let/when/if
+          (face-extra--run-pass 3 line-spans)
+          ;; Record the completed region so `face-extra--window-scroll'
+          ;; can suppress re-scheduling for the same on-screen content.
+          ;; This is needed for inline (non-idle) runs too: when pass 3
+          ;; fires synchronously on scroll, stamping changes line heights
+          ;; which makes Emacs fire `window-scroll-functions' again; without
+          ;; this guard that produces an endless flush → scroll-event loop.
+          (setq face-extra--pass3-last-flushed-beg
+                (min rbeg (or face-extra--pass3-last-flushed-beg rbeg)))
+          (setq face-extra--pass3-last-flushed-end
+                (max rend (or face-extra--pass3-last-flushed-end rend))))))))))
 
 (defun face-extra--pre-command ()
   "Dispatch `:pre-command' callbacks for registered pass-3 properties.
