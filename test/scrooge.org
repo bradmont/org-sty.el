@@ -16,11 +16,17 @@ EXPECT: all full lines flush left and right; last line of each paragraph
 left-aligned (not stretched).  Interword spaces vary slightly line to line.
 #+end_quote
 
-MARLEY was dead: to begin with. There is no doubt whatever about that. The register of his burial was signed by the clergyman, the clerk, the undertaker, and the chief mourner. Scrooge signed it: and Scrooge's name was good upon 'Change, for anything he chose to put his hand to. Old Marley was as dead as a door-nail.
+MARLEY was dead: to begin with. There is no doubt whatever about that. The register of his burial was signed by the clergyman, the cl[fn:1]erk, the underta[fn:2]ker, and the chief mourner. Scrooge signed it: and Scrooge's [fn:3]name was good upon 'Change, for anything he chose to put his hand to. Old Marley was as dead as a door-nail[fn:4].
+[fn:1] And another one...
+[fn:2] that worked
+[fn:3] that too
+[fn:4] And we add a footnote here. It is missing the final newline.
+
 
 Mind! I don't mean to say that I know, of my own knowledge, what there is particularly dead about a door-nail. I might have been inclined, myself, to regard a coffin-nail as the deadest piece of ironmongery in the trade. But the wisdom of our ancestors is in the simile; and my unhallowed hands shall not disturb it, or the Country's done for. You will therefore permit me to repeat, emphatically, that Marley was as dead as a door-nail.
 
 Scrooge knew he was dead? Of course he did. How could it be otherwise? Scrooge and he were partners for I don't know how many years. Scrooge was his sole executor, his sole administrator, his sole assign, his sole residuary legatee, his sole friend, and sole mourner. And even Scrooge was not so dreadfully cut up by the sad event, but that he was an excellent man of business on the very day of the funeral, and solemnised it with an undoubted bargain.
+
 
 ** 1.2  Justify — last line must not be stretched
 
@@ -347,8 +353,6 @@ Their faithful Friend and Servant,
                                    C. D.
 December, 1843.
 
-
-
 * CONTENTS
 
 Stave I: Marley's Ghost
@@ -356,8 +360,6 @@ Stave II: The First of the Three Spirits
 Stave III: The Second of the Three Spirits
 Stave IV: The Last of the Spirits
 Stave V: The End of It
-
-
 
 * STAVE I:  MARLEY'S GHOST
 
@@ -707,7 +709,6 @@ Whether these creatures faded into mist, or mist enshrouded them, he could not t
 
 Scrooge closed the window, and examined the door by which the Ghost had entered. It was double-locked, as he had locked it with his own hands, and the bolts were undisturbed. He tried to say "Humbug!" but stopped at the first syllable. And being, from the emotion he had undergone, or the fatigues of the day, or his glimpse of the Invisible World, or the dull conversation of the Ghost, or the lateness of the hour, much in need of repose; went straight to bed, without undressing, and fell asleep upon the instant.
 
-
 * STAVE II:  THE FIRST OF THE THREE SPIRITS
 
 WHEN Scrooge awoke, it was so dark, that looking out of bed, he could scarcely distinguish the transparent window from the opaque walls of his chamber. He was endeavouring to pierce the darkness with his ferret eyes, when the chimes of a neighbouring church struck the four quarters. So he listened for the hour.
@@ -1012,7 +1013,6 @@ The Spirit dropped beneath it, so that the extinguisher covered its whole form; 
 
 He was conscious of being exhausted, and overcome by an irresistible drowsiness; and, further, of being in his own bedroom. He gave the cap a parting squeeze, in which his hand relaxed; and had barely time to reel to bed, before he sank into a heavy sleep.
 
-
 * STAVE III:  THE SECOND OF THE THREE SPIRITS
 
 AWAKING in the middle of a prodigiously tough snore, and sitting up in bed to get his thoughts together, Scrooge had no occasion to be told that the bell was again upon the stroke of One. He felt that he was restored to consciousness in the right nick of time, for the especial purpose of holding a conference with the second messenger despatched to him through Jacob Marley's intervention. But finding that he turned uncomfortably cold when he began to wonder which of his curtains this new spectre would draw back, he put them every one aside with his own hands; and lying down again, established a sharp look-out all round the bed. For he wished to challenge the Spirit on the moment of its appearance, and did not wish to be taken by surprise, and made nervous.
@@ -1310,7 +1310,6 @@ Scrooge started back, appalled. Having them shown to him in this way, he tried t
 The bell struck twelve.
 
 Scrooge looked about him for the Ghost, and saw it not. As the last stroke ceased to vibrate, he remembered the prediction of old Jacob Marley, and lifting up his eyes, beheld a solemn Phantom, draped and hooded, coming, like a mist along the ground, towards him.
-
 
 * STAVE IV:  THE LAST OF THE SPIRITS
 
@@ -1646,7 +1645,6 @@ In his agony, he caught the spectral hand. It sought to free itself, but he was 
 
 Holding up his hands in a last prayer to have his fate reversed, he saw an alteration in the Phantom's hood and dress. It shrunk, collapsed, and dwindled down into a bedpost.
 
-
 * STAVE V:  THE END OF IT
 
 YES! and the bedpost was his own. The bed was his own, the room was his own. Best and happiest of all, the Time before him was his own, to make amends in!
@@ -1787,25 +1785,17 @@ Bob trembled, and got a little nearer to the ruler. He had a momentary idea of k
 
 "A merry Christmas, Bob!" said Scrooge, with an earnestness that could not be mistaken, as he clapped him on the back. "A merrier Christmas, Bob, my good fellow, than I have given you, for many a year! I'll raise your salary, and endeavour to assist your struggling family, and we will discuss your affairs this very afternoon, over a Christmas bowl of smoking bishop, Bob! Make up the fires, and buy another coal-scuttle before you dot another i, Bob Cratchit!"
 
-
 Scrooge was better than his word. He did it all, and infinitely more; and to Tiny Tim, who did NOT die, he was a second father. He became as good a friend, as good a master, and as good a man, as the good old city knew, or any other good old city, town, or borough, in the good old world. Some people laughed to see the alteration in him, but he let them laugh, and little heeded them; for he was wise enough to know that nothing ever happened on this globe, for good, at which some people did not have their fill of laughter in the outset; and knowing that such as these would be blind anyway, he thought it quite as well that they should wrinkle up their eyes in grins, as have the malady in less attractive forms. His own heart laughed: and that was quite enough for him.
 
 He had no further intercourse with Spirits, but lived upon the Total Abstinence Principle, ever afterwards; and it was always said of him, that he knew how to keep Christmas well, if any man alive possessed the knowledge. May that be truly said of us, and all of us! And so, as Tiny Tim observed, God bless Us, Every One!
 
-
-
-
-
-
 *** END OF THE PROJECT GUTENBERG EBOOK A CHRISTMAS CAROL IN PROSE; BEING A GHOST STORY OF CHRISTMAS ***
-
 
     
 
 Updated editions will replace the previous one—the old editions will be renamed.
 
 Creating the works from print editions not protected by U.S. copyright law means that no one owns a United States copyright in these works, so the Foundation (and you!) can copy and distribute it in the United States without permission and without paying copyright royalties. Special rules, set forth in the General Terms of Use part of this license, apply to copying and distributing Project Gutenberg™ electronic works to protect the PROJECT GUTENBERG™ concept and trademark. Project Gutenberg is a registered trademark, and may not be used if you charge for an eBook, except by following the terms of the trademark license, including paying royalties for use of the Project Gutenberg trademark. If you do not charge anything for copies of this eBook, complying with the trademark license is very easy. You may use this eBook for nearly any purpose such as creation of derivative works, reports, performances and research. Project Gutenberg eBooks may be modified and printed and given away—you may do practically ANYTHING in the United States with eBooks not protected by U.S. copyright law. Redistribution is subject to the trademark license, especially commercial redistribution.
-
 
 START: FULL LICENSE
 
@@ -1903,7 +1893,4 @@ Project Gutenberg™ eBooks are often created from several printed editions, all
 Most people start at our website which has the main PG search facility: www.gutenberg.org.
 
 This website includes information about Project Gutenberg™, including how to make donations to the Project Gutenberg Literary Archive Foundation, how to help produce our new eBooks, and how to subscribe to our email newsletter to hear about new eBooks.
-
-
-
 
