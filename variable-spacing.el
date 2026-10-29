@@ -544,31 +544,60 @@ once per dispatch cycle with all collected triples; applies
 Stale spacing from a previous cycle is cleared before application.
 Only active in buffers where `variable-spacing-mode' is on.
 
-The spacer pixel height is always measured from `text-body', not from
-the face at each span position.  In the old spacing pass the ratio was
-only ever set directly on `text-body', so measurement was always from
-`text-body'.  In the new dispatch, content faces like `org-level-1'
-and `org-cite' pick up the ratio via (:inherit text-body) remap
-chains, but the spacer should still reflect the canonical body-text
-line height so that visual rhythm is consistent across all elements."
+Spacer height measurement uses two paths:
+
+  Explicit ratio — the face at BEG has `variable-spacing-ratio' set
+  directly on it (buffer-local via `face-extra-add-relative', level 1;
+  or global symbol property via `face-extra-add', level 2).  In this
+  case the spacer is measured from that face's own rendered height, so
+  a deliberately smaller face (e.g. `org-footnote' at 0.67× body size)
+  gets a spacer proportional to its actual glyph height rather than to
+  body-text height.
+
+  Inherited ratio — the ratio arrives via the (:inherit text-body)
+  remap chain (headings, inline markup, etc.).  In this case the spacer
+  is measured from `text-body' so that visual rhythm stays consistent
+  across all body-sized elements regardless of heading scale.
+
+The cache key is (ratio . measure-face) so the same ratio value at
+different face sizes produces distinct spacers."
   (when (bound-and-true-p variable-spacing-mode)
     (with-silent-modifications
       ;; Clear stale spacers for every span first.
       (dolist (span spans)
         (variable-spacing-clear (nth 0 span) (nth 1 span)))
-      ;; Apply new spacers, always measuring height from `text-body'.
-      ;; Cache the spacer per distinct ratio to avoid redundant font queries.
+      ;; Apply new spacers.  Cache keyed by (ratio . measure-face).
       (let ((cache nil))
         (dolist (span spans)
-          (let ((beg   (nth 0 span))
-                (end   (nth 1 span))
-                (ratio (nth 2 span)))
+          (let* ((beg   (nth 0 span))
+                 (end   (nth 1 span))
+                 (ratio (nth 2 span)))
             (when (and (numberp ratio) (> ratio 0))
-              (let ((spacer (or (cdr (assoc ratio cache))
-                                (let ((s (variable-spacing--spacer
-                                          ratio 'text-body)))
-                                  (push (cons ratio s) cache)
-                                  s))))
+              (let* (;; Primary face at BEG: font-lock-face takes priority
+                     ;; (set by Org regexp keywords); fall back to face.
+                     (f    (or (get-text-property beg 'font-lock-face)
+                               (get-text-property beg 'face)))
+                     (face (cond ((symbolp f) f)
+                                 ((listp f)   (cl-find-if #'symbolp f))
+                                 (t           nil)))
+                     ;; Explicit-p: ratio is set directly on this face
+                     ;; (level 1 or 2), not only through inheritance.
+                     (explicit-p
+                      (and face
+                           (or (and face-extra--local-properties
+                                    (not (eq (gethash (cons face
+                                                           'variable-spacing-ratio)
+                                                      face-extra--local-properties
+                                                      :face-extra-unset)
+                                             :face-extra-unset)))
+                               (get face 'variable-spacing-ratio))))
+                     (measure-face (if explicit-p face 'text-body))
+                     (cache-key    (cons ratio measure-face))
+                     (spacer (or (cdr (assoc cache-key cache))
+                                 (let ((s (variable-spacing--spacer
+                                           ratio measure-face)))
+                                   (push (cons cache-key s) cache)
+                                   s))))
                 (put-text-property beg end 'line-prefix spacer)
                 (put-text-property beg end 'wrap-prefix spacer)
                 (put-text-property beg end variable-spacing--prop t)))))))))
