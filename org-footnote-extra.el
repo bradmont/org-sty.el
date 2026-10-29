@@ -352,7 +352,7 @@ following `]' in the buffer acts as the label/body separator."
                                0))
                  (win        (selected-window))
                  ;; pfx has display "" → 0px; lbl has face+raise → label_px.
-                 (label-px   (car (window-text-pixel-size win pfx-beg sfx-end)))
+                 (label-px   (car (window-text-pixel-size win pfx-beg sfx-beg)))
                  (gap-px     (max 1 (round (- hang-px label-px)))))
             (put-text-property sfx-beg sfx-end
                                'display `(space :width (,gap-px)))

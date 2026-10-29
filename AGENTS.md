@@ -1629,3 +1629,74 @@ values rather than deriving everything through Emacs pixel coordinates.
 6. Page background and chrome — desktop colour, page-white overlay, border
 7. Pixel-accurate geometry — fringe-based layout, fork/override
    `olivetti-set-window`; prerequisite for print correspondence
+
+---
+
+## Bug log
+
+A permanent record of confirmed bugs, their root causes, and fixes.
+Entries are never removed — they document patterns that have caused
+regressions before and may do so again.
+
+### `org-footnote-extra`: footnote gap jitters on every keystroke while typing in a definition
+
+**Symptom:** When typing inside a named footnote definition, the
+pixel-space gap between the superscript label and the body text
+alternates between the correct wide value and near-zero on every
+keystroke.  The jitter also causes the last word of the first visual
+line to flow onto a second visual line and back on alternating
+keystrokes (the correct gap is wide enough to push the word off; the
+collapsed gap is not).
+
+**File:** `org-footnote-extra.el` —
+`org-footnote-extra--fontify-definitions`
+
+**Root cause:** The `label-px` measurement used to compute the gap width
+was `(window-text-pixel-size win pfx-beg sfx-end)`, where `sfx-end` is
+the position *after* the `]` character.  The `]` character
+(`sfx-beg..sfx-end`) carries the gap stamp `(space :width (gap-px))`
+from the previous font-lock run.  Font-lock does not clear `display`
+text properties between runs, so on every re-fontification (triggered
+by `font-lock-multiline` covering the whole definition block) the
+old gap stamp is included in `label-px`:
+
+```
+label-px  = 0 (hidden [fn:)  +  label_render_px  +  old_gap_px
+new_gap   = hang_px − label_render_px − old_gap_px
+```
+
+With the correct `old_gap_px = hang_px − label_render_px − bracket_px`
+(where `bracket_px` is the natural `]` glyph width, ~5 px):
+
+```
+new_gap = bracket_px            ← collapses to ~5 px
+```
+
+The following run finds `old_gap_px = bracket_px`, so:
+
+```
+new_gap = hang_px − label_render_px − bracket_px   ← correct again
+```
+
+This produces a perfect every-keystroke alternation between the correct
+gap and a near-zero gap.
+
+**Fix:** Change the end bound of the `window-text-pixel-size` call from
+`sfx-end` to `sfx-beg`, excluding `]` from the measurement.  The range
+then covers only the hidden `[fn:` prefix (0 px) and the raised label
+glyph, which is stable across re-fontifications regardless of what
+`display` property `]` carries.
+
+```elisp
+;; Before (buggy — includes old gap stamp on `]' in label-px):
+(label-px (car (window-text-pixel-size win pfx-beg sfx-end)))
+;; After (fixed — excludes `]' entirely):
+(label-px (car (window-text-pixel-size win pfx-beg sfx-beg)))
+```
+
+**General pattern:** Any font-lock matcher that (a) writes a
+`display` property derived from a `window-text-pixel-size` measurement
+and (b) measures a range that includes the character it is about to
+stamp will produce this alternating-collapse bug.  The fix is always
+to exclude the target character from the measurement range, or to
+temporarily remove the old stamp before measuring.
