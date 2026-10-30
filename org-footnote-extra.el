@@ -460,11 +460,12 @@ avoiding the face duplication that caused hanging-wrap double-application.")
   (when (bound-and-true-p variable-spacing-mode)
     (setq org-footnote-extra--remap-cookie
           (face-remap-add-relative 'org-footnote :inherit 'text-body)))
-  ;; 4. Single-space definition lines (ratio 1.0) and justify them.
+  ;; 4. Justify definition lines.  Spacing ratio is intentionally not
+  ;;    set here — it is the style config's responsibility (e.g. via
+  ;;    :variable-spacing-ratio in :faces) so that the config can
+  ;;    suppress or override spacing without fighting a hard-coded default.
   (setq org-footnote-extra--face-extra-cookies
         (list (face-extra-add-relative 'org-footnote
-                                       'variable-spacing-ratio 1.0)
-              (face-extra-add-relative 'org-footnote
                                        'text-align 'justify)))
   (font-lock-flush))
 

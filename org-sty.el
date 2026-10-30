@@ -174,7 +174,7 @@ Cancelled and replaced on each new keystroke that triggers deferral.")
 
 (defconst org-sty--known-eval-modes
   '(variable-spacing-mode org-title-fold-mode org-block-appear-mode
-    org-cite-appear-mode org-num-mode)
+    org-cite-appear-mode org-footnote-extra-mode org-num-mode)
   "Minor modes that `:eval' commonly activates; tracked for teardown.")
 
 ;;; Apply helpers

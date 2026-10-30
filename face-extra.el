@@ -948,27 +948,46 @@ during that burst."
 (defun face-extra--paragraph-bounds (beg end)
   "Return a (BEG . END) cons expanded to paragraph boundaries.
 
-A paragraph boundary is a blank line (a line containing only whitespace)
-or the buffer start/end.  Expansion is done with `re-search-backward' and
-`re-search-forward' — no `vertical-motion' calls, so safe to call during
-active editing.
+A paragraph boundary is a blank line (a line containing only whitespace),
+an Org keyword line (#+begin_…, #+end_…, or any #+KEYWORD:), a footnote
+definition label (\\[fn:… at column 0), a heading (one or more leading
+stars followed by a space), or the buffer start/end.
+
+Using only blank lines as boundaries caused the flush region to absorb
+adjacent Org structural elements (quote blocks, footnote definitions) when
+there is no blank line separating them from the body paragraph.  Pass-3
+would then walk over those elements and leak justify/spacing stamps onto
+faces (e.g. `org-quote') that carry explicit suppressors — suppressors that
+only fire when the face appears in the same span as the body text, not when
+the body text's flush region is simply expanded to include unrelated lines.
+
+Expansion is done with `re-search-backward'/`re-search-forward' and
+`case-fold-search' t (to match both #+BEGIN_ and #+begin_) — no
+`vertical-motion' calls, so safe to call during active editing.
 
 The returned BEG is the start of the first line of the paragraph that
 contains the original BEG; the returned END is the end of the last line
 of the paragraph that contains the original END."
-  (cons (save-excursion
-          (goto-char beg)
-          (if (re-search-backward "^[ \t]*$" (point-min) t)
-              ;; Found a blank line — the paragraph starts on the next line.
-              (line-beginning-position 2)
-            (point-min)))
-        (save-excursion
-          (goto-char end)
-          (if (re-search-forward "^[ \t]*$" (point-max) t)
-              ;; Found a blank line — the paragraph ends at the end of the
-              ;; previous line (the last non-blank line).
-              (match-beginning 0)
-            (point-max)))))
+  (let ((boundary-re
+         (rx bol
+             (or (seq (* (any " \t")) eol)   ; blank line
+                 (seq (* (any " \t")) "#+" ) ; any Org keyword (begin_, end_, etc.)
+                 "[fn:"                       ; footnote definition label
+                 (seq (+ "*") " ")))))        ; heading (one or more stars + space)
+    (cons (save-excursion
+            (goto-char beg)
+            (let ((case-fold-search t))
+              (if (re-search-backward boundary-re (point-min) t)
+                  ;; Found a boundary — the paragraph starts on the next line.
+                  (line-beginning-position 2)
+                (point-min))))
+          (save-excursion
+            (goto-char end)
+            (let ((case-fold-search t))
+              (if (re-search-forward boundary-re (point-max) t)
+                  ;; Found a boundary — the paragraph ends just before it.
+                  (match-beginning 0)
+                (point-max)))))))
 
 (defun face-extra--dispatch-pass3 (beg end)
   "jit-lock-register pass-3 dispatch: one visual-line walk, not spanwise.

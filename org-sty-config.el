@@ -23,6 +23,7 @@
 
 (require 'page-metrics)
 (require 'org-footnote-extra)
+(require 'variable-spacing)
 
 ;; Tracks the currently installed inline-quote font-lock keyword so that
 ;; re-applying the style (e.g. after a theme change) can remove the old
@@ -83,17 +84,8 @@
          (org-verbatim        . (:inherit (shadow fixed-pitch)))
          ;; Prose blocks: italic.  Background is theme-relative so it is
          ;; set via `org-sty-remap' in :eval below.
-         ;;
-         ;; :variable-spacing-ratio 0 suppresses any ratio that would be
-         ;; picked up through face inheritance (e.g. org-block/org-quote/
-         ;; org-verse each receive a (:inherit text-body) remap in WP
-         ;; buffers, which would carry the text-body ratio through).  Using
-         ;; 0 as the explicit suppressor value stops the resolver at level 1
-         ;; (buffer-local face-extra--local-properties) before it reaches
-         ;; the inherited chain.
-         (org-quote           . (:slant italic :variable-spacing-ratio 0))
-         (org-verse           . (:slant italic :variable-spacing-ratio 0))
-         (org-block           . (:variable-spacing-ratio 0)))
+         (org-quote           . (:slant italic))
+         (org-verse           . (:slant italic)))
         :eval
         ((org-sty-remap
           'org-block
@@ -139,11 +131,22 @@
                    ;; margins for the in-page left/right gutter.
                    (setq-local olivetti-style 'fancy)
                    ;; ── Mode enables ────────────────────────────────────────
-                   (put 'text-body 'variable-spacing-ratio 1.6)
                    (hl-line-mode 0)
                    ;(lsp-ltex-plus-mode 1)
                    (org-block-appear-mode 1)
                    (org-cite-appear-mode 1)
+                   (org-footnote-extra-mode 1)
+                   ;; Suppress inherited text-body ratio on block/quote faces
+                   ;; BEFORE variable-spacing-mode enables.  variable-spacing-mode
+                   ;; installs (:inherit text-body) remaps and may trigger a
+                   ;; fontification cycle; if the suppressors arrive later (via
+                   ;; :faces) the cache is built without them and spacers are
+                   ;; stamped on these faces before the suppressor can block it.
+                   ;; Those stale spacers are never cleared by the span-only clear
+                   ;; loop in variable-spacing--apply-ratio.
+                   (org-sty-remap 'org-quote :variable-spacing-ratio 0)
+                   (org-sty-remap 'org-verse :variable-spacing-ratio 0)
+                   (org-sty-remap 'org-block :variable-spacing-ratio 0)
                    (variable-spacing-mode 1)
                    (horizontal-layout-mode 1)
                    ;; ── Pass 3 test: midpoint marker ─────────────────────────
@@ -190,7 +193,25 @@
                    (setq-local org-footnote-section "*paragraph*")
                    (setq-local org-footnote-auto-adjust 'renumber))
                )
-       (wp-faces '(;; :text-align left on headings suppresses justify/center/right
+       (wp-faces '(;; ── Variable spacing ────────────────────────────────────
+                   ;; text-body ratio and block suppressors live here, not in
+                   ;; org-sty-default :faces, because the shallow plist merge
+                   ;; in org-sty--merge replaces :faces wholesale — anything
+                   ;; in org-sty-default :faces is clobbered by the WP :faces.
+                   ;; Setting the ratio here also makes it buffer-local (via
+                   ;; face-extra-add-relative) rather than global (put), so it
+                   ;; is cleaned up correctly on re-apply or mode disable.
+                   (text-body           . (:variable-spacing-ratio 1.6))
+                   ;; Slant for quote/verse.  Each wp-faces entry must carry
+                   ;; ALL standard-face attrs for that face because the shallow
+                   ;; :faces merge means this entry replaces the org-sty-default
+                   ;; entry entirely.  The :variable-spacing-ratio 0 suppressor
+                   ;; is installed in :eval (before variable-spacing-mode) to
+                   ;; avoid a premature-cache timing bug; it is not repeated here.
+                   (org-quote           . (:slant italic))
+                   (org-verse           . (:slant italic))
+                   ;; ── Text alignment ──────────────────────────────────────
+                   ;; :text-align left on headings suppresses justify/center/right
                    ;; inherited from text-body via the face-extra resolver.
                    ;; Must live here (after :eval) not in org-sty-default :faces,
                    ;; because horizontal-layout.el — which registers 'text-align
@@ -215,7 +236,9 @@
                    ;; org-footnote-extra-mode; this height sits on top of
                    ;; it as a relative multiplier.  :underline nil suppresses
                    ;; the link-style underline org-footnote carries by default.
-                   (org-footnote        . (:height 0.67 :underline nil))
+                   (org-footnote        . (:height 0.67
+                                           :variable-spacing-ratio 0
+                                           :underline nil))
                    ;; Center the document title.  Declared here (in :faces)
                    ;; rather than via face-extra-add-relative in :eval so
                    ;; that it runs in the :faces phase — after :eval — and
@@ -228,7 +251,7 @@
                    ;; when horizontal-layout-mode is enabled in :eval above.
                    ;; Placing this in org-sty-default :faces causes
                    ;; org-sty-remap to silently drop the key.
-                   (org-quote . (:horizontal-layout-margin-left 4))
+                   (org-quote . (:slant italic :horizontal-layout-margin-left 4))
                    (org-verse . (:horizontal-layout-margin-left 4))
                    ;; Footnote definition indent: all continuation lines get a
                    ;; full left margin of 4 canonical char-widths.  The label
