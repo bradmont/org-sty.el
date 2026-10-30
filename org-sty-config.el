@@ -148,6 +148,14 @@
                    (org-sty-remap 'org-verse :variable-spacing-ratio 0)
                    (org-sty-remap 'org-block :variable-spacing-ratio 0)
                    (variable-spacing-mode 1)
+
+                   ;; superscripts & subscripts are set relative to 'default rather
+                   ;; than 'text-body; make them 0.8x 'text-body
+                   (setq-local org-script-display
+                               '(((raise -0.3) (height 1.6))
+                                 ((raise 0.3) (height 1.6))
+                                 ((raise -0.5)) ((raise 0.5))))
+                   
                    (horizontal-layout-mode 1)
                    ;; ── Pass 3 test: midpoint marker ─────────────────────────
                    ;; text-align-mode wires face-extra--dispatch-pass3 via
