@@ -259,8 +259,10 @@
                    ;; when horizontal-layout-mode is enabled in :eval above.
                    ;; Placing this in org-sty-default :faces causes
                    ;; org-sty-remap to silently drop the key.
-                   (org-quote . (:slant italic :horizontal-layout-margin-left 4))
-                   (org-verse . (:horizontal-layout-margin-left 4))
+                   (org-quote . (:slant italic :horizontal-layout-margin-left 4 ;; :horizontal-layout-margin-right 4
+                                        ))
+                   (org-verse . (:horizontal-layout-margin-left 4 ;; :horizontal-layout-margin-right 4
+                                                                ))
                    ;; Footnote definition indent: all continuation lines get a
                    ;; full left margin of 4 canonical char-widths.  The label
                    ;; line suppresses line-prefix via

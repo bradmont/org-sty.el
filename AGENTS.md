@@ -1756,3 +1756,74 @@ Evaluate `(mapcar #'car org-sty--face-remap-cookies)` immediately after
 cause the in-memory alist to match the bytecode, not the edited `.el`.
 Check with `(seq-take (plist-get (cdr (car org-sty-alist)) :faces) 3)` to
 confirm the live alist reflects the current source.
+
+---
+
+### Bug: `frame-char-width` used as a proxy for face character width in pixel calculations
+
+**Symptoms (recurring pattern):** Any calculation that multiplies a
+margin or spacing value (in canonical character widths) by
+`(frame-char-width)` to obtain pixels produces wrong results in WP
+buffers.  Manifested as:
+- Right-margin step 1 writing `wrap-prefix: (space :width 36)` instead
+  of `4` at visual-continuation-line BOLs — causing ~45% indentation on
+  wrapped lines in `org-quote` blocks.
+- `variable-spacing--spacer` returning wrong spacer heights for
+  off-screen content (the `frame-char-height` analogue of the same bug;
+  now fixed separately).
+- `text-align--stamp` computing incorrect `zone` offsets for center/right
+  alignment when margins are expressed as face-character-width multiples.
+
+**Root cause:** `(frame-char-width)` returns the pixel width of a
+character in the **frame's default font** — the global default face, not
+the buffer-local remapped one.  In WP buffers, `variable-spacing-mode`
+installs a buffer-local remap on `default` to a small floor face
+(e.g. Iosevka Aile 6pt, ~4–5 px/char).  Body text and quote-block text
+use `text-body` → Times New Roman 12pt (~8–9 px/char).  `frame-char-width`
+returns the floor font's width, which is roughly half the body font's width.
+
+When a `(space :width N)` display spec is evaluated by the display engine,
+`N` (if an integer) means N times the width of a space character **in the
+face active at that buffer position** — not N times `frame-char-width`.
+So the same integer `N = 4` produces ~36 px in org-quote context (4 × 9 px)
+but only ~20 px from `frame-char-width × 4` (4 × 5 px).  The two values
+are incommensurable, and mixing them corrupts any arithmetic that tries to
+compute slack, offsets, or zone widths.
+
+**General rule:** Never use `frame-char-width` (or `frame-char-height`) as
+a pixel-conversion factor for a value that will be stored in or compared
+against a `(space :width N)` display spec.  The two live in different unit
+systems.
+
+**Correct approaches by use case:**
+
+- **Storing a margin/prefix as a display spec** — use the raw configured
+  value (integer number of character widths) directly as `N` in
+  `(space :width N)`.  Let the display engine convert using the face's own
+  font at render time.  This is what pass 2 (`--apply-margin-right-pass2`)
+  does correctly.
+
+- **Pixel arithmetic for alignment offsets** (`:align-to (Npx)`) — resolve
+  actual pixel widths via `window-text-pixel-size` on a live buffer position
+  with the correct face in context.  `frame-char-width × N` is wrong; use
+  the measurement.
+
+- **Justify zone/slack calculation** — do not subtract margins from the
+  zone using `frame-char-width × N`.  Instead, ensure the measurement
+  (`window-text-pixel-size`) includes the margin display specs (via the
+  line-prefix/wrap-prefix and after-string overlay) so that margins cancel
+  naturally: `slack = avail − text-px` where `text-px` already includes
+  both left and right margin visual widths in the face's own units.
+
+- **Detecting whether a line is "full"** (overflow guard) — measure in
+  pixels via `window-text-pixel-size`; never compare character-width values
+  to pixel values without a face-aware conversion.
+
+**Fix applied (right-margin pass 3):** Removed `(* (frame-char-width) ...)`
+from step 1 of `--apply-margin-right-pass3`, which restores `wrap-prefix` to
+left-only at the visual-line BOL.  The raw configured value is used directly,
+matching the unit pass 2 stored.  Additionally, the `has-align` suppression
+of the right-margin after-string was narrowed to center/right only: for
+justify, the after-string must be present during `window-text-pixel-size`
+measurement so `text-px = left + body + right` (all in face-character-width
+units), giving `slack = underfill` with no unit-system mixing.

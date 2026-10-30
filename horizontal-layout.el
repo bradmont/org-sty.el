@@ -503,14 +503,19 @@ Only runs when `horizontal-layout-mode' is active."
                    ;; subtracts right again, collapsing the margin to 0.
                    (f        (or (get-text-property lbeg 'font-lock-face)
                                  (get-text-property lbeg 'face)))
-                   (face     (cond ((symbolp f) f)
-                                   ((listp f)   (cl-find-if #'symbolp f))
+                   ;; Resolve margin-left across ALL faces at lbeg, not just
+                   ;; the first symbol.  When lbeg is in a multi-face span
+                   ;; (e.g. `(org-link-id org-quote)'), cl-find-if returns
+                   ;; org-link-id, which has no margin configured; cl-some
+                   ;; tries each face in turn and finds the value on org-quote.
+                   (faces    (cond ((symbolp f) (list f))
+                                   ((listp f)   (cl-remove-if-not #'symbolp f))
                                    (t           nil)))
-                   (left     (* (frame-char-width)
-                                (or (and face
-                                         (face-extra--resolve-property
-                                          face 'horizontal-layout-margin-left))
-                                    0))))
+                   (left     (or (cl-some (lambda (fa)
+                                            (face-extra--resolve-property
+                                             fa 'horizontal-layout-margin-left))
+                                          faces)
+                                 0)))
               ;; Step 1: restore the firing prefix to left-only.
               ;; line-prefix fires at logical BOL; wrap-prefix fires at
               ;; continuation visual-line starts.  Restore whichever
@@ -535,15 +540,27 @@ Only runs when `horizontal-layout-mode' is active."
                                      (char-after trail-pos)))
                      (f         (or (get-text-property lbeg 'font-lock-face)
                                     (get-text-property lbeg 'face)))
-                     (face      (cond ((symbolp f) f)
-                                      ((listp f)   (cl-find-if #'symbolp f))
+                     (faces2    (cond ((symbolp f) (list f))
+                                      ((listp f)   (cl-remove-if-not #'symbolp f))
                                       (t           nil)))
-                     (has-align (and face
-                                     (face-extra--resolve-property
-                                      face 'text-align))))
+                     (has-align (cl-some (lambda (fa)
+                                           (face-extra--resolve-property
+                                            fa 'text-align))
+                                         faces2)))
                 (unless (or (null trail-ch)
                             (eq trail-ch ?\n)
-                            has-align)
+                            ;; For center/right, alignment computes an
+                            ;; explicit pixel offset that already accounts
+                            ;; for the right margin; the after-string would
+                            ;; skew that measurement and is suppressed.
+                            ;; For justify, the after-string MUST be present
+                            ;; during window-text-pixel-size measurement so
+                            ;; that text-px = left + body + right and
+                            ;; slack = avail - text-px = natural underfill.
+                            ;; Without it, slack ≈ right_visual_px and
+                            ;; justify distributes the right margin into
+                            ;; spaces, erasing the right gutter.
+                            (memq has-align '(center right left)))
                   ;; Add a right-margin space via an overlay after-string.
                   ;; An after-string's display property is processed as a
                   ;; top-level display element (not nested), so
@@ -565,16 +582,68 @@ Only runs when `horizontal-layout-mode' is active."
                     (overlay-put ov horizontal-layout--right-prop t)))))))))))
 
 (defun horizontal-layout--pre-clear-right-margin (beg end)
-  "Remove right-margin after-string overlays in BEG..END.
-Called as a `:pre-clear' callback before `face-extra--dispatch-pass3'
-starts its `vertical-motion' walk.  Stale right-margin overlays from a
-previous pass-3 run add visual width via their after-strings, causing
-`vertical-motion' to compute wrong visual-line boundaries (lend too
-early, potentially mid-word).  Clearing them here ensures the walk sees
-the clean display state."
-  (dolist (ov (overlays-in beg end))
-    (when (overlay-get ov horizontal-layout--right-prop)
-      (delete-overlay ov))))
+  "Remove right-margin overlays and restore `line-prefix' to left+right.
+Called as `:pre-clear' before the pass-3 `vertical-motion' walk.
+
+After pass-3 `:apply' has run, `line-prefix' at each visual-line BOL
+carries only the left-margin width (step 1 of `:apply' restores it from
+`left+right' to `left'), with the right margin held in an after-string
+overlay.  If `:pre-clear' only deletes the overlay and does not restore
+`line-prefix', the walk runs with `avail - left' word-wrap geometry
+instead of `avail - left - right', producing wrong `lend' values for
+every visual line — wrong span list, wrong slack for justify, etc.
+
+Two-pass approach to avoid geometry feedback:
+  Pass 1: record `(overlay-start)' positions and delete all overlays.
+          After this pass, no after-strings affect `vertical-motion'.
+  Pass 2: for each recorded position, use `vertical-motion' 0 to find
+          the visual BOL (`lbeg'), then resolve `left' and `right'
+          directly from the face cache (same raw character-width unit
+          pass 2 used) and restore `line-prefix'/`wrap-prefix' at `lbeg'
+          to `(space :width left+right :height H)'.
+
+On the first run no overlays exist, so pass 1 collects nothing and
+pass 2 is a no-op — correctly leaving `line-prefix' as pass 2 set it."
+  ;; Pass 1: collect trail positions and delete all right-margin overlays.
+  (let ((trail-positions nil))
+    (dolist (ov (overlays-in beg end))
+      (when (overlay-get ov horizontal-layout--right-prop)
+        (push (overlay-start ov) trail-positions)
+        (delete-overlay ov)))
+    ;; Pass 2: restore line-prefix to left+right at each visual BOL.
+    ;; vertical-motion is safe now — all after-strings are gone.
+    (when trail-positions
+      (with-silent-modifications
+        (dolist (trail-pos trail-positions)
+          (save-excursion
+            (goto-char trail-pos)
+            (let ((fontification-functions nil))
+              (vertical-motion 0))
+            (let* ((lbeg       (point))
+                   (logical-p  (= lbeg (line-beginning-position)))
+                   (pfx-prop   (if logical-p 'line-prefix 'wrap-prefix))
+                   (existing   (get-text-property lbeg pfx-prop))
+                   (height     (and (consp existing)
+                                    (eq (car existing) 'space)
+                                    (plist-get (cdr existing) :height)))
+                   ;; Resolve left and right from the face cache — same
+                   ;; raw character-width values pass 2 combined.
+                   (f          (or (get-text-property lbeg 'font-lock-face)
+                                   (get-text-property lbeg 'face)))
+                   (face       (cond ((symbolp f) f)
+                                     ((listp f)   (cl-find-if #'symbolp f))
+                                     (t           nil)))
+                   (left       (or (and face (face-extra--resolve-property
+                                             face 'horizontal-layout-margin-left))
+                                   0))
+                   (right      (or (and face (face-extra--resolve-property
+                                             face 'horizontal-layout-margin-right))
+                                   0))
+                   (combined   (+ left right))
+                   (new-pfx    (if height
+                                   `(space :width ,combined :height ,height)
+                                 `(space :width ,combined))))
+              (put-text-property lbeg (1+ lbeg) pfx-prop new-pfx))))))))
 
 (defun horizontal-layout--clear-margin-right-pass3 (_cookie)
   "No-op `:clear' callback for `horizontal-layout-margin-right' pass 3.
@@ -873,24 +942,41 @@ is explicitly neutralised before measuring to keep measurements clean."
       (let* (;; Margin values for the face at lbeg.
              (f        (or (get-text-property lbeg 'font-lock-face)
                            (get-text-property lbeg 'face)))
-             (face     (cond ((symbolp f) f)
-                             ((listp f)   (cl-find-if #'symbolp f))
+             ;; Use cl-some across ALL faces so multi-face positions like
+             ;; (org-link-id org-quote) correctly resolve the margin values
+             ;; from org-quote rather than missing them on org-link-id.
+             (faces    (cond ((symbolp f) (list f))
+                             ((listp f)   (cl-remove-if-not #'symbolp f))
                              (t           nil)))
              (char-w   (frame-char-width))
-             (left-px  (* char-w (or (and face (face-extra--resolve-property
-                                               face 'horizontal-layout-margin-left))
+             (left-px  (* char-w (or (cl-some (lambda (fa)
+                                                (face-extra--resolve-property
+                                                 fa 'horizontal-layout-margin-left))
+                                              faces)
                                      0)))
-             (right-px (* char-w (or (and face (face-extra--resolve-property
-                                               face 'horizontal-layout-margin-right))
+             (right-px (* char-w (or (cl-some (lambda (fa)
+                                                (face-extra--resolve-property
+                                                 fa 'horizontal-layout-margin-right))
+                                              faces)
                                      0)))
-             ;; For justify, word-wrap already constrains body text to
-             ;; avail - margin via line-prefix/wrap-prefix; zone must be
-             ;; `avail' so slack = avail - text-px is the leftover space
-             ;; relative to the full window (≈ margin_px, always positive).
-             ;; Using zone = avail - margin gives slack ≈ 0 because
-             ;; body_px ≈ avail - margin — nothing to distribute.
-             ;; For center/right the exact zone is needed to compute the
-             ;; correct alignment offset.
+             ;; Zone width for alignment/justification.
+             ;; center, right: zone = avail - left - right; alignment offset
+             ;;   computed relative to this zone.
+             ;; justify: zone = avail.
+             ;;   Reason: step 1 of --apply-margin-right-pass3 restores
+             ;;   line-prefix/wrap-prefix at lbeg to left-only, AND step 2
+             ;;   stamps the after-string (for justify only — see comment
+             ;;   there).  So window-text-pixel-size measures:
+             ;;     text-px = left_visual_px + body + right_visual_px
+             ;;   All three terms are in the same face-character-width units
+             ;;   (org-quote font), unlike frame-char-width which would give
+             ;;   a different pixel value.
+             ;;     slack = avail - text-px = underfill only          ✓
+             ;;   Using zone = avail - right-px (frame-char-width based)
+             ;;   is wrong because frame-char-width is the floor/default
+             ;;   font width, not the face's own character width; the two
+             ;;   differ in WP buffers where variable-spacing remaps default
+             ;;   to a small floor face.
              (zone     (if (eq value 'justify)
                            avail
                          (- avail left-px right-px)))
@@ -1049,8 +1135,8 @@ Fires only when point is at visual-line beginning position."
         (let* ((lbeg (point))
                (lend (save-excursion (vertical-motion 1)
                                      (min (point-max) (point))))
-               ;; Debug echoes justify metrics; use zone = avail so slack
-               ;; matches what text-align--stamp computes for justify.
+               ;; zone = avail for justify: right margin is baked into
+               ;; text-px via the after-string overlay.
                (zone     avail)
                (text-px  (car (window-text-pixel-size win lbeg lend (* 2 avail))))
                (slack    (- zone text-px)))
