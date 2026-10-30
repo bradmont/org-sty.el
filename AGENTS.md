@@ -1700,3 +1700,59 @@ and (b) measures a range that includes the character it is about to
 stamp will produce this alternating-collapse bug.  The fix is always
 to exclude the target character from the measurement range, or to
 temporarily remove the old stamp before measuring.
+
+---
+
+### Bug: org-quote/verse/block and org-footnote spurious spacing and missing italics (fixed `8c4451a`)
+
+**Symptoms:** In WP Org buffers, `org-quote`, `org-verse`, `org-block`,
+and `org-footnote` text received unwanted `line-prefix` height stamps from
+`variable-spacing`.  `org-quote`/`org-verse` text was not italic despite
+`:slant italic` being declared in the style.
+
+**Root cause 1 — Stale `.elc` shadowing `.el`.**  A compiled bytecode
+file was newer than the source, so every `load-file` / `require` loaded
+the old committed bytecode.  All config changes were silently ignored.
+Symptom: `org-sty--face-remap-cookies` matched exactly the committed
+`wp-faces` (15 entries) regardless of what the source said.  Fix: delete
+`.elc` files; never commit compiled bytecode for actively edited config.
+
+**Root cause 2 — `org-sty-default :faces` clobbered by shallow merge.**
+`org-sty--merge` replaces the `:faces` key wholesale with the override
+style's `:faces`.  Suppressors and `:slant italic` entries placed in
+`org-sty-default :faces` were silently dropped whenever a WP tag style
+was active.  Fix: move all WP-specific face attributes (text-body ratio,
+org-quote/verse slant, suppressors) into `wp-faces` and `wp-eval` where
+they survive the merge.
+
+**Root cause 3 — Suppressor timing: `:faces` runs after first
+fontification.**  `(variable-spacing-mode 1)` in `:eval` may trigger a
+jit-lock cycle before `:faces` runs.  The face-extra cache is built at
+that moment without the `:variable-spacing-ratio 0` suppressors for
+`org-quote`, `org-verse`, and `org-block`.  `variable-spacing--apply-ratio`
+stamps spacers at that point.  Its span-only clear loop never touches
+positions in the suppressed set, so those stamps persist even after `:faces`
+installs the suppressors.  Fix: install suppressors via `org-sty-remap`
+in `:eval` **before** `(variable-spacing-mode 1)`.
+
+**Root cause 4 — `org-footnote-extra-mode` hard-coding ratio 1.0.**
+`org-footnote-extra--install-styling` called
+`(face-extra-add-relative 'org-footnote 'variable-spacing-ratio 1.0)`.
+If the mode ran after `org-sty-apply` (e.g. later in `org-mode-hook`),
+it silently overwrote the `:faces` suppressor (ratio 0) that had just
+been installed.  Fix: remove the ratio from `--install-styling` entirely.
+Spacing policy belongs in the style config (`wp-faces`), not in the mode.
+The `:variable-spacing-ratio 0` suppressor in `wp-faces` is still required
+because `org-footnote-extra-mode` installs `(:inherit text-body)` on
+`org-footnote`, which would otherwise let ratio 1.6 flow through from
+`text-body`.  Also added `org-footnote-extra-mode 1` to `wp-eval` and
+`org-footnote-extra-mode` to `org-sty--known-eval-modes` for clean teardown.
+
+**Diagnostic pattern — when cookies are missing from `org-sty--face-remap-cookies`:**
+Evaluate `(mapcar #'car org-sty--face-remap-cookies)` immediately after
+`org-sty-apply`.  The list should contain one entry per `:faces` and `:eval`
+`org-sty-remap` call.  If entries are missing, cross-reference against the
+*committed* `org-sty-alist` (not the source file) — a stale `.elc` will
+cause the in-memory alist to match the bytecode, not the edited `.el`.
+Check with `(seq-take (plist-get (cdr (car org-sty-alist)) :faces) 3)` to
+confirm the live alist reflects the current source.
