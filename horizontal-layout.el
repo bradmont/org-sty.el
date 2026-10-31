@@ -1308,7 +1308,7 @@ Removes itself, then looks up the just-typed character's pixel width
                                w)))
                (new-natural (+ text-align--line-natural-px char-px)))
           (if (> new-natural text-align--line-zone-px)
-              ;; Overflow: invalidate ring, clear next line, schedule reflow.
+              ;; Overflow: invalidate ring, clear next line, call reflow.
               (progn
                 (setq text-align--line-natural-px  nil
                       text-align--space-ring        nil
@@ -1319,8 +1319,6 @@ Removes itself, then looks up the just-typed character's pixel width
                                     (vertical-motion 1))
                                   (point))))
                   (text-align--justify-clear face-extra--vline-end next-end))
-                ;; Call reflow directly — we are already in post-command-hook,
-                ;; so adding it as another hook would defer it one cycle.
                 (text-align--post-command-reflow))
             ;; Fits: update natural-px and walk ring to reclaim char-px of slack.
             (setq text-align--line-natural-px new-natural)
@@ -1354,7 +1352,7 @@ For self-inserting commands:
                            (= text-align--ring-lbeg vbeg)))
            ;; When ring is warm, look up the about-to-be-typed character in
            ;; the cache.  On a hit we can detect overflow before insertion.
-           ;; On a miss use ?W width if cached, else 1.5× space-width as a
+           ;; On a miss use ?W width if cached, else 1.5x space-width as a
            ;; conservative bound; the ring-walk will do the exact check in
            ;; post-command regardless.
            (char-px  (and ring-warm
@@ -1372,8 +1370,6 @@ For self-inserting commands:
                           (> (+ text-align--line-natural-px char-px)
                              text-align--line-zone-px))))
       (cond
-       ;; Cache hit + overflow: clear next line before insertion so the
-       ;; wrapping word doesn't land on expanded spaces.  Schedule reflow.
        (overflow
         (let ((next-end (save-excursion
                           (goto-char vend)
@@ -1382,10 +1378,6 @@ For self-inserting commands:
                           (point))))
           (text-align--justify-clear vend next-end))
         (add-hook 'post-command-hook #'text-align--post-command-reflow nil t))
-       ;; Cache hit, no overflow, or cache miss with warm ring.
-       ;; Space character: the ring doesn't include the new gap, so
-       ;; invalidate and do a full reflow to rebuild with the new space count.
-       ;; Non-space: ring-walk redistributes slack in post-command.
        (ring-warm
         (if (eq last-command-event ?\s)
             (progn
@@ -1394,13 +1386,11 @@ For self-inserting commands:
                     text-align--line-natural-px  nil)
               (add-hook 'post-command-hook #'text-align--post-command-reflow nil t))
           (add-hook 'post-command-hook #'text-align--post-command-ring-walk nil t)))
-       ;; Ring stale: avg-based overflow fallback until flush rebuilds ring.
-       ;; 1.5× avg approximates max char width; replaced by ring once warm.
        ((and text-align--line-natural-px text-align--line-zone-px)
-        (text-align--justify-clear vbeg vend)
         (let* ((avg-char-px (/ text-align--line-natural-px
                                (max 1.0 (- (float vend) vbeg 1))))
                (slack (- text-align--line-zone-px text-align--line-natural-px)))
+          (text-align--justify-clear vbeg vend)
           (when (< slack (* 1.5 avg-char-px))
             (let ((next-end (save-excursion
                               (goto-char vend)
@@ -1408,8 +1398,13 @@ For self-inserting commands:
                                 (vertical-motion 1))
                               (point))))
               (text-align--justify-clear vend next-end))
+            (message "jd reflow-caller: pre-command stale overflow")
             (add-hook 'post-command-hook
-                      #'text-align--post-command-reflow nil t))))))))
+                      #'text-align--post-command-reflow nil t))))
+       (t
+        (message "jd pre: no ring data ring=%s natural=%s"
+                 (if text-align--space-ring "set" "nil")
+                 text-align--line-natural-px))))))
 
 
 ;;;; ================================================================

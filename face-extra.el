@@ -274,6 +274,7 @@ When nil, geometry is settled and the walk may proceed.")
 
 (defvar face-extra--typing-commands
   '(self-insert-command
+    org-self-insert-command       ; Org mode's self-insert wrapper
     delete-backward-char          ; backspace in most modes
     org-delete-backward-char      ; backspace in Org mode
     delete-forward-char           ; C-d / forward delete
@@ -881,8 +882,16 @@ dispatch keeps the buffer correctly stamped until focus returns."
             ;; because `window-text-pixel-size' needs a live window.
             nil
           ;; Buffer is visible: run the flush normally.
-          (let ((b face-extra--pass3-flush-beg)
-                (e face-extra--pass3-flush-end))
+          ;; Refine the accumulated region to paragraph boundaries here,
+          ;; at idle time, rather than on every keystroke.  This clips the
+          ;; region at Org structural boundaries (headings, #+, [fn:) so
+          ;; the walk never bleeds into adjacent structural elements —
+          ;; without paying the regex cost on the hot keystroke path.
+          (let* ((raw-b face-extra--pass3-flush-beg)
+                 (raw-e face-extra--pass3-flush-end)
+                 (para  (face-extra--paragraph-bounds raw-b raw-e))
+                 (b     (car para))
+                 (e     (cdr para)))
             (setq face-extra--pass3-flush-beg nil
                   face-extra--pass3-flush-end nil)
             (face-extra--dispatch-pass3 b e)
@@ -1022,7 +1031,8 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
     (when (and (or face-extra--local-properties
                    (face-extra--active-backend))
                (gethash 3 face-extra--pass-order))
-      (let ((face-extra--pass3-geometry-unsettled t))
+      (let ((face-extra--pass3-geometry-unsettled t)
+            (pass3-narrowed nil))
     ;; Expand beg/end by any region pass-2 covered in this jit-lock cycle.
     ;; Pass-2's :after advice receives font-lock's extended region (e.g.
     ;; the full org-quote block); jit-lock only passes us the smaller
@@ -1069,22 +1079,27 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
     ;; only arises when buffer content is being modified; for read-only
     ;; events (scroll, focus change) running pass 3 synchronously is safe
     ;; and eliminates the visible snap/jitter after scrolling.
+    ;; Consume force-full unconditionally so it is never left stuck at t.
+    ;; post-command-reflow calls dispatch-pass3 directly with this-command=nil,
+    ;; which bypasses the when-typing-commands block below; without this early
+    ;; consume the flag would never be reset and every subsequent jit-lock call
+    ;; would see force=t permanently.
+    (let ((force-full (prog1 face-extra--pass3-force-full
+                        (setq face-extra--pass3-force-full nil))))
+    (message "jd dispatch3: cmd=%s idle=%s force=%s beg=%d end=%d pt=%d"
+             this-command (current-idle-time) force-full
+             beg end (point))
     (when (and (null (current-idle-time))
                (memq this-command face-extra--typing-commands))
-      ;; Schedule full-paragraph flush for idle.
-      ;; The jit-lock chunk only covers the lines around point; lines below
-      ;; in the same paragraph are never re-dirtified by jit-lock.  Expand
-      ;; beg/end to the full paragraph (blank-line-delimited) so the idle
-      ;; flush re-justifies all lines, including those below the edit point.
-      (let ((para (face-extra--paragraph-bounds beg end)))
-        (face-extra--schedule-pass3-flush (current-buffer)
-                                          (car para) (cdr para)))
+      ;; Schedule flush for idle.  Use beg/end directly — Org's
+      ;; font-lock-extend-region-functions already expanded the jit-lock
+      ;; chunk to the full paragraph element, so beg/end already cover the
+      ;; right region.  paragraph-bounds refinement (structural-boundary
+      ;; clipping) happens in the flush callback at idle, not here on the
+      ;; hot keystroke path.
+      (face-extra--schedule-pass3-flush (current-buffer) beg end)
       ;; Narrow beg/end to point's visual line, unless force-full is set.
-      ;; force-full is consumed here (reset to nil) so it applies to
-      ;; exactly this one jit-lock cycle; the full logical-line region
-      ;; is then passed to face-extra--expand-to-lines below.
-      (if (prog1 face-extra--pass3-force-full
-            (setq face-extra--pass3-force-full nil))
+      (if force-full
           nil  ; skip narrowing — let expand-to-lines cover the full line
       ;; Normal narrowing path: reduce to point's visual line.
       ;;
@@ -1099,12 +1114,6 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
          ;; Point outside the jit-lock chunk: skip entirely.
          ((not (and (>= pt beg) (< pt end)))
           (setq beg end))
-         ;; Paragraph-final logical line: no vertical-motion needed.
-         ((save-excursion
-            (end-of-line)
-            (or (eobp)
-                (eq (char-after (1+ (point))) ?\n)))
-          (setq beg end))
          ;; Non-final line: narrow to point's visual line.
          (t
           (save-excursion
@@ -1117,11 +1126,18 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
             ;; text-align--apply needs to see the trailing \\n.
             (setq end (point)))
           ;; Visual-final line of a non-final logical line: skip.
-          (when (and (< beg end)
-                     (eq (char-after (1- end)) ?\n))
-            (setq beg end)))))))  ; closes cond / let pt / if force-full
+          ;; Otherwise mark that narrowing succeeded.
+          (if (and (< beg end)
+                   (eq (char-after (1- end)) ?\n))
+              (setq beg end)
+            (setq pass3-narrowed t)))))))  ; closes cond / let pt / if force-full
     ;; Walk the (possibly narrowed) region.  beg = end → loop never runs.
-    (let ((region (face-extra--expand-to-lines beg end)))
+    ;; When pass3-narrowed, skip expand-to-lines: beg/end are exact visual-
+    ;; line positions; expanding to the logical line re-inflates to the full
+    ;; paragraph for soft-wrapped text, defeating the narrowing entirely.
+    (let ((region (if pass3-narrowed
+                      (when (< beg end) (cons beg end))
+                    (face-extra--expand-to-lines beg end))))
       (when region
         (let ((rbeg (car region))
               (rend (cdr region))
@@ -1214,7 +1230,7 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
           (setq face-extra--pass3-last-flushed-beg
                 (min rbeg (or face-extra--pass3-last-flushed-beg rbeg)))
           (setq face-extra--pass3-last-flushed-end
-                (max rend (or face-extra--pass3-last-flushed-end rend))))))))))
+                (max rend (or face-extra--pass3-last-flushed-end rend))))))))))) ; closes let force-full
 
 (defun face-extra--pre-command ()
   "Dispatch `:pre-command' callbacks for registered pass-3 properties.
