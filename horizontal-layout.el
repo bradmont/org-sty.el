@@ -798,6 +798,14 @@ Stored at (point lbeg) by `text-align--apply' after each successful stamp.
 Cleared by `text-align--justify-clear' on mode disable so stale hashes
 do not survive a font or scale change.")
 
+(defconst text-align--line-natural-prop 'text-align--line-natural
+  "Text property on visual-line BOL storing natural (unstamped) pixel width.
+Stored unconditionally for every justified visual line by `text-align--stamp'
+and kept current by `text-align--post-command-ring-walk' after each
+self-insert.  Used by `text-align--pre-command-justify' for overflow
+detection when the ring is stale (cursor moved to a different line), so
+the check uses the current line's own data rather than another line's ring.")
+
 (defconst text-align--debug-lend-prop 'text-align--debug-lend
   "Sentinel text property on the lend-1 character when
 `text-align-justify-debug-mode' is active.  Used to paint a green
@@ -836,7 +844,8 @@ natural-space-px and is stable across keystrokes.  It is cleared by
     ;; Clear line-hash stamps so re-justify runs fresh after a clear.
     ;; This ensures font/scale changes are picked up: when the mode is
     ;; re-applied after text-scale-mode, this runs and invalidates hashes.
-    (remove-text-properties beg end (list text-align--line-hash-prop nil))
+    (remove-text-properties beg end (list text-align--line-hash-prop    nil
+                                          text-align--line-natural-prop nil))
     ;; Also clear debug lend markers.
     (let ((pos beg))
       (while (< pos end)
@@ -934,6 +943,7 @@ is explicitly neutralised before measuring to keep measurements clean."
   ;; window-text-pixel-size call and stamp neutralisation entirely, which
   ;; matters for the narrow (point's-line-only) keystroke path where this
   ;; function would otherwise fire on every keystroke for no effect.
+
   (unless (and (eq value 'justify)
                (eq (char-after (1- lend)) ?\n))
   (let* ((win   (get-buffer-window (current-buffer)))
@@ -1017,6 +1027,12 @@ is explicitly neutralised before measuring to keep measurements clean."
          ;; be left-aligned, not stretched.  Also skip when slack ≤ 0
          ;; (line already fills or overflows the zone).
          ((eq value 'justify)
+          ;; Store natural width unconditionally for every non-final justify
+          ;; line so pre-command overflow detection can use it when the ring
+          ;; is stale (cursor moved to a different line).
+          (unless (eq (char-after (1- lend)) ?\n)
+            (put-text-property lbeg (1+ lbeg)
+                               text-align--line-natural-prop (float text-px)))
           ;; Debug: paint lend-1 green so the wrap boundary is visible.
           (when (bound-and-true-p text-align-justify-debug-mode)
             (put-text-property (1- lend) lend
@@ -1086,8 +1102,15 @@ is explicitly neutralised before measuring to keep measurements clean."
                                (remainder    (% slack n))
                                (i            0)
                                ;; Ring entries collected only for point's line.
-                               (on-point-line (and (>= (point) lbeg)
-                                                   (< (point) lend)))
+                               ;; The walk loop ends with point at rend=lend, so
+                               ;; (< (point) lend) is always nil — on-point-line
+                               ;; never fires via (point).  Use vline-beg (set by
+                               ;; pre-command-hook before the keystroke) which is
+                               ;; reliably within the cursor's visual line.
+                               (on-point-line
+                                (and face-extra--vline-beg
+                                     (>= face-extra--vline-beg lbeg)
+                                     (<  face-extra--vline-beg lend)))
                                (ring-entries nil))
                           ;; Distribute: first `remainder' spaces get
                           ;; base-extra+1 px, the rest get base-extra
@@ -1110,6 +1133,8 @@ is explicitly neutralised before measuring to keep measurements clean."
                             (setq i (1+ i)))
                           ;; Store ring and line state for point's line only.
                           (when on-point-line
+                            (message "jd ring-set: lbeg=%d natural=%.1f vline-beg=%s"
+                                     lbeg (float text-px) face-extra--vline-beg)
                             (setq text-align--space-ring      (nreverse ring-entries)
                                   text-align--line-natural-px (float text-px)
                                   text-align--line-zone-px    (float zone)
@@ -1207,20 +1232,47 @@ Dispatches on value:
                   `test-marker' to activate."
   (when (bound-and-true-p text-align-mode)
     (with-silent-modifications
-      (dolist (span spans)
-        (let ((lbeg  (nth 0 span))
-              (lend  (nth 1 span))
-              (value (nth 2 span)))
-          (pcase value
-            ((or 'center 'right)
-             (text-align--stamp lbeg lend value))
-            ('justify
-             ;; Paragraph-final guard: last line of paragraph is left-aligned.
-             ;; text-align--stamp has the same guard internally, but checking
-             ;; here avoids the function call overhead on every final line.
-             (unless (eq (char-after (1- lend)) ?\n)
-               (text-align--stamp lbeg lend 'justify)))
-            ('test-marker
+      (cl-block text-align--apply-loop
+        (let ((seen-change nil))
+          (dolist (span spans)
+            (let ((lbeg  (nth 0 span))
+                  (lend  (nth 1 span))
+                  (value (nth 2 span)))
+              (pcase value
+                ((or 'center 'right)
+                 (text-align--stamp lbeg lend value))
+                ('justify
+                 ;; Paragraph-final guard: last line of paragraph is left-aligned.
+                 ;; text-align--stamp has the same guard internally, but checking
+                 ;; here avoids the function call overhead on every final line.
+                 (unless (eq (char-after (1- lend)) ?\n)
+                   ;; Content-hash skip: if this visual line's text is unchanged
+                   ;; since the last stamp, existing justify stamps are still
+                   ;; correct — skip the window-text-pixel-size call entirely.
+                   ;; Short-circuit once a clean line is found AFTER at least one
+                   ;; changed line: overflow cascades only propagate forward, so
+                   ;; the first clean line after the cascade start means all
+                   ;; subsequent lines are also unchanged.  Without the
+                   ;; seen-change guard, a clean line before the edited line
+                   ;; would terminate the walk prematurely.
+                   (let ((hash (sxhash-equal
+                                (buffer-substring-no-properties lbeg lend))))
+                     (if (eq hash (get-text-property lbeg
+                                                     text-align--line-hash-prop))
+                         (progn
+                           (message "jd apply: HIT  lbeg=%d pt-vline=%s seen=%s"
+                                    lbeg face-extra--vline-beg seen-change)
+                           (when seen-change
+                             (message "jd apply: SHORT-CIRCUIT at lbeg=%d" lbeg)
+                             (cl-return-from text-align--apply-loop)))
+                       (message "jd apply: MISS lbeg=%d pt-vline=%s seen=%s"
+                                lbeg face-extra--vline-beg seen-change)
+                       (setq seen-change t)
+                       (text-align--justify-clear lbeg lend)
+                       (text-align--stamp lbeg lend 'justify)
+                       (put-text-property lbeg (1+ lbeg)
+                                          text-align--line-hash-prop hash)))))
+                ('test-marker
              (let ((mid (/ (+ lbeg lend) 2)))
                (when (and (> lend lbeg)
                           (< mid lend)
@@ -1229,7 +1281,7 @@ Dispatches on value:
                                     'face '( :background "#ff0066"
                                              :foreground "white"
                                              :weight bold))
-                 (put-text-property mid (1+ mid) text-align--prop t))))))))))
+                 (put-text-property mid (1+ mid) text-align--prop t))))))))))))
 
 (defun text-align--clear-marker (_cookie)
   "No-op `:clear' callback for `text-align' registration.
@@ -1270,12 +1322,21 @@ the one before it, etc., producing the same distribution as a full reflow."
 
 (defun text-align--post-command-reflow ()
   "One-shot post-command hook: reflow the paragraph at point after overflow.
-Removes itself on first run, then performs a full-paragraph pass-3 walk
-so the cascade from a line overflow is corrected before redisplay."
+Removes itself on first run, then performs a pass-3 walk starting from
+point's visual line so the cascade from a line overflow is corrected
+before redisplay.  The content-hash check in `text-align--apply'
+short-circuits the walk at the first clean line after the cascade,
+making the cost proportional to the cascade length rather than the full
+paragraph.  The paragraph end is still needed to bound the walk."
   (remove-hook 'post-command-hook #'text-align--post-command-reflow t)
-  (let ((para (face-extra--paragraph-bounds (point) (point))))
+  (let* ((para  (face-extra--paragraph-bounds (point) (point)))
+         (start (or (and face-extra--vline-beg
+                         (>= face-extra--vline-beg (car para))
+                         (<= face-extra--vline-beg (cdr para))
+                         face-extra--vline-beg)
+                    (car para))))
     (setq face-extra--pass3-force-full t)
-    (face-extra--dispatch-pass3 (car para) (cdr para))))
+    (face-extra--dispatch-pass3 start (cdr para))))
 
 (defun text-align--post-command-ring-walk ()
   "One-shot post-command: update justify stamps after a self-insert.
@@ -1310,6 +1371,8 @@ Removes itself, then looks up the just-typed character's pixel width
           (if (> new-natural text-align--line-zone-px)
               ;; Overflow: invalidate ring, clear next line, call reflow.
               (progn
+                (message "jd ring-walk: OVERFLOW new=%.1f zone=%.1f"
+                         new-natural text-align--line-zone-px)
                 (setq text-align--line-natural-px  nil
                       text-align--space-ring        nil
                       text-align--ring-cursor-idx   nil)
@@ -1319,9 +1382,13 @@ Removes itself, then looks up the just-typed character's pixel width
                                     (vertical-motion 1))
                                   (point))))
                   (text-align--justify-clear face-extra--vline-end next-end))
+                (message "jd reflow-caller: ring-walk overflow")
                 (text-align--post-command-reflow))
-            ;; Fits: update natural-px and walk ring to reclaim char-px of slack.
+            ;; Fits: update natural-px, mirror to text property, walk ring.
             (setq text-align--line-natural-px new-natural)
+            (when text-align--ring-lbeg
+              (put-text-property text-align--ring-lbeg (1+ text-align--ring-lbeg)
+                                 text-align--line-natural-prop new-natural))
             (let ((natural-space-px
                    (when (and text-align--space-ring text-align--char-width-cache)
                      (let* ((sp  (marker-position (caar text-align--space-ring)))
@@ -1371,40 +1438,51 @@ For self-inserting commands:
                              text-align--line-zone-px))))
       (cond
        (overflow
+        (message "jd pre: OVERFLOW warm natural=%.1f zone=%.1f char=%.1f"
+                 text-align--line-natural-px text-align--line-zone-px char-px)
         (let ((next-end (save-excursion
                           (goto-char vend)
                           (let ((fontification-functions nil))
                             (vertical-motion 1))
                           (point))))
           (text-align--justify-clear vend next-end))
+        (message "jd reflow-caller: pre-command warm overflow")
         (add-hook 'post-command-hook #'text-align--post-command-reflow nil t))
        (ring-warm
         (if (eq last-command-event ?\s)
             (progn
+              (message "jd pre: SPACE warm — invalidating, scheduling reflow")
+              (message "jd reflow-caller: pre-command space warm")
               (setq text-align--space-ring       nil
                     text-align--ring-cursor-idx  nil
                     text-align--line-natural-px  nil)
               (add-hook 'post-command-hook #'text-align--post-command-reflow nil t))
+          (message "jd pre: ring-walk scheduled (warm)")
           (add-hook 'post-command-hook #'text-align--post-command-ring-walk nil t)))
-       ((and text-align--line-natural-px text-align--line-zone-px)
-        (let* ((avg-char-px (/ text-align--line-natural-px
-                               (max 1.0 (- (float vend) vbeg 1))))
-               (slack (- text-align--line-zone-px text-align--line-natural-px)))
+       ;; Stale ring or no ring: use the stored natural-px text property for
+       ;; the current visual line rather than the ring's data (which is from
+       ;; a different line and gives wrong overflow predictions).
+       (t
+        (let* ((stored  (get-text-property vbeg text-align--line-natural-prop))
+               (win     (get-buffer-window (current-buffer)))
+               (avail   (and win (window-body-width win t)))
+               (slack   (and stored avail (- avail stored)))
+               (avg     (and stored
+                             (/ stored (max 1.0 (- (float vend) vbeg 1))))))
+          (message "jd pre: STALE/NODATA lbeg=%s vbeg=%s stored=%s slack=%s fires=%s"
+                   text-align--ring-lbeg vbeg stored slack
+                   (if (and slack avg (< slack (* 1.5 avg))) "YES" "no"))
           (text-align--justify-clear vbeg vend)
-          (when (< slack (* 1.5 avg-char-px))
+          (when (or (null slack)             ; no data — be conservative
+                    (and avg (< slack (* 1.5 avg))))
             (let ((next-end (save-excursion
                               (goto-char vend)
                               (let ((fontification-functions nil))
                                 (vertical-motion 1))
                               (point))))
               (text-align--justify-clear vend next-end))
-            (message "jd reflow-caller: pre-command stale overflow")
             (add-hook 'post-command-hook
-                      #'text-align--post-command-reflow nil t))))
-       (t
-        (message "jd pre: no ring data ring=%s natural=%s"
-                 (if text-align--space-ring "set" "nil")
-                 text-align--line-natural-px))))))
+                      #'text-align--post-command-reflow nil t))))))))
 
 
 ;;;; ================================================================

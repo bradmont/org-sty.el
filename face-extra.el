@@ -1091,13 +1091,21 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
              beg end (point))
     (when (and (null (current-idle-time))
                (memq this-command face-extra--typing-commands))
-      ;; Schedule flush for idle.  Use beg/end directly — Org's
-      ;; font-lock-extend-region-functions already expanded the jit-lock
-      ;; chunk to the full paragraph element, so beg/end already cover the
-      ;; right region.  paragraph-bounds refinement (structural-boundary
-      ;; clipping) happens in the flush callback at idle, not here on the
-      ;; hot keystroke path.
-      (face-extra--schedule-pass3-flush (current-buffer) beg end)
+      ;; Schedule flush for idle.  Start from point's visual line rather
+      ;; than the paragraph start: overflow cascades only propagate forward,
+      ;; so lines before point are unaffected and the content-hash check in
+      ;; text-align--apply skips them cheaply.  paragraph-bounds refinement
+      ;; (structural-boundary clipping) happens in the flush callback at
+      ;; idle.  The scheduler takes (min existing new-beg) so rapid edits at
+      ;; different positions always cover the union of all dirty regions.
+      (face-extra--schedule-pass3-flush
+       (current-buffer)
+       (if (and face-extra--vline-beg
+                (>= face-extra--vline-beg beg)
+                (<= face-extra--vline-beg end))
+           face-extra--vline-beg
+         beg)
+       end)
       ;; Narrow beg/end to point's visual line, unless force-full is set.
       (if force-full
           nil  ; skip narrowing — let expand-to-lines cover the full line
@@ -1109,7 +1117,15 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
       ;;      → skip (no vertical-motion).
       ;;   3. Non-final line → narrow with vertical-motion 0 + 1.
       ;;   4. Visual-final wrap of non-final logical line → skip.
-      (let ((pt (point)))
+      ;; jit-lock does (goto-char start) before calling registered functions,
+      ;; so (point) = beg (paragraph start), not the user's cursor.  Use
+      ;; face-extra--vline-beg (set by pre-command-hook before the keystroke)
+      ;; to find the actual visual line the user is editing.
+      (let ((pt (or (and face-extra--vline-beg
+                         (>= face-extra--vline-beg beg)
+                         (<  face-extra--vline-beg end)
+                         face-extra--vline-beg)
+                    (point))))
         (cond
          ;; Point outside the jit-lock chunk: skip entirely.
          ((not (and (>= pt beg) (< pt end)))
@@ -1125,12 +1141,16 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
             ;; Do NOT clip by outer end: paragraph-final guard in
             ;; text-align--apply needs to see the trailing \\n.
             (setq end (point)))
+          (message "jd narrow t-branch: beg=%d end=%d char-before-end=%s"
+                   beg end (and (> end 0) (char-to-string (char-after (1- end)))))
           ;; Visual-final line of a non-final logical line: skip.
           ;; Otherwise mark that narrowing succeeded.
           (if (and (< beg end)
                    (eq (char-after (1- end)) ?\n))
               (setq beg end)
             (setq pass3-narrowed t)))))))  ; closes cond / let pt / if force-full
+    (message "jd dispatch3 post-narrow: pass3-narrowed=%s beg=%d end=%d"
+             pass3-narrowed beg end)
     ;; Walk the (possibly narrowed) region.  beg = end → loop never runs.
     ;; When pass3-narrowed, skip expand-to-lines: beg/end are exact visual-
     ;; line positions; expanding to the logical line re-inflates to the full
