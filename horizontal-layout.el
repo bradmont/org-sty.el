@@ -820,6 +820,13 @@ Set to t by `text-align--stamp' after stamps are applied; removed by
 Allows consumers to tell at a glance whether a line is currently stamped,
 independently of the hash or natural-width cache.")
 
+(defvar text-align--debug nil
+  "When non-nil, enable debug messages on hot paths.
+Toggle at runtime with (setq text-align--debug t) / nil.
+Wraps (message \"jd ...\") calls in pre/post-command hooks and the
+per-line apply walk; each guarded by (when text-align--debug ...)
+so the check costs ~1 ns when nil.")
+
 (defconst text-align--debug-lend-prop 'text-align--debug-lend
   "Sentinel text property on the lend-1 character when
 `text-align-justify-debug-mode' is active.  Used to paint a green
@@ -1172,8 +1179,9 @@ is explicitly neutralised before measuring to keep measurements clean."
                             (setq i (1+ i)))
                           ;; Store ring and line state for point's line only.
                           (when on-point-line
-                            (message "jd ring-set: lbeg=%d natural=%.1f vline-beg=%s"
-                                     lbeg (float text-px) face-extra--vline-beg)
+                            (when text-align--debug
+                              (message "jd ring-set: lbeg=%d natural=%.1f vline-beg=%s"
+                                       lbeg (float text-px) face-extra--vline-beg))
                             (setq text-align--space-ring      (nreverse ring-entries)
                                   text-align--line-natural-px (float text-px)
                                   text-align--line-zone-px    (float zone)
@@ -1422,8 +1430,9 @@ Removes itself, then looks up the just-typed character's pixel width
           (if (> new-natural text-align--line-zone-px)
               ;; Overflow: invalidate ring, clear next line, call reflow.
               (progn
-                (message "jd ring-walk: OVERFLOW new=%.1f zone=%.1f"
-                         new-natural text-align--line-zone-px)
+                (when text-align--debug
+                  (message "jd ring-walk: OVERFLOW new=%.1f zone=%.1f"
+                           new-natural text-align--line-zone-px))
                 (setq text-align--line-natural-px  nil
                       text-align--space-ring        nil
                       text-align--ring-cursor-idx   nil)
@@ -1433,7 +1442,8 @@ Removes itself, then looks up the just-typed character's pixel width
                                     (vertical-motion 1))
                                   (point))))
                   (text-align--justify-clear face-extra--vline-end next-end))
-                (message "jd reflow-caller: ring-walk overflow")
+                (when text-align--debug
+                  (message "jd reflow-caller: ring-walk overflow"))
                 (text-align--post-command-reflow))
             ;; Fits: update natural-px, mirror to text property, walk ring.
             (setq text-align--line-natural-px new-natural)
@@ -1489,26 +1499,30 @@ For self-inserting commands:
                              text-align--line-zone-px))))
       (cond
        (overflow
-        (message "jd pre: OVERFLOW warm natural=%.1f zone=%.1f char=%.1f"
-                 text-align--line-natural-px text-align--line-zone-px char-px)
+        (when text-align--debug
+          (message "jd pre: OVERFLOW warm natural=%.1f zone=%.1f char=%.1f"
+                   text-align--line-natural-px text-align--line-zone-px char-px))
         (let ((next-end (save-excursion
                           (goto-char vend)
                           (let ((fontification-functions nil))
                             (vertical-motion 1))
                           (point))))
           (text-align--justify-clear vend next-end))
-        (message "jd reflow-caller: pre-command warm overflow")
+        (when text-align--debug
+          (message "jd reflow-caller: pre-command warm overflow"))
         (add-hook 'post-command-hook #'text-align--post-command-reflow nil t))
        (ring-warm
         (if (eq last-command-event ?\s)
             (progn
-              (message "jd pre: SPACE warm — invalidating, scheduling reflow")
-              (message "jd reflow-caller: pre-command space warm")
+              (when text-align--debug
+                (message "jd pre: SPACE warm — invalidating, scheduling reflow")
+                (message "jd reflow-caller: pre-command space warm"))
               (setq text-align--space-ring       nil
                     text-align--ring-cursor-idx  nil
                     text-align--line-natural-px  nil)
               (add-hook 'post-command-hook #'text-align--post-command-reflow nil t))
-          (message "jd pre: ring-walk scheduled (warm)")
+          (when text-align--debug
+            (message "jd pre: ring-walk scheduled (warm)"))
           (add-hook 'post-command-hook #'text-align--post-command-ring-walk nil t)))
        ;; Stale ring or no ring: use the stored natural-px text property for
        ;; the current visual line rather than the ring's data (which is from
@@ -1520,9 +1534,10 @@ For self-inserting commands:
                (slack   (and stored avail (- avail stored)))
                (avg     (and stored
                              (/ stored (max 1.0 (- (float vend) vbeg 1))))))
-          (message "jd pre: STALE/NODATA lbeg=%s vbeg=%s stored=%s slack=%s fires=%s"
-                   text-align--ring-lbeg vbeg stored slack
-                   (if (and slack avg (< slack (* 1.5 avg))) "YES" "no"))
+          (when text-align--debug
+            (message "jd pre: STALE/NODATA lbeg=%s vbeg=%s stored=%s slack=%s fires=%s"
+                     text-align--ring-lbeg vbeg stored slack
+                     (if (and slack avg (< slack (* 1.5 avg))) "YES" "no")))
           (text-align--justify-clear vbeg vend)
           (when (or (null slack)             ; no data — be conservative
                     (and avg (< slack (* 1.5 avg))))

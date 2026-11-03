@@ -38,6 +38,11 @@
 ;;; Code:
 
 (require 'cl-lib)
+
+;; Forward declaration — defined in horizontal-layout.el.
+;; Suppresses byte-compiler "free variable" warning when face-extra.el
+;; is compiled before horizontal-layout.el.
+(defvar text-align--debug)
 (require 'face-remap)
 
 
@@ -1086,9 +1091,10 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
     ;; would see force=t permanently.
     (let ((force-full (prog1 face-extra--pass3-force-full
                         (setq face-extra--pass3-force-full nil))))
-    (message "jd dispatch3: cmd=%s idle=%s force=%s beg=%d end=%d pt=%d"
-             this-command (current-idle-time) force-full
-             beg end (point))
+    (when text-align--debug
+      (message "jd dispatch3: cmd=%s idle=%s force=%s beg=%d end=%d pt=%d"
+               this-command (current-idle-time) force-full
+               beg end (point)))
     (when (and (null (current-idle-time))
                (memq this-command face-extra--typing-commands))
       ;; Schedule flush for idle.  Start from point's visual line rather
@@ -1141,16 +1147,18 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
             ;; Do NOT clip by outer end: paragraph-final guard in
             ;; text-align--apply needs to see the trailing \\n.
             (setq end (point)))
-          (message "jd narrow t-branch: beg=%d end=%d char-before-end=%s"
-                   beg end (and (> end 0) (char-to-string (char-after (1- end)))))
+          (when text-align--debug
+            (message "jd narrow t-branch: beg=%d end=%d char-before-end=%s"
+                     beg end (and (> end 0) (char-to-string (char-after (1- end))))))
           ;; Visual-final line of a non-final logical line: skip.
           ;; Otherwise mark that narrowing succeeded.
           (if (and (< beg end)
                    (eq (char-after (1- end)) ?\n))
               (setq beg end)
             (setq pass3-narrowed t)))))))  ; closes cond / let pt / if force-full
-    (message "jd dispatch3 post-narrow: pass3-narrowed=%s beg=%d end=%d"
-             pass3-narrowed beg end)
+    (when text-align--debug
+      (message "jd dispatch3 post-narrow: pass3-narrowed=%s beg=%d end=%d"
+               pass3-narrowed beg end))
     ;; Walk the (possibly narrowed) region.  beg = end → loop never runs.
     ;; When pass3-narrowed, skip expand-to-lines: beg/end are exact visual-
     ;; line positions; expanding to the logical line re-inflates to the full
