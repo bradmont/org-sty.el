@@ -806,6 +806,20 @@ self-insert.  Used by `text-align--pre-command-justify' for overflow
 detection when the ring is stale (cursor moved to a different line), so
 the check uses the current line's own data rather than another line's ring.")
 
+(defconst text-align--line-length-prop 'text-align--line-length
+  "Text property on visual-line BOL storing the line char-count (lend - lbeg).
+Stored by `text-align--stamp' alongside `text-align--line-natural-prop'.
+Reserved for a future optimisation that avoids `vertical-motion' on hash-hit
+lines by recovering lend as (+ lbeg stored-length).  Currently stored but
+not yet consumed by the walk.")
+
+(defconst text-align--line-justified-prop 'text-align--line-justified
+  "Text property on visual-line BOL: non-nil when justify stamps are present.
+Set to t by `text-align--stamp' after stamps are applied; removed by
+`text-align--pre-clear-stamps' (the `:pre-clear' callback) before each walk.
+Allows consumers to tell at a glance whether a line is currently stamped,
+independently of the hash or natural-width cache.")
+
 (defconst text-align--debug-lend-prop 'text-align--debug-lend
   "Sentinel text property on the lend-1 character when
 `text-align-justify-debug-mode' is active.  Used to paint a green
@@ -844,8 +858,10 @@ natural-space-px and is stable across keystrokes.  It is cleared by
     ;; Clear line-hash stamps so re-justify runs fresh after a clear.
     ;; This ensures font/scale changes are picked up: when the mode is
     ;; re-applied after text-scale-mode, this runs and invalidates hashes.
-    (remove-text-properties beg end (list text-align--line-hash-prop    nil
-                                          text-align--line-natural-prop nil))
+    (remove-text-properties beg end (list text-align--line-hash-prop     nil
+                                          text-align--line-natural-prop  nil
+                                          text-align--line-length-prop   nil
+                                          text-align--line-justified-prop nil))
     ;; Also clear debug lend markers.
     (let ((pos beg))
       (while (< pos end)
@@ -904,7 +920,7 @@ not modify `line-prefix', this restoration is a no-op."
     ;; explicit text-align-clear means a clean slate on next enable/flush.
     (setq text-align--char-width-cache nil)))
 
-(defun text-align--stamp (lbeg lend value)
+(defun text-align--stamp (lbeg lend value &optional precomputed-natural-px)
   "Stamp a margin-aware alignment prefix for the visual line LBEG..LEND.
 
 VALUE is `center', `right', or `justify'.  The offset or distribution
@@ -1007,8 +1023,16 @@ is explicitly neutralised before measuring to keep measurements clean."
                                          `(space :width 0 :height ,height))
                     (remove-text-properties lbeg (1+ lbeg)
                                             (list prefix-prop nil)))))
-             (text-px (car (window-text-pixel-size
-                            win lbeg lend (* 2 avail)))))
+             ;; Use the precomputed natural width when the caller has a
+             ;; valid cached value (hash hit), avoiding window-text-pixel-size.
+             ;; truncate ensures text-px is always an integer: window-text-
+             ;; pixel-size returns integers, but the cached value was stored
+             ;; as (float text-px) for ring arithmetic and must be truncated
+             ;; back — otherwise (% slack n) fails on a float slack.
+             (text-px (truncate
+                       (or precomputed-natural-px
+                           (car (window-text-pixel-size
+                                 win lbeg lend (* 2 avail)))))))
         (cond
          ;; ── center / right ─────────────────────────────────────────
          ((memq value '(center right))
@@ -1027,12 +1051,27 @@ is explicitly neutralised before measuring to keep measurements clean."
          ;; be left-aligned, not stretched.  Also skip when slack ≤ 0
          ;; (line already fills or overflows the zone).
          ((eq value 'justify)
-          ;; Store natural width unconditionally for every non-final justify
-          ;; line so pre-command overflow detection can use it when the ring
-          ;; is stale (cursor moved to a different line).
+          ;; Update per-line metadata for every non-final justify line.
+          ;; Before writing new values at lbeg, remove the old values from
+          ;; the whole line [lbeg, lend) so stale props from a previous run
+          ;; with different line breaks don't linger on characters other than
+          ;; lbeg.  Hash is removed here too even though apply writes it
+          ;; after stamp returns — this clears any stale mid-line hash prop.
+          ;; Metadata is intentionally NOT cleared by pre-clear, so it
+          ;; survives across flushes and lets apply do cache-hit re-stamps.
           (unless (eq (char-after (1- lend)) ?\n)
+            (with-silent-modifications
+              (remove-text-properties lbeg lend
+                                      (list text-align--line-hash-prop     nil
+                                            text-align--line-natural-prop  nil
+                                            text-align--line-length-prop   nil
+                                            text-align--line-justified-prop nil)))
             (put-text-property lbeg (1+ lbeg)
-                               text-align--line-natural-prop (float text-px)))
+                               text-align--line-natural-prop (float text-px))
+            (put-text-property lbeg (1+ lbeg)
+                               text-align--line-length-prop (- lend lbeg))
+            (put-text-property lbeg (1+ lbeg)
+                               text-align--line-justified-prop t))
           ;; Debug: paint lend-1 green so the wrap boundary is visible.
           (when (bound-and-true-p text-align-justify-debug-mode)
             (put-text-property (1- lend) lend
@@ -1232,47 +1271,39 @@ Dispatches on value:
                   `test-marker' to activate."
   (when (bound-and-true-p text-align-mode)
     (with-silent-modifications
-      (cl-block text-align--apply-loop
-        (let ((seen-change nil))
-          (dolist (span spans)
-            (let ((lbeg  (nth 0 span))
-                  (lend  (nth 1 span))
-                  (value (nth 2 span)))
-              (pcase value
-                ((or 'center 'right)
-                 (text-align--stamp lbeg lend value))
-                ('justify
-                 ;; Paragraph-final guard: last line of paragraph is left-aligned.
-                 ;; text-align--stamp has the same guard internally, but checking
-                 ;; here avoids the function call overhead on every final line.
-                 (unless (eq (char-after (1- lend)) ?\n)
-                   ;; Content-hash skip: if this visual line's text is unchanged
-                   ;; since the last stamp, existing justify stamps are still
-                   ;; correct — skip the window-text-pixel-size call entirely.
-                   ;; Short-circuit once a clean line is found AFTER at least one
-                   ;; changed line: overflow cascades only propagate forward, so
-                   ;; the first clean line after the cascade start means all
-                   ;; subsequent lines are also unchanged.  Without the
-                   ;; seen-change guard, a clean line before the edited line
-                   ;; would terminate the walk prematurely.
-                   (let ((hash (sxhash-equal
-                                (buffer-substring-no-properties lbeg lend))))
-                     (if (eq hash (get-text-property lbeg
-                                                     text-align--line-hash-prop))
-                         (progn
-                           (message "jd apply: HIT  lbeg=%d pt-vline=%s seen=%s"
-                                    lbeg face-extra--vline-beg seen-change)
-                           (when seen-change
-                             (message "jd apply: SHORT-CIRCUIT at lbeg=%d" lbeg)
-                             (cl-return-from text-align--apply-loop)))
-                       (message "jd apply: MISS lbeg=%d pt-vline=%s seen=%s"
-                                lbeg face-extra--vline-beg seen-change)
-                       (setq seen-change t)
-                       (text-align--justify-clear lbeg lend)
-                       (text-align--stamp lbeg lend 'justify)
-                       (put-text-property lbeg (1+ lbeg)
-                                          text-align--line-hash-prop hash)))))
-                ('test-marker
+      (dolist (span spans)
+        (let ((lbeg  (nth 0 span))
+              (lend  (nth 1 span))
+              (value (nth 2 span)))
+          (pcase value
+            ((or 'center 'right)
+             (text-align--stamp lbeg lend value))
+            ('justify
+             ;; Paragraph-final guard: last line of paragraph is left-aligned.
+             ;; text-align--stamp has the same guard internally, but checking
+             ;; here avoids the function call overhead on every final line.
+             (unless (eq (char-after (1- lend)) ?\n)
+               ;; Pre-clear has already removed justify stamps so vertical-motion
+               ;; during the walk sees natural geometry.  Now check whether
+               ;; content has changed since the last stamp.
+               ;;
+               ;; Hash hit  → pass cached natural-px to stamp; it skips
+               ;;             window-text-pixel-size.  O(spaces) per line.
+               ;; Hash miss → pass nil; stamp measures fresh.
+               ;;
+               ;; No short-circuit: every non-final line is always visited so
+               ;; re-stamps are applied even on lines below an overflow.
+               (let* ((hash           (sxhash-equal
+                                       (buffer-substring-no-properties lbeg lend)))
+                      (cached-hash    (get-text-property lbeg text-align--line-hash-prop))
+                      (cached-natural (get-text-property lbeg text-align--line-natural-prop)))
+                 (text-align--stamp lbeg lend 'justify
+                                    (and (eq hash cached-hash) cached-natural))
+                 ;; Store hash after stamp so stamp's per-line metadata cleanup
+                 ;; (remove from [lbeg,lend)) fires first.
+                 (put-text-property lbeg (1+ lbeg)
+                                    text-align--line-hash-prop hash))))
+            ('test-marker
              (let ((mid (/ (+ lbeg lend) 2)))
                (when (and (> lend lbeg)
                           (< mid lend)
@@ -1281,7 +1312,7 @@ Dispatches on value:
                                     'face '( :background "#ff0066"
                                              :foreground "white"
                                              :weight bold))
-                 (put-text-property mid (1+ mid) text-align--prop t))))))))))))
+                 (put-text-property mid (1+ mid) text-align--prop t))))))))))
 
 (defun text-align--clear-marker (_cookie)
   "No-op `:clear' callback for `text-align' registration.
@@ -1516,16 +1547,45 @@ is registered and handles cleanup on disable."
 ;;;; Section 8 — face-extra registration (load time)
 ;;;; ================================================================
 
+(defun text-align--pre-clear-stamps (beg end)
+  "Pre-clear: remove justify stamps and the `justified' sentinel from [BEG, END).
+
+Called as `:pre-clear' before each pass-3 visual-line walk.  This is the
+only thing it does:
+  1. Walk [BEG, END) via `next-single-property-change' on
+     `text-align--justify-prop' and strip `display' + `text-align--justify-prop'
+     from every stamped space run.
+  2. Remove `text-align--line-justified-prop' from the whole region.
+
+Hash (`text-align--line-hash-prop') and natural-px
+(`text-align--line-natural-prop') are intentionally left untouched.  They
+are only removed inside `text-align--stamp' immediately before new values
+are written at lbeg — which ensures `vertical-motion' during the walk
+always sees natural (unstamped) geometry, and the cached values remain
+available to `text-align--apply' for cache-hit re-stamps."
+  (with-silent-modifications
+    (let ((pos beg))
+      (while (< pos end)
+        (let ((next (or (next-single-property-change
+                         pos text-align--justify-prop nil end)
+                        end)))
+          (when (get-text-property pos text-align--justify-prop)
+            (remove-text-properties pos next
+                                    (list 'display                 nil
+                                          text-align--justify-prop nil)))
+          (setq pos next))))
+    (remove-text-properties beg end (list text-align--line-justified-prop nil))))
+
 (face-extra-define-property 'text-align
   :pass       3
   :after      '(horizontal-layout-margin-right)
-  ;; :pre-clear removes stale justify space stamps from the walk region
-  ;; before the visual-line walk begins, so `window-text-pixel-size'
-  ;; always measures natural (unstamped) text widths.
-  ;; `text-align--space-width-cache' is NOT cleared here — it is stable
-  ;; across keystrokes and is only invalidated on genuine metric changes
-  ;; (font-family or text-scale) via `face-extra-invalidate-cache-functions'.
-  :pre-clear   #'text-align--justify-clear
+  ;; :pre-clear removes justify space stamps and the justified sentinel from
+  ;; [beg, end) so `vertical-motion' during the walk sees natural character
+  ;; widths.  Hash and natural-px are NOT cleared here — they are only
+  ;; removed inside `text-align--stamp' when new values are being written,
+  ;; keeping the cache valid for hash-hit lines that need re-stamping without
+  ;; a fresh `window-text-pixel-size' measurement.
+  :pre-clear   #'text-align--pre-clear-stamps
   ;; :pre-command strips justify space stamps from point's visual line
   ;; before the keystroke is processed and rendered.  This prevents a
   ;; justified line from overflowing when a character is inserted into
