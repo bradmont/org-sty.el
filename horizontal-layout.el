@@ -1283,26 +1283,37 @@ Dispatches on value:
              ;; text-align--stamp has the same guard internally, but checking
              ;; here avoids the function call overhead on every final line.
              (unless (eq (char-after (1- lend)) ?\n)
-               ;; Pre-clear has already removed justify stamps so vertical-motion
-               ;; during the walk sees natural geometry.  Now check whether
-               ;; content has changed since the last stamp.
-               ;;
-               ;; Hash hit  → pass cached natural-px to stamp; it skips
-               ;;             window-text-pixel-size.  O(spaces) per line.
-               ;; Hash miss → pass nil; stamp measures fresh.
-               ;;
-               ;; No short-circuit: every non-final line is always visited so
-               ;; re-stamps are applied even on lines below an overflow.
-               (let* ((hash           (sxhash-equal
-                                       (buffer-substring-no-properties lbeg lend)))
-                      (cached-hash    (get-text-property lbeg text-align--line-hash-prop))
-                      (cached-natural (get-text-property lbeg text-align--line-natural-prop)))
-                 (text-align--stamp lbeg lend 'justify
-                                    (and (eq hash cached-hash) cached-natural))
-                 ;; Store hash after stamp so stamp's per-line metadata cleanup
-                 ;; (remove from [lbeg,lend)) fires first.
-                 (put-text-property lbeg (1+ lbeg)
-                                    text-align--line-hash-prop hash))))
+               ;; Ring-live skip: when post-command-ring-walk owns point's line
+               ;; (ring-lbeg = vline-beg), leave those stamps untouched.
+               ;; pre-clear-stamps also skipped this line, so its justified
+               ;; sentinel is still t; overwriting the ring's Bresenham
+               ;; distribution with a re-measured one causes visible jitter.
+               ;; On overflow, post-command-reflow clears ring-lbeg first,
+               ;; so this condition is false and the line is re-measured.
+               (unless (and face-extra--vline-beg
+                            text-align--ring-lbeg
+                            (= text-align--ring-lbeg face-extra--vline-beg)
+                            (= lbeg face-extra--vline-beg))
+                 ;; Pre-clear has already removed justify stamps so vertical-motion
+                 ;; during the walk sees natural geometry.  Now check whether
+                 ;; content has changed since the last stamp.
+                 ;;
+                 ;; Hash hit  → pass cached natural-px to stamp; it skips
+                 ;;             window-text-pixel-size.  O(spaces) per line.
+                 ;; Hash miss → pass nil; stamp measures fresh.
+                 ;;
+                 ;; No short-circuit: every non-final line is always visited so
+                 ;; re-stamps are applied even on lines below an overflow.
+                 (let* ((hash           (sxhash-equal
+                                         (buffer-substring-no-properties lbeg lend)))
+                        (cached-hash    (get-text-property lbeg text-align--line-hash-prop))
+                        (cached-natural (get-text-property lbeg text-align--line-natural-prop)))
+                   (text-align--stamp lbeg lend 'justify
+                                      (and (eq hash cached-hash) cached-natural))
+                   ;; Store hash after stamp so stamp's per-line metadata cleanup
+                   ;; (remove from [lbeg,lend)) fires first.
+                   (put-text-property lbeg (1+ lbeg)
+                                      text-align--line-hash-prop hash)))))
             ('test-marker
              (let ((mid (/ (+ lbeg lend) 2)))
                (when (and (> lend lbeg)
@@ -1366,6 +1377,15 @@ paragraph.  The paragraph end is still needed to bound the walk."
                          (<= face-extra--vline-beg (cdr para))
                          face-extra--vline-beg)
                     (car para))))
+    ;; Invalidate the ring so the ring-live check in pre-clear and apply
+    ;; treats point's line as a normal (non-ring-managed) line.  On overflow,
+    ;; the ring's distribution is stale (a word wrapped off, the line is
+    ;; shorter) and must be rebuilt from a fresh measurement.  Clearing
+    ;; ring-lbeg breaks the (= ring-lbeg vline-beg) condition, so pre-clear
+    ;; will remove stale stamps from vline and apply will re-measure it.
+    ;; stamp will rebuild the ring for the new content.
+    (setq text-align--ring-lbeg  nil
+          text-align--space-ring nil)
     (setq face-extra--pass3-force-full t)
     (face-extra--dispatch-pass3 start (cdr para))))
 
@@ -1550,31 +1570,53 @@ is registered and handles cleanup on disable."
 (defun text-align--pre-clear-stamps (beg end)
   "Pre-clear: remove justify stamps and the `justified' sentinel from [BEG, END).
 
-Called as `:pre-clear' before each pass-3 visual-line walk.  This is the
-only thing it does:
-  1. Walk [BEG, END) via `next-single-property-change' on
-     `text-align--justify-prop' and strip `display' + `text-align--justify-prop'
-     from every stamped space run.
-  2. Remove `text-align--line-justified-prop' from the whole region.
+Called as `:pre-clear' before each pass-3 visual-line walk.
 
-Hash (`text-align--line-hash-prop') and natural-px
-(`text-align--line-natural-prop') are intentionally left untouched.  They
-are only removed inside `text-align--stamp' immediately before new values
-are written at lbeg — which ensures `vertical-motion' during the walk
-always sees natural (unstamped) geometry, and the cached values remain
-available to `text-align--apply' for cache-hit re-stamps."
-  (with-silent-modifications
-    (let ((pos beg))
-      (while (< pos end)
-        (let ((next (or (next-single-property-change
-                         pos text-align--justify-prop nil end)
-                        end)))
-          (when (get-text-property pos text-align--justify-prop)
-            (remove-text-properties pos next
-                                    (list 'display                 nil
-                                          text-align--justify-prop nil)))
-          (setq pos next))))
-    (remove-text-properties beg end (list text-align--line-justified-prop nil))))
+Clears justify space stamps (display + `text-align--justify-prop') and the
+`text-align--line-justified-prop' sentinel so `vertical-motion' during the
+walk sees natural character widths.  Hash and natural-px are NOT touched.
+
+Ring-live exception: when the ring is live for point's visual line —
+i.e. `text-align--ring-lbeg' equals `face-extra--vline-beg' — that line's
+stamps are left intact.  `text-align--post-command-ring-walk' already
+re-stamped it; clearing and re-stamping would overwrite the ring's
+distribution with a re-measured one, causing visible jitter.  The ring-live
+check also protects the `justified' sentinel on that line so
+`text-align--apply' knows to skip it.
+
+On overflow, `text-align--post-command-reflow' clears `text-align--ring-lbeg'
+before calling dispatch, breaking the ring-live condition and causing point's
+line to be cleared and re-measured like any other line."
+  ;; Determine whether the ring is live for point's visual line and
+  ;; is within [beg, end).  If so, skip [vbeg, vend) in both loops below.
+  (let* ((ring-live (and face-extra--vline-beg
+                         face-extra--vline-end
+                         text-align--ring-lbeg
+                         (= text-align--ring-lbeg face-extra--vline-beg)
+                         (>= face-extra--vline-beg beg)
+                         (<  face-extra--vline-beg end)))
+         (vbeg (and ring-live face-extra--vline-beg))
+         (vend (and ring-live face-extra--vline-end)))
+    (cl-flet ((clear-stamps (b e)
+                (let ((pos b))
+                  (while (< pos e)
+                    (let ((next (or (next-single-property-change
+                                     pos text-align--justify-prop nil e)
+                                    e)))
+                      (when (get-text-property pos text-align--justify-prop)
+                        (remove-text-properties pos next
+                                                (list 'display                 nil
+                                                      text-align--justify-prop nil)))
+                      (setq pos next))))))
+      (with-silent-modifications
+        (if ring-live
+            ;; Process [beg, vbeg) and [vend, end) separately; skip [vbeg, vend).
+            (progn (clear-stamps beg   vbeg)
+                   (clear-stamps vend  end)
+                   (remove-text-properties beg  vbeg (list text-align--line-justified-prop nil))
+                   (remove-text-properties vend end  (list text-align--line-justified-prop nil)))
+          (clear-stamps beg end)
+          (remove-text-properties beg end (list text-align--line-justified-prop nil)))))))
 
 (face-extra-define-property 'text-align
   :pass       3
