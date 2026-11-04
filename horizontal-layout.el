@@ -868,7 +868,7 @@ Wraps (message \"jd ...\") calls in pre/post-command hooks and the
 per-line apply walk; each guarded by (when text-align--debug ...)
 so the check costs ~1 ns when nil.")
 
-(defvar text-align--debug-delete t
+(defvar text-align--debug-delete nil
   "When non-nil, enable debug messages on the delete pre/post-command paths.
 Toggle independently of `text-align--debug' to focus on deletion issues.")
 
@@ -1541,7 +1541,15 @@ paragraph.  The paragraph end is still needed to bound the walk."
                          (>= face-extra--vline-beg (car para))
                          (<= face-extra--vline-beg (cdr para))
                          face-extra--vline-beg)
-                    (car para))))
+                    (car para)))
+         (win   (get-buffer-window (current-buffer)))
+         ;; Cap the synchronous walk at the window's last visible position.
+         ;; Off-screen lines cannot be seen before the next redisplay, so
+         ;; walking them wastes cycles.  jit-lock handles them lazily when
+         ;; they scroll into view; the content-hash check makes those passes
+         ;; O(1) per already-correct line.
+         (wend  (and win (window-end win t)))
+         (end   (if (and wend (< wend (cdr para))) wend (cdr para))))
     ;; Invalidate the ring so the ring-live check in pre-clear and apply
     ;; treats point's line as a normal (non-ring-managed) line.  On overflow,
     ;; the ring's distribution is stale (a word wrapped off, the line is
@@ -1552,7 +1560,7 @@ paragraph.  The paragraph end is still needed to bound the walk."
     (setq text-align--ring-lbeg  nil
           text-align--space-ring nil)
     (setq face-extra--pass3-force-full t)
-    (face-extra--dispatch-pass3 start (cdr para))))
+    (face-extra--dispatch-pass3 start end)))
 
 (defun text-align--post-command-ring-walk ()
   "One-shot post-command: update justify stamps after a self-insert.
