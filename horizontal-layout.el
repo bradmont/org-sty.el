@@ -1550,17 +1550,25 @@ paragraph.  The paragraph end is still needed to bound the walk."
          ;; O(1) per already-correct line.
          (wend  (and win (window-end win t)))
          (end   (if (and wend (< wend (cdr para))) wend (cdr para))))
-    ;; Invalidate the ring so the ring-live check in pre-clear and apply
-    ;; treats point's line as a normal (non-ring-managed) line.  On overflow,
-    ;; the ring's distribution is stale (a word wrapped off, the line is
-    ;; shorter) and must be rebuilt from a fresh measurement.  Clearing
-    ;; ring-lbeg breaks the (= ring-lbeg vline-beg) condition, so pre-clear
-    ;; will remove stale stamps from vline and apply will re-measure it.
-    ;; stamp will rebuild the ring for the new content.
+    ;; Nil the ring before the walk so pre-clear and apply treat point's
+    ;; line as a normal (non-ring-managed) line and re-measure it.
     (setq text-align--ring-lbeg  nil
           text-align--space-ring nil)
     (setq face-extra--pass3-force-full t)
-    (face-extra--dispatch-pass3 start end)))
+    (face-extra--dispatch-pass3 start end)
+    ;; Nil the ring AGAIN after the walk.  `text-align--stamp' rebuilds the
+    ;; ring for whichever visual line contains `face-extra--vline-beg'.  But
+    ;; `face-extra--vline-beg' is set by pre-command — before the character
+    ;; is inserted — so it still points to the pre-overflow line N even
+    ;; though point has since moved to line N+1 (where the word wrapped).
+    ;; The ring built during the walk is therefore for the wrong line.
+    ;; Discarding it here means the first keystroke on N+1 goes through the
+    ;; stale path (safe fallback), and the idle flush rebuilds the ring for
+    ;; the correct line once `face-extra--vline-beg' has been updated by the
+    ;; next pre-command.
+    (setq text-align--ring-lbeg      nil
+          text-align--space-ring      nil
+          text-align--ring-cursor-idx nil)))
 
 (defun text-align--post-command-ring-walk ()
   "One-shot post-command: update justify stamps after a self-insert.
