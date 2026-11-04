@@ -279,17 +279,24 @@ When nil, geometry is settled and the walk may proceed.")
 
 (defvar face-extra--typing-commands
   '(self-insert-command
-    org-self-insert-command       ; Org mode's self-insert wrapper
-    delete-backward-char          ; backspace in most modes
-    org-delete-backward-char      ; backspace in Org mode
-    delete-forward-char           ; C-d / forward delete
-    delete-char)
-  "Commands treated as active typing for passes 1–2 narrowing.
-During these commands, passes 1–2 are narrowed to point's logical line,
-keeping per-keystroke cost near zero.  All other commands — scrolling,
-initial render, fontified=nil re-fontification — get full unrestricted
-passes.  `self-insert-command' is first so the common case is a single
-pointer comparison before `memq' returns.")
+    org-self-insert-command               ; Org mode's self-insert wrapper
+    delete-backward-char                  ; backspace in most modes
+    backward-delete-char-untabify         ; backspace with tab expansion
+    org-delete-backward-char              ; backspace in Org mode
+    delete-forward-char                   ; C-d / forward delete
+    delete-char                           ; forward delete variant
+    org-delete-char                       ; Org's forward delete
+    evil-delete-backward-char-and-join    ; Evil normal/insert backspace
+    evil-delete-char)                     ; Evil forward delete
+  "Commands treated as active typing for passes 1–2 narrowing and
+`:pre-command' dispatch.  During these commands, passes 1–2 are narrowed
+to point's logical line, keeping per-keystroke cost near zero.  All other
+commands — scrolling, initial render, fontified=nil re-fontification —
+get full unrestricted passes.  `self-insert-command' is first so the
+common case is a single pointer comparison before `memq' returns.
+
+Extend this list to add support for other editing commands, e.g.:
+  (add-to-list \\='face-extra--typing-commands \\='my-delete-command)")
 
 (defvar face-extra--pass3-flush-delay 0.05
   "Idle delay in seconds before the deferred full-paragraph pass-3 flush runs.
@@ -1275,12 +1282,7 @@ Maintains a cached visual line in `face-extra--vline-beg' and
 - If point is still within [vline-beg, vline-end) the cached values are
   reused, saving two `vertical-motion' calls per keystroke.
 - If point has moved outside that range both are recomputed together."
-  (when (memq this-command
-              '(self-insert-command
-                org-self-insert-command
-                delete-backward-char
-                backward-delete-char-untabify
-                delete-forward-char))
+  (when (memq this-command face-extra--typing-commands)
     (let* ((pt (point))
            ;; Reuse cache if point is still on the same visual line;
            ;; otherwise recompute both beg and end via vertical-motion.

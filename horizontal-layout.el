@@ -775,6 +775,11 @@ Nil when stale — flush will rebuild.")
 Initialised to the last long-space (remainder − 1) when the ring is built.
 Advances backward by 1 for each pixel removed; wraps from 0 to (1- n).")
 
+(defvar-local text-align--pending-delete-px nil
+  "Pixel width of the character about to be deleted.
+Set by `text-align--pre-command-justify' when a delete command fires with
+a warm ring; consumed by `text-align--post-command-reverse-ring-walk'.")
+
 (defun text-align--natural-space-px (win pos avail)
   "Return the natural pixel width of the space character at POS in WIN.
 Uses `text-align--char-width-cache' keyed by (face . ?\\s); on a miss,
@@ -789,6 +794,34 @@ measures via `window-text-pixel-size' and caches the result."
         (let ((w (car (window-text-pixel-size win pos (1+ pos) (* 2 avail)))))
           (puthash key w cache)
           w))))
+
+(defun text-align--measure-chars-px (beg end)
+  "Return the sum of cached natural pixel widths for characters in [BEG, END).
+
+Walks the range char by char, keying each lookup in
+`text-align--char-width-cache' as (FACE . CHAR-CODE) where FACE is
+`(or (get-text-property pos \\='font-lock-face) (get-text-property pos \\='face))'.
+
+On a cache miss the character is skipped (contributes 0 px).  This
+function is intentionally cache-only: it must NOT call
+`window-text-pixel-size' because it is used in the pre-command hot path
+where the deletion has not yet occurred and the buffer positions may be
+about to change.  A partial sum (some chars uncached) is acceptable for
+the underflow heuristic — if the cache does not cover the first word yet
+the underflow guard conservatively falls back to a full reflow."
+  (when (and text-align--char-width-cache (> end beg))
+    (let ((total 0)
+          (pos   beg))
+      (while (< pos end)
+        (let* ((face    (or (get-text-property pos 'font-lock-face)
+                            (get-text-property pos 'face)))
+               (ch      (char-after pos))
+               (cached  (and ch (gethash (cons face ch)
+                                         text-align--char-width-cache))))
+          (when cached
+            (setq total (+ total cached))))
+        (setq pos (1+ pos)))
+      total)))
 
 (defconst text-align--line-hash-prop 'text-align--line-hash
   "Text property on visual-line BOL storing `buffer-hash' at last justify.
@@ -813,6 +846,14 @@ Reserved for a future optimisation that avoids `vertical-motion' on hash-hit
 lines by recovering lend as (+ lbeg stored-length).  Currently stored but
 not yet consumed by the walk.")
 
+(defconst text-align--line-next-word-prop 'text-align--line-next-word
+  "Text property on visual-line BOL storing the pixel width of the first
+word on the NEXT visual line.  Stored by `text-align--stamp' for every
+non-final justified line.  Used by the delete pre-command path to detect
+underflow: when the slack after a deletion would exceed next-word-px plus
+a space width, a word can flow back from the next line and a full
+paragraph reflow is needed.")
+
 (defconst text-align--line-justified-prop 'text-align--line-justified
   "Text property on visual-line BOL: non-nil when justify stamps are present.
 Set to t by `text-align--stamp' after stamps are applied; removed by
@@ -827,6 +868,10 @@ Wraps (message \"jd ...\") calls in pre/post-command hooks and the
 per-line apply walk; each guarded by (when text-align--debug ...)
 so the check costs ~1 ns when nil.")
 
+(defvar text-align--debug-delete t
+  "When non-nil, enable debug messages on the delete pre/post-command paths.
+Toggle independently of `text-align--debug' to focus on deletion issues.")
+
 (defconst text-align--debug-lend-prop 'text-align--debug-lend
   "Sentinel text property on the lend-1 character when
 `text-align-justify-debug-mode' is active.  Used to paint a green
@@ -838,10 +883,11 @@ lend boundary is visible during debugging.")
 Registered on `face-extra-invalidate-cache-functions' alongside
 `text-align--clear-space-width-cache'.  Any font or scale change makes
 cached character widths and the derived ring state stale."
-  (setq text-align--char-width-cache  nil
-        text-align--line-natural-px   nil
-        text-align--space-ring        nil
-        text-align--ring-cursor-idx   nil))
+  (setq text-align--char-width-cache    nil
+        text-align--line-natural-px     nil
+        text-align--space-ring          nil
+        text-align--ring-cursor-idx     nil
+        text-align--pending-delete-px   nil))
 
 (defun text-align--justify-clear (beg end)
   "Remove stale justify display stamps from space characters in BEG..END.
@@ -865,10 +911,11 @@ natural-space-px and is stable across keystrokes.  It is cleared by
     ;; Clear line-hash stamps so re-justify runs fresh after a clear.
     ;; This ensures font/scale changes are picked up: when the mode is
     ;; re-applied after text-scale-mode, this runs and invalidates hashes.
-    (remove-text-properties beg end (list text-align--line-hash-prop     nil
-                                          text-align--line-natural-prop  nil
-                                          text-align--line-length-prop   nil
-                                          text-align--line-justified-prop nil))
+    (remove-text-properties beg end (list text-align--line-hash-prop      nil
+                                          text-align--line-natural-prop   nil
+                                          text-align--line-length-prop    nil
+                                          text-align--line-justified-prop nil
+                                          text-align--line-next-word-prop nil))
     ;; Also clear debug lend markers.
     (let ((pos beg))
       (while (< pos end)
@@ -1069,16 +1116,32 @@ is explicitly neutralised before measuring to keep measurements clean."
           (unless (eq (char-after (1- lend)) ?\n)
             (with-silent-modifications
               (remove-text-properties lbeg lend
-                                      (list text-align--line-hash-prop     nil
-                                            text-align--line-natural-prop  nil
-                                            text-align--line-length-prop   nil
-                                            text-align--line-justified-prop nil)))
+                                      (list text-align--line-hash-prop      nil
+                                            text-align--line-natural-prop   nil
+                                            text-align--line-length-prop    nil
+                                            text-align--line-justified-prop nil
+                                            text-align--line-next-word-prop nil)))
             (put-text-property lbeg (1+ lbeg)
                                text-align--line-natural-prop (float text-px))
             (put-text-property lbeg (1+ lbeg)
                                text-align--line-length-prop (- lend lbeg))
             (put-text-property lbeg (1+ lbeg)
-                               text-align--line-justified-prop t))
+                               text-align--line-justified-prop t)
+            ;; Store the pixel width of the first word on the NEXT visual
+            ;; line so the delete pre-command path can detect underflow:
+            ;; when enough characters are deleted that slack ≥ next-word-px
+            ;; + space-px, that word can flow back and a full paragraph
+            ;; reflow is needed.  Measured from the char-width cache only —
+            ;; no window-text-pixel-size on this hot path.
+            (let* ((word-end (save-excursion
+                               (goto-char lend)
+                               (skip-chars-forward "^ \t\n")
+                               (point)))
+                   (nw-px   (and (> word-end lend)
+                                 (text-align--measure-chars-px lend word-end))))
+              (when (and nw-px (> nw-px 0))
+                (put-text-property lbeg (1+ lbeg)
+                                   text-align--line-next-word-prop nw-px))))
           ;; Debug: paint lend-1 green so the wrap boundary is visible.
           (when (bound-and-true-p text-align-justify-debug-mode)
             (put-text-property (1- lend) lend
@@ -1370,6 +1433,100 @@ the one before it, etc., producing the same distribution as a full reflow."
         (setq idx (if (> idx 0) (1- idx) (1- n)))))
     (setq text-align--ring-cursor-idx idx)))
 
+(defun text-align--reverse-ring-walk (char-px natural-px)
+  "Restore CHAR-PX pixels to `text-align--space-ring', updating display stamps.
+NATURAL-PX is the natural (unstamped) width of one space on this line.
+
+The inverse of `text-align--ring-walk': advances
+`text-align--ring-cursor-idx' forward by 1 on each step (wrapping from
+n-1 to 0) and adds 1 pixel — undoing the most recent reductions in
+reverse order so the distribution converges back toward Bresenham."
+  (let* ((ring text-align--space-ring)
+         (n    (length ring))
+         (idx  (or text-align--ring-cursor-idx (1- n))))
+    (dotimes (_ char-px)
+      ;; Advance cursor forward to the last-reduced space and add 1px.
+      (setq idx (if (< idx (1- n)) (1+ idx) 0))
+      (let ((cell (nth idx ring)))
+        (setcdr cell (1+ (cdr cell)))
+        (let ((pos (marker-position (car cell))))
+          (when pos
+            (with-silent-modifications
+              (put-text-property pos (1+ pos) 'display
+                                 `(space :width (,(+ natural-px (cdr cell)))))
+              (put-text-property pos (1+ pos)
+                                 text-align--justify-prop t))))))
+    (setq text-align--ring-cursor-idx idx)))
+
+(defun text-align--post-command-reverse-ring-walk ()
+  "One-shot post-command: restore justify stamps after a deletion.
+Removes itself, then uses `text-align--pending-delete-px' to subtract
+the deleted character's width from `text-align--line-natural-px' and
+calls `text-align--reverse-ring-walk' to add pixels back to spaces.
+Falls through to `text-align--post-command-delete-restamp' if any
+condition cannot be satisfied — ensures stamps are never left stale."
+  (remove-hook 'post-command-hook #'text-align--post-command-reverse-ring-walk t)
+  (let ((walked nil))
+    (when text-align--debug-delete
+      (message "jd del-post: pending=%s natural=%s ring=%s lbeg=%s vbeg=%s"
+               text-align--pending-delete-px
+               text-align--line-natural-px
+               (and text-align--space-ring t)
+               text-align--ring-lbeg
+               face-extra--vline-beg))
+    (when (and text-align--pending-delete-px
+               text-align--line-natural-px
+               text-align--space-ring
+               text-align--ring-lbeg
+               face-extra--vline-beg
+               (= text-align--ring-lbeg face-extra--vline-beg))
+      (let* ((char-px     text-align--pending-delete-px)
+             (new-natural (- text-align--line-natural-px char-px))
+             ;; Look up natural space width.  Use nil as the face key for
+             ;; bare body text (no font-lock-face or face property) — the
+             ;; text-body remap gives it a consistent space width that was
+             ;; already cached under (nil . ?\s) by text-align--natural-space-px.
+             (natural-space-px
+              (when (and text-align--space-ring text-align--char-width-cache)
+                (let* ((sp  (marker-position (caar text-align--space-ring)))
+                       (f   (and sp (or (get-text-property sp 'font-lock-face)
+                                        (get-text-property sp 'face)))))
+                  (gethash (cons f ?\s) text-align--char-width-cache)))))
+        (when text-align--debug-delete
+          (message "jd del-post: char-px=%s new-natural=%s natural-space-px=%s"
+                   char-px new-natural natural-space-px))
+        (when natural-space-px
+          (setq text-align--line-natural-px new-natural)
+          (text-align--reverse-ring-walk char-px natural-space-px)
+          (setq walked t))))
+    ;; If ring walk could not complete for any reason, fall back to a
+    ;; full restamp so stamps are never silently left stale.
+    (unless walked
+      (when text-align--debug-delete
+        (message "jd del-post: FALLBACK walked=nil"))
+      (setq text-align--ring-lbeg       nil
+            text-align--space-ring       nil
+            text-align--ring-cursor-idx  nil
+            text-align--line-natural-px  nil)
+      (text-align--post-command-delete-restamp)))
+  (setq text-align--pending-delete-px nil))
+
+(defun text-align--post-command-delete-restamp ()
+  "One-shot post-command: restamp vline with fresh measurement after deletion.
+Fallback for when the ring is stale or a space character was deleted.
+Recomputes visual-line end via `vertical-motion' on post-deletion content
+and calls `text-align--stamp' directly — no ring, no hash walk."
+  (remove-hook 'post-command-hook #'text-align--post-command-delete-restamp t)
+  (when (and face-extra--vline-beg face-extra--vline-end)
+    (let ((lbeg face-extra--vline-beg)
+          (lend (save-excursion
+                  (goto-char face-extra--vline-beg)
+                  (let ((fontification-functions nil))
+                    (vertical-motion 1))
+                  (point))))
+      (when (< lbeg lend)
+        (text-align--stamp lbeg lend 'justify nil)))))
+
 (defun text-align--post-command-reflow ()
   "One-shot post-command hook: reflow the paragraph at point after overflow.
 Removes itself on first run, then performs a pass-3 walk starting from
@@ -1548,7 +1705,145 @@ For self-inserting commands:
                               (point))))
               (text-align--justify-clear vend next-end))
             (add-hook 'post-command-hook
-                      #'text-align--post-command-reflow nil t))))))))
+                      #'text-align--post-command-reflow nil t)))))))
+  ;; Delete commands: symmetric with the insert ring-walk path.
+  ;;
+  ;; Three cases, in priority order:
+  ;;
+  ;; 1. Underflow: deleting this character would open enough slack for the
+  ;;    first word on the next visual line to flow back onto this line.
+  ;;    Detection: new-slack = (avail - (natural-px - char-px))
+  ;;               underflow  = (new-slack >= next-word-px + space-px)
+  ;;    Action: nil ring, clear the full paragraph, let jit-lock + pass-3
+  ;;    re-stamp.  No post-command hook — the paragraph clear is enough.
+  ;;
+  ;; 2. Ring warm + non-space deleted (and no underflow): reverse ring-walk.
+  ;;    Schedule `text-align--post-command-reverse-ring-walk' to add back
+  ;;    the deleted character's pixels to the interword spaces.
+  ;;
+  ;; 3. Fallback — stale ring, space deleted, or no char-px: clear the
+  ;;    visual line's stamps and schedule a fresh restamp.
+  (when (memq this-command '(delete-backward-char
+                              backward-delete-char-untabify
+                              org-delete-backward-char
+                              delete-forward-char
+                              delete-char
+                              org-delete-char
+                              evil-delete-backward-char-and-join
+                              evil-delete-char))
+    (let* ((del-pos  (if (memq this-command '(delete-forward-char delete-char))
+                         (point)
+                       (1- (point))))
+           (del-char (and (>= del-pos (point-min))
+                          (<  del-pos (point-max))
+                          (char-after del-pos)))
+           ;; Measure the about-to-be-deleted character from cache (or
+           ;; via window-text-pixel-size on first encounter).  Done
+           ;; unconditionally so it is available for both the underflow
+           ;; check and the ring-walk path.
+           (face     (and del-char
+                          (or (get-text-property del-pos 'font-lock-face)
+                              (get-text-property del-pos 'face))))
+           (win      (get-buffer-window (current-buffer)))
+           (avail    (and win (window-body-width win t)))
+           (cache    (or text-align--char-width-cache
+                         (setq text-align--char-width-cache
+                               (make-hash-table :test #'equal))))
+           (key      (and del-char (cons face del-char)))
+           (char-px  (and del-char
+                          (or (gethash key cache)
+                              (and win avail
+                                   (let ((w (car (window-text-pixel-size
+                                                   win del-pos (1+ del-pos)
+                                                   (* 2 avail)))))
+                                     (puthash key w cache)
+                                     w)))))
+           (ring-warm (and del-char
+                           text-align--line-natural-px
+                           text-align--space-ring
+                           text-align--ring-lbeg
+                           face-extra--vline-beg
+                           (= text-align--ring-lbeg face-extra--vline-beg)))
+           ;; Underflow check — only computable when the ring is warm (we
+           ;; need natural-px to know the current line width), char-px is
+           ;; known, and the next-word-prop was stored at the last flush.
+           ;; Use vbeg = face-extra--vline-beg (= ring-lbeg when warm)
+           ;; to read the per-line metadata.
+           (next-word-px (and ring-warm vbeg
+                              (get-text-property vbeg
+                                                 text-align--line-next-word-prop)))
+           (space-px     (and ring-warm text-align--char-width-cache
+                              (let ((sp (marker-position
+                                         (caar text-align--space-ring))))
+                                (and sp
+                                     (gethash
+                                      (cons (or (get-text-property
+                                                 sp 'font-lock-face)
+                                                (get-text-property
+                                                 sp 'face))
+                                            ?\s)
+                                      text-align--char-width-cache)))))
+           (new-slack    (and ring-warm char-px avail
+                              (- avail (- text-align--line-natural-px char-px))))
+           (underflow    (and next-word-px space-px new-slack
+                              (>= new-slack (+ next-word-px space-px)))))
+      (when text-align--debug-delete
+        (message
+         "jd del-pre: cmd=%s del-char=%s char-px=%s ring-warm=%s natural=%s ring=%s vbeg=%s nw=%s sp=%s slack=%s underflow=%s"
+         this-command
+         (and del-char (char-to-string del-char))
+         char-px ring-warm text-align--line-natural-px
+         (and text-align--ring-lbeg text-align--space-ring t)
+         face-extra--vline-beg next-word-px space-px new-slack underflow))
+      (cond
+       ;; Case 1 — Underflow: word on next line can flow back.
+       ;; Clear the full paragraph before deletion so vertical-motion
+       ;; sees clean (unstamped) geometry when jit-lock re-runs.
+       ;; Nil the ring so the ring-live guard does not suppress that clear.
+       (underflow
+        (when text-align--debug-delete
+          (message "jd del-pre: UNDERFLOW — clearing paragraph slack=%.1f nw=%.1f+sp=%.1f"
+                   new-slack next-word-px space-px))
+        (setq text-align--ring-lbeg       nil
+              text-align--space-ring       nil
+              text-align--ring-cursor-idx  nil
+              text-align--line-natural-px  nil
+              text-align--pending-delete-px nil)
+        ;; Only clear from the current line forward — lines before vbeg are
+        ;; unaffected by underflow (a word flows from line N+1 back to line N;
+        ;; lines N-1, N-2 … are unchanged).  Clearing the full paragraph would
+        ;; leave those earlier lines cleared but un-re-stamped, because
+        ;; `text-align--post-command-reflow' starts its walk from vline-beg,
+        ;; not from (car para).
+        (let* ((para (face-extra--paragraph-bounds vbeg vbeg)))
+          (text-align--pre-clear-stamps vbeg (cdr para)))
+        ;; Schedule a full paragraph reflow in post-command — same as the
+        ;; overflow path.  Jit-lock only re-fontifies the narrow modified
+        ;; region, not the full paragraph; without this hook the lines below
+        ;; point keep their old (now-wrong) justify distribution.
+        ;; `text-align--post-command-reflow' sets `face-extra--pass3-force-full'
+        ;; and calls `face-extra--dispatch-pass3' over the whole paragraph.
+        (add-hook 'post-command-hook #'text-align--post-command-reflow nil t))
+       ;; Case 2 — Ring warm + non-space: reverse ring-walk.
+       ((and ring-warm (not (= del-char ?\s)) char-px)
+        (when text-align--debug-delete
+          (message "jd del-pre: ring-walk path char-px=%s" char-px))
+        (setq text-align--pending-delete-px char-px)
+        (add-hook 'post-command-hook
+                  #'text-align--post-command-reverse-ring-walk nil t))
+       ;; Case 3 — Fallback: stale ring, space deleted, or char-px unknown.
+       (t
+        (when text-align--debug-delete
+          (message "jd del-pre: FALLBACK ring-warm=%s del-char=%s"
+                   ring-warm (and del-char (char-to-string del-char))))
+        (text-align--justify-clear vbeg vend)
+        (setq text-align--ring-lbeg       nil
+              text-align--space-ring       nil
+              text-align--ring-cursor-idx  nil
+              text-align--line-natural-px  nil
+              text-align--pending-delete-px nil)
+        (add-hook 'post-command-hook
+                  #'text-align--post-command-delete-restamp nil t))))))
 
 
 ;;;; ================================================================
