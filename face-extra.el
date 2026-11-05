@@ -21,7 +21,7 @@
 ;; Properties can be attached to faces globally or buffer-locally:
 ;;
 ;;   ;; Global — affects all buffers:
-;;   (face-extra-add 'text-body 'variable-spacing-ratio 1.5)
+;;   (face-extra-add 'body 'variable-spacing-ratio 1.5)
 ;;
 ;;   ;; Buffer-local — per-document styling:
 ;;   (face-extra-add-relative 'org-quote 'variable-spacing-ratio 1.0)
@@ -410,7 +410,7 @@ variable-spacing).  Global library-level defaults should use
     ;; that inherits from FACE through face-remapping-alist or face :inherit
     ;; may have cached a stale value resolved before this change was made.
     ;; Single-face invalidation (`face-extra--invalidate-face') is
-    ;; insufficient when the changed face is a base like `text-body' whose
+    ;; insufficient when the changed face is a base like `body' whose
     ;; properties propagate transitively to dozens of inheriting faces (e.g.
     ;; `org-list-dt', all `org-level-*', etc.).  A full wipe is safe because
     ;; the cache is rebuilt lazily on next access.
@@ -620,8 +620,8 @@ Suppressor-wins semantics: if ANY face in the face list at a position
 has an explicit local suppressor (value 0 in
 `face-extra--local-properties') for a property, that property is NOT
 collected from any face at that position.  This prevents a stale
-`text-body' stamp alongside a suppressed face (e.g. `org-quote') from
-leaking the `text-body' ratio through."
+`body' stamp alongside a suppressed face (e.g. `org-quote') from
+leaking the `body' ratio through."
   (let ((spans (make-hash-table :test #'eq))
         (pos beg))
     (while (< pos end)
@@ -1211,7 +1211,7 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                      (lend  (point))
                      ;; Face at visual-line BOL.  font-lock-face takes
                      ;; priority (Org regexp keywords); fall back to face
-                     ;; (Org anchor functions, text-body stamp).
+                     ;; (Org anchor functions, body stamp).
                      ;;
                      ;; When lbeg is inside an invisible (folded) region —
                      ;; e.g. the "#+TITLE: " prefix folded by
@@ -1241,7 +1241,7 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                   ;; Resolve pass-3 properties from the face cache.
                   ;; Use a per-line alist to take the first (highest-priority)
                   ;; value when multiple faces on the same BOL carry the same
-                  ;; property (e.g. text-body + org-cite both have text-align).
+                  ;; property (e.g. body + org-cite both have text-align).
                   (let ((line-props nil))
                     (dolist (face faces)
                       (let ((entry (face-extra--get-cache-entry face)))

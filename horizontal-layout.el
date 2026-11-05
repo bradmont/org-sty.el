@@ -1484,7 +1484,7 @@ condition cannot be satisfied — ensures stamps are never left stale."
              (new-natural (- text-align--line-natural-px char-px))
              ;; Look up natural space width.  Use nil as the face key for
              ;; bare body text (no font-lock-face or face property) — the
-             ;; text-body remap gives it a consistent space width that was
+             ;; body remap gives it a consistent space width that was
              ;; already cached under (nil . ?\s) by text-align--natural-space-px.
              (natural-space-px
               (when (and text-align--space-ring text-align--char-width-cache)
@@ -1873,7 +1873,7 @@ For self-inserting commands:
 Alignment values are configured via `face-extra-add-relative' (buffer-local)
 or `face-extra-add' (global):
 
-  (face-extra-add-relative \\='text-body \\='text-align \\='center)
+  (face-extra-add-relative \\='body \\='text-align \\='center)
 
 `face-extra--dispatch-pass3' owns the apply loop; this mode ensures it
 is registered and handles cleanup on disable."

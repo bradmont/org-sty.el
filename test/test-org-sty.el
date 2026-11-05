@@ -227,7 +227,7 @@ floor height with no theme colours."
 
 (ert-deftest os/parity/apply-faces-stores-suppressor-before-dispatch ()
   "After org-sty--apply-faces, collect-spans returns no ratio span for
-a suppressed face — even when a global text-body ratio is set.
+a suppressed face — even when a global body ratio is set.
 
 This is the core parity test: it verifies that the suppressor installed
 via :faces is visible to the dispatch system."
@@ -236,8 +236,8 @@ via :faces is visible to the dispatch system."
     (put-text-property 1 20 'face 'org-quote)
     (unwind-protect
         (progn
-          ;; Set global text-body ratio (as wp-eval does).
-          (put 'text-body 'variable-spacing-ratio 1.6)
+          ;; Set global body ratio (as wp-eval does).
+          (put 'body 'variable-spacing-ratio 1.6)
           ;; Apply the suppressor via apply-faces (as org-sty--apply-faces does).
           (org-sty--apply-faces
            `(:faces ((org-quote . (:variable-spacing-ratio 0)))))
@@ -251,8 +251,8 @@ via :faces is visible to the dispatch system."
                                (nth 2 s) (> (nth 2 s) 0)))
                         ratio-spans))))
           (org-sty--clear-face-remaps))
-      (setplist 'text-body
-                (cl-loop for (k v) on (symbol-plist 'text-body) by #'cddr
+      (setplist 'body
+                (cl-loop for (k v) on (symbol-plist 'body) by #'cddr
                          unless (eq k 'variable-spacing-ratio)
                          append (list k v))))))
 

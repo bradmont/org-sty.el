@@ -71,7 +71,7 @@ distinct from main paragraph content.  The default simply inherits
 
 Applied to the label portion of `[fn:N]' references after the `[fn:'
 prefix and `]' suffix are hidden via display properties.  Sets the label to 1.2× the inherited (floor) size — the `org-footnote'
-remap chains through `text-body', so the effective size is relative to
+remap chains through `body', so the effective size is relative to
 the floor face, not body text.  Raise 0.5 lifts it to roughly cap-height.  The vertical raise is applied separately as
 a `display' \\='(raise 0.7) property.  (`:raise' is not a valid face
 attribute; see AGENTS.md for planned face-extra support.)
@@ -451,15 +451,15 @@ avoiding the face duplication that caused hanging-wrap double-application.")
   (font-lock-add-keywords nil org-footnote-extra--font-lock-keywords t)
   ;; 2. Register org-footnote as a content face buffer-locally so
   ;;    `variable-spacing--has-explicit-face-p' returns t for it and
-  ;;    text-body is not stamped over definition text.
+  ;;    body is not stamped over definition text.
   (setq-local variable-spacing-content-faces
               (cons 'org-footnote variable-spacing-content-faces))
   ;; 3. `variable-spacing-mode' installs content-face remaps at enable
-  ;;    time, before this mode exists.  Install the (:inherit text-body)
+  ;;    time, before this mode exists.  Install the (:inherit body)
   ;;    remap for org-footnote now so it scales with body text.
   (when (bound-and-true-p variable-spacing-mode)
     (setq org-footnote-extra--remap-cookie
-          (face-remap-add-relative 'org-footnote :inherit 'text-body)))
+          (face-remap-add-relative 'org-footnote :inherit 'body)))
   ;; 4. Justify definition lines.  Spacing ratio is intentionally not
   ;;    set here — it is the style config's responsibility (e.g. via
   ;;    :variable-spacing-ratio in :faces) so that the config can

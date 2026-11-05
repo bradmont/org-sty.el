@@ -75,20 +75,20 @@
       (should-not (vs-test--has-spacer-p 6))  ; gap between spans
       (should-not (vs-test--has-spacer-p 12)))))
 
-(ert-deftest vs/apply-ratio/uses-text-body-for-measurement ()
-  "apply-ratio always measures spacer height from text-body, not the face
+(ert-deftest vs/apply-ratio/uses-body-for-measurement ()
+  "apply-ratio always measures spacer height from body, not the face
 at the span position.  This ensures consistent visual rhythm regardless
 of which face inherited the ratio.
 
-Regression test for: org-cite got 24px spacer while text-body got 30px,
+Regression test for: org-cite got 24px spacer while body got 30px,
 because the old code used the face at BEG (org-cite) to measure height."
   (vs-test--with-buffer
-    ;; Two spans: one labelled with org-cite face, one with text-body.
+    ;; Two spans: one labelled with org-cite face, one with body.
     ;; Even though the faces differ, both spans with the same ratio
     ;; must produce the SAME line-prefix spec.
     (insert "cite textbody")
     (put-text-property 1 5 'face 'org-cite)
-    (put-text-property 6 14 'face 'text-body)
+    (put-text-property 6 14 'face 'body)
     (let ((variable-spacing-mode t))
       (variable-spacing--apply-ratio
        (list (list 1 5 1.6)
@@ -147,79 +147,79 @@ given spans are left untouched."
 ;;; variable-spacing--stamp-body-text (Org backend, pass 0)
 ;;; -----------------------------------------------------------------------
 
-(ert-deftest vs/stamp/unstyled-gets-text-body ()
-  "Characters with no face/font-lock-face are stamped with text-body."
+(ert-deftest vs/stamp/unstyled-gets-body ()
+  "Characters with no face/font-lock-face are stamped with body."
   (vs-test--with-buffer
     (insert "plain")
     ;; No face properties set.
     (variable-spacing--stamp-body-text 1 (point-max))
-    ;; The stamp uses add-face-text-property with APPEND=t, so text-body
+    ;; The stamp uses add-face-text-property with APPEND=t, so body
     ;; is the face or part of the face list.
     (let ((f (get-text-property 1 'face)))
-      (should (or (eq f 'text-body)
-                  (and (listp f) (memq 'text-body f)))))))
+      (should (or (eq f 'body)
+                  (and (listp f) (memq 'body f)))))))
 
 (ert-deftest vs/stamp/font-lock-face-blocks-stamp ()
-  "Characters with font-lock-face set do NOT get text-body stamped."
+  "Characters with font-lock-face set do NOT get body stamped."
   (vs-test--with-buffer
     (insert "heading")
     (put-text-property 1 8 'font-lock-face 'org-level-1)
     (variable-spacing--stamp-body-text 1 (point-max))
     (let ((f (get-text-property 1 'face)))
-      (should-not (or (eq f 'text-body)
-                      (and (listp f) (memq 'text-body f)))))))
+      (should-not (or (eq f 'body)
+                      (and (listp f) (memq 'body f)))))))
 
 (ert-deftest vs/stamp/content-face-blocks-stamp ()
-  "Characters already carrying a content face do NOT get text-body."
+  "Characters already carrying a content face do NOT get body."
   (vs-test--with-buffer
     (insert "quoted text")
     ;; org-quote is in variable-spacing-content-faces.
     (put-text-property 1 12 'face 'org-quote)
     (variable-spacing--stamp-body-text 1 (point-max))
-    ;; text-body should NOT have been added.
+    ;; body should NOT have been added.
     (let ((f (get-text-property 1 'face)))
       (should (or (eq f 'org-quote)
                   (and (listp f)
                        (memq 'org-quote f)
-                       (not (memq 'text-body f))))))))
+                       (not (memq 'body f))))))))
 
 (ert-deftest vs/stamp/metadata-face-blocks-stamp ()
-  "Characters carrying a metadata face do NOT get text-body."
+  "Characters carrying a metadata face do NOT get body."
   (vs-test--with-buffer
     (insert ":DRAWER:")
     (put-text-property 1 9 'face 'org-drawer)
     (variable-spacing--stamp-body-text 1 (point-max))
     (let ((f (get-text-property 1 'face)))
-      (should-not (and (listp f) (memq 'text-body f)))
-      (should-not (eq f 'text-body)))))
+      (should-not (and (listp f) (memq 'body f)))
+      (should-not (eq f 'body)))))
 
-(ert-deftest vs/stamp/clears-stale-text-body ()
-  "Stale text-body stamps are removed before re-stamping."
+(ert-deftest vs/stamp/clears-stale-body ()
+  "Stale body stamps are removed before re-stamping."
   (vs-test--with-buffer
-    ;; Pre-load a stale text-body stamp on positions that now have org-quote.
+    ;; Pre-load a stale body stamp on positions that now have org-quote.
     (insert "stale")
-    (put-text-property 1 6 'face '(text-body org-quote))
+    (put-text-property 1 6 'face '(body org-quote))
     (variable-spacing--stamp-body-text 1 (point-max))
-    ;; text-body must be gone; org-quote must remain.
+    ;; body must be gone; org-quote must remain.
     (let ((f (get-text-property 1 'face)))
-      (should-not (and (listp f) (memq 'text-body f)))
-      (should-not (eq f 'text-body))
+      (should-not (and (listp f) (memq 'body f)))
+      (should-not (eq f 'body))
       ;; org-quote should still be there.
       (should (or (eq f 'org-quote)
                   (and (listp f) (memq 'org-quote f)))))))
 
-(ert-deftest vs/stamp/newline-mid-span-gets-text-body ()
-  "A newline in the middle of an unstyled span is stamped text-body."
+(ert-deftest vs/stamp/newline-mid-span-gets-body ()
+  "A newline in the middle of an unstyled span is stamped body."
   (vs-test--with-buffer
     (insert "line1\nline2")
     ;; No face on any character.
     (variable-spacing--stamp-body-text 1 (point-max))
     ;; The \n at position 6 is mid-span (preceded by 'l', a non-\n char,
     ;; but the preceding char has no explicit face, so the span doesn't split).
-    ;; \n should be stamped text-body.
+    ;; \n should be stamped body.
     (let ((f (get-text-property 6 'face)))
-      (should (or (eq f 'text-body)
-                  (and (listp f) (memq 'text-body f)))))))
+      (should (or (eq f 'body)
+                  (and (listp f) (memq 'body f)))))))
 
 (ert-deftest vs/stamp/newline-after-heading-inherits-heading-face ()
   "A \\n that immediately follows a heading span inherits the heading face."
@@ -231,17 +231,17 @@ given spans are left untouched."
     ;; Positions 1-6 have font-lock-face org-level-1; position 7 is \n.
     (put-text-property 1 7 'font-lock-face 'org-level-1)
     (variable-spacing--stamp-body-text 1 (point-max))
-    ;; Position 7 (\n) should have inherited the heading's face (not text-body),
+    ;; Position 7 (\n) should have inherited the heading's face (not body),
     ;; since it's at the START of a body-context span and its preceding char
     ;; belongs to a non-body span.
     (let ((f7 (get-text-property 7 'face)))
-      ;; Should carry org-level-1 (or a list containing it), not text-body.
+      ;; Should carry org-level-1 (or a list containing it), not body.
       (should (or (eq f7 'org-level-1)
                   (and (listp f7) (memq 'org-level-1 f7)))))
-    ;; Body text at position 8+ should be text-body.
+    ;; Body text at position 8+ should be body.
     (let ((f8 (get-text-property 8 'face)))
-      (should (or (eq f8 'text-body)
-                  (and (listp f8) (memq 'text-body f8)))))))
+      (should (or (eq f8 'body)
+                  (and (listp f8) (memq 'body f8)))))))
 
 ;;; -----------------------------------------------------------------------
 ;;; Suppressor integration: org-quote with 0 via face-extra-add-relative
@@ -255,10 +255,10 @@ applied even though :variable-spacing-ratio 0 was set via :faces."
   (vs-test--with-buffer
     (insert "quoted text here")
     ;; Simulate exactly what org-sty-apply / variable-spacing-mode does:
-    ;; 1. Store the text-body ratio globally (as wp-eval does).
+    ;; 1. Store the body ratio globally (as wp-eval does).
     (unwind-protect
         (progn
-          (put 'text-body 'variable-spacing-ratio 1.6)
+          (put 'body 'variable-spacing-ratio 1.6)
           ;; 2. Set the suppressor for org-quote via face-extra-add-relative.
           (let ((cookie (face-extra-add-relative
                          'org-quote 'variable-spacing-ratio 0)))
@@ -279,30 +279,30 @@ applied even though :variable-spacing-ratio 0 was set via :faces."
                                   (and (>= (nth 0 s) 1) (<= (nth 1 s) 17)))
                                 ratio-spans)))))
               (face-extra-remove cookie))))
-      (setplist 'text-body
-                (cl-loop for (k v) on (symbol-plist 'text-body) by #'cddr
+      (setplist 'body
+                (cl-loop for (k v) on (symbol-plist 'body) by #'cddr
                          unless (eq k 'variable-spacing-ratio)
                          append (list k v))))))
 
-(ert-deftest vs/suppressor/text-body-gets-spacer ()
-  "Positions with face=text-body DO get a spacer when ratio is set globally."
+(ert-deftest vs/suppressor/body-gets-spacer ()
+  "Positions with face=body DO get a spacer when ratio is set globally."
   (vs-test--with-buffer
     (insert "body text")
     (unwind-protect
         (progn
-          (put 'text-body 'variable-spacing-ratio 1.6)
-          (put-text-property 1 10 'face 'text-body)
+          (put 'body 'variable-spacing-ratio 1.6)
+          (put-text-property 1 10 'face 'body)
           (let ((spans-table (face-extra--collect-spans 1 10)))
             (let ((ratio-spans (gethash 'variable-spacing-ratio spans-table)))
               (should ratio-spans)
               (should (cl-some (lambda (s) (eql 1.6 (nth 2 s))) ratio-spans)))))
-      (setplist 'text-body
-                (cl-loop for (k v) on (symbol-plist 'text-body) by #'cddr
+      (setplist 'body
+                (cl-loop for (k v) on (symbol-plist 'body) by #'cddr
                          unless (eq k 'variable-spacing-ratio)
                          append (list k v))))))
 
 (ert-deftest vs/suppressor/suppress-wins-over-inherited-ratio ()
-  "When BOTH text-body and org-quote are in the face list, org-quote's 0
+  "When BOTH body and org-quote are in the face list, org-quote's 0
 suppressor must prevent collect-spans from returning a span for that position.
 
 This is the multi-face version of the org-quote spacing bug."
@@ -310,19 +310,19 @@ This is the multi-face version of the org-quote spacing bug."
     (insert "content")
     (unwind-protect
         (progn
-          (put 'text-body 'variable-spacing-ratio 1.6)
+          (put 'body 'variable-spacing-ratio 1.6)
           (let ((cookie (face-extra-add-relative
                          'org-quote 'variable-spacing-ratio 0)))
             (unwind-protect
                 (progn
-                  ;; Simulate a face list that has BOTH text-body (stale stamp)
+                  ;; Simulate a face list that has BOTH body (stale stamp)
                   ;; and org-quote (set by Org) at the same position.
-                  (put-text-property 1 8 'face '(text-body org-quote))
+                  (put-text-property 1 8 'face '(body org-quote))
                   (let ((spans-table (face-extra--collect-spans 1 8)))
                     (let ((ratio-spans (gethash 'variable-spacing-ratio spans-table)))
                       ;; Currently this test will FAIL with the existing code
                       ;; because collect-spans iterates all faces independently:
-                      ;; text-body contributes 1.6 even though org-quote says 0.
+                      ;; body contributes 1.6 even though org-quote says 0.
                       ;; This is a known bug to be fixed.
                       ;;
                       ;; Expected (after fix): no spans, or only spans with nil value.
@@ -333,8 +333,8 @@ This is the multi-face version of the org-quote spacing bug."
                                        (and (nth 2 s) (> (nth 2 s) 0))))
                                 ratio-spans)))))
               (face-extra-remove cookie))))
-      (setplist 'text-body
-                (cl-loop for (k v) on (symbol-plist 'text-body) by #'cddr
+      (setplist 'body
+                (cl-loop for (k v) on (symbol-plist 'body) by #'cddr
                          unless (eq k 'variable-spacing-ratio)
                          append (list k v))))))
 
@@ -359,8 +359,8 @@ This is the multi-face version of the org-quote spacing bug."
                              spec))))
       (variable-spacing--remove-body-remaps))))
 
-(ert-deftest vs/remaps/content-face-gets-text-body-inherit ()
-  "After install-body-remaps, content faces have a (:inherit text-body) remap."
+(ert-deftest vs/remaps/content-face-gets-body-inherit ()
+  "After install-body-remaps, content faces have a (:inherit body) remap."
   (vs-test--with-buffer
     (variable-spacing--install-body-remaps)
     (unwind-protect
@@ -369,7 +369,7 @@ This is the multi-face version of the org-quote spacing bug."
           (should entry)
           (should (cl-some (lambda (s)
                              (and (listp s)
-                                  (eq (plist-get s :inherit) 'text-body)))
+                                  (eq (plist-get s :inherit) 'body)))
                            (cdr entry))))
       (variable-spacing--remove-body-remaps))))
 
