@@ -197,7 +197,7 @@
                      (org-num-mode 1))
                    (flyspell-mode 1)
                    (setq org-pretty-entities t)
-                   (org-toggle-pretty-entities)
+                   ;(org-toggle-pretty-entities)
                    (setq-local org-footnote-section "*paragraph*")
                    (setq-local org-footnote-auto-adjust 'renumber))
                )
