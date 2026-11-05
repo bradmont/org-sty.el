@@ -944,6 +944,17 @@ to determine which jit-lock chunks are processed, at what idle state, and
 whether the affected paragraphs are ever included in a full-region passes 1–2
 run.
 
+**Occasional paragraph spacing not applied during editing** (OBSERVED, not yet diagnosed):
+Intermittent: some paragraphs lose their `variable-spacing` height stamps
+during normal editing — neighbours render correctly while the affected
+paragraph shows no line-prefix spacing.  First noticed after the
+`text-align-clean` merge (delete-path ring-walk + underflow detection
+commits).  Unclear whether caused by the new pre-clear logic, the
+window-end cap in `post-command-reflow`, or the stale-ring discard.
+Distinguish from the "initial open" bug below by checking whether the
+affected paragraph had stamps before the edit and lost them, vs never
+receiving stamps at all.  Needs reproduction steps before diagnosis.
+
 **Footnote definition gap collapses when org-cite-appear expands a citation** (UNFIXED):
 When `org-cite-appear-mode` is active and the cursor moves into a footnote
 definition that contains a citation, `org-cite-appear` re-renders the citation
