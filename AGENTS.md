@@ -871,6 +871,20 @@ and/or Org keyword activation are the remaining contributors.
 
 ### Known remaining issues
 
+**`text-scale-mode` increase breaks justification** (OBSERVED, likely latent):
+After `C-x C-=` to zoom in, justify stamps become visibly wrong — spaces
+are not redistributed to the new character widths.  Suspected root cause:
+`text-align--char-width-cache` and `text-align--line-natural-px` cache
+pixel widths measured at the old scale; after scaling the cached values
+are stale but the cache-hit path skips re-measurement.
+`variable-spacing--text-scale-refresh` calls `font-lock-flush` which
+should invalidate all jit-lock state, but the char-width cache and ring
+are not cleared.  Likely fix: call `text-align--clear-char-width-cache`
+(or `face-extra-invalidate-cache-functions`) from the text-scale refresh
+path so the justify char-width cache, ring, and natural-px are discarded
+along with the spacer properties.  Probably a latent bug predating the
+Phase 2 refactor; not introduced by the mechanical moves.
+
 **Heading justification: over-wide spaces and wrong visual-line wrap** (FIXED):
 Root cause: `org-hide` (the face Org applies as a `face` text property to
 leading heading stars) was absent from `variable-spacing-metadata-faces`.
