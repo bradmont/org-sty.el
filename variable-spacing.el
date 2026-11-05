@@ -163,10 +163,14 @@ when called interactively."
 
 (defun variable-spacing--text-scale-refresh (&rest _)
   "Recompute spacing after a text-scale change.
-Advises `text-scale-mode'.  Clears stale pixel spacers and flushes
-font-lock so face-extra dispatch recomputes them at the new scale."
+Advises `text-scale-mode'.  Clears stale pixel spacers, invalidates the
+face-extra cache (which also runs `face-extra-invalidate-cache-functions'
+to clear secondary caches such as the justify char-width cache and ring),
+and flushes font-lock so face-extra dispatch recomputes everything at the
+new scale."
   (when (bound-and-true-p variable-spacing-mode)
     (variable-spacing-clear)
+    (face-extra--invalidate-cache)
     (font-lock-flush)))
 
 (defun variable-spacing--body-face-refresh (face &rest _)

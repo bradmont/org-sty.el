@@ -887,7 +887,14 @@ cached character widths and the derived ring state stale."
         text-align--line-natural-px     nil
         text-align--space-ring          nil
         text-align--ring-cursor-idx     nil
-        text-align--pending-delete-px   nil))
+        text-align--pending-delete-px   nil)
+  ;; Clear per-line content hashes so the next pass-3 run re-measures
+  ;; stamps at the new font metrics rather than skipping on hash hits.
+  ;; Without this, font/scale changes leave old justify stamps in place
+  ;; because buffer content is unchanged and the hash check declares hits.
+  (with-silent-modifications
+    (remove-text-properties (point-min) (point-max)
+                            (list text-align--line-hash-prop nil))))
 
 (defun text-align--justify-clear (beg end)
   "Remove stale justify display stamps from space characters in BEG..END.
