@@ -450,10 +450,10 @@ avoiding the face duplication that caused hanging-wrap double-application.")
   ;; 1c. Stamp org-footnote across entire definition lines.
   (font-lock-add-keywords nil org-footnote-extra--font-lock-keywords t)
   ;; 2. Register org-footnote as a content face buffer-locally so
-  ;;    `variable-spacing--has-explicit-face-p' returns t for it and
+  ;;    `face-extra--org-explicit-face-p' returns t for it and
   ;;    body is not stamped over definition text.
-  (setq-local variable-spacing-content-faces
-              (cons 'org-footnote variable-spacing-content-faces))
+  (setq-local face-extra-org-content-faces
+              (cons 'org-footnote face-extra-org-content-faces))
   ;; 3. `variable-spacing-mode' installs content-face remaps at enable
   ;;    time, before this mode exists.  Install the (:inherit body)
   ;;    remap for org-footnote now so it scales with body text.
@@ -475,8 +475,8 @@ avoiding the face duplication that caused hanging-wrap double-application.")
   (font-lock-remove-keywords nil org-footnote-extra--def-font-lock-keywords)
   (org-footnote-extra--clear-reference-display (point-min) (point-max))
   (font-lock-remove-keywords nil org-footnote-extra--font-lock-keywords)
-  (setq-local variable-spacing-content-faces
-              (delq 'org-footnote variable-spacing-content-faces))
+  (setq-local face-extra-org-content-faces
+              (delq 'org-footnote face-extra-org-content-faces))
   (when org-footnote-extra--remap-cookie
     (face-remap-remove-relative org-footnote-extra--remap-cookie)
     (setq org-footnote-extra--remap-cookie nil))

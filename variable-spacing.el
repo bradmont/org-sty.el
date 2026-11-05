@@ -35,7 +35,7 @@
 ;; The `default' face is remapped buffer-locally to a small floor height
 ;; (`variable-spacing-floor-height') so that structural/metadata
 ;; elements (drawers, keywords, property values) that carry no explicit
-;; face naturally render small.  Faces in `variable-spacing-content-faces'
+;; face naturally render small.  Faces in `face-extra-org-content-faces'
 ;; receive a buffer-local `(:inherit body)' remap so they track
 ;; the body-text size.
 
@@ -54,25 +54,7 @@
   "Variable line spacing via pluggable backends."
   :group 'display)
 
-(defface body
-  '((t :inherit default :height 2.0))
-  "Face for word-processor body text in `variable-spacing-mode' buffers.
-
-Faces in `variable-spacing-content-faces' receive a buffer-local
-`(:inherit body)' remap so they track this face's height.
-
-The `:height 2.0' is a float multiplier relative to `default'.  When
-`variable-spacing-mode' is active, `default' is remapped to
-`variable-spacing-floor-height' (default 60 = 6 pt), so body text
-renders at 2.0 × 6 pt = 12 pt — the same size as the previous absolute
-`:height 120'.  Expressing it as a float means `text-scale-mode' works:
-its multiplier on `default' propagates through `body' to all
-content faces.
-
-To change the body size, adjust the ratio:
-
-  (set-face-attribute \\='body nil :height 2.2)  ; ~13 pt at 6 pt floor"
-  :group 'variable-spacing)
+;; `body' face is defined in face-extra.el (Section 4b).
 
 (defface variable-spacing--default
   '((t :inherit default))
@@ -104,95 +86,8 @@ The remap is strictly buffer-local and is removed on mode disable."
   :type 'integer
   :group 'variable-spacing)
 
-(defcustom variable-spacing-content-faces
-  '(;; Heading faces — sized at body scale.  Their own relative :height
-    ;; multipliers compose on top of body, preserving hierarchy.
-    ;; org-document-title is the face for the rendered title VALUE
-    ;; (the text following #+TITLE:).  It is content, not metadata.
-    ;; The #+TITLE: keyword tag itself gets org-document-info-keyword,
-    ;; which belongs in `variable-spacing-metadata-faces'.
-    org-level-1
-    org-level-2
-    org-level-3
-    org-level-4
-    org-level-5
-    org-level-6
-    org-level-7
-    org-level-8
-    org-document-title
-    ;; Block-content faces.  Block delimiter lines (#+begin_/#+end_)
-    ;; are metadata and belong in `variable-spacing-metadata-faces'.
-    org-block
-    org-table
-    org-formula
-    org-list-dt
-    org-quote
-    org-verse)
-  "Document-content faces that track body-text size in `variable-spacing-mode'.
-
-The content/metadata distinction is functional: content faces cover the
-substance of the document (headings, body text, blocks, tables, quotes);
-metadata faces cover structural annotations (drawers, keyword tags,
-block delimiters).  See `variable-spacing-metadata-faces'.
-
-When the mode is enabled, each face in this list receives a buffer-local
-remap via `face-remap-add-relative' that injects `(:inherit body)'
-into its effective attribute chain, lifting it above the floor height on
-`default'.
-
-Inline faces (bold, italic, org-code, org-link, org-cite, org-footnote,
-etc.) are intentionally absent: they can appear as the leading face in a
-list alongside a structural face (e.g. `(italic org-level-2)'), and a
-remap would make body height dominate in that context.  Instead, the
-after-fontify pass stamps `body' directly on runs that carry no
-content or metadata face.
-
-This variable can be set buffer-locally (via `setq-local' in
-file-local or dir-local variables) to customise the face treatment for
-individual documents — the intended hook for the document portability
-feature."
-  :type '(repeat face)
-  :group 'variable-spacing)
-
-(defcustom variable-spacing-metadata-faces
-  '(;; Heading stars — org-hide is applied as a `face' text property by Org.
-    org-hide
-    ;; Drawer structure.
-    org-drawer
-    org-special-keyword
-    org-property-value
-    ;; Internal gap face — whitespace in property lines left unstyled by Org.
-    variable-spacing--default
-    ;; Block delimiter lines (#+begin_X / #+end_X).  These are
-    ;; structural markers, not block content.
-    org-block-begin-line
-    org-block-end-line
-    ;; File-level keyword lines and their values.
-    ;; org-document-info-keyword is the face for keyword tags such as
-    ;; #+TITLE: — it is metadata.  org-document-title (the rendered
-    ;; title value) is content and belongs in
-    ;; `variable-spacing-content-faces'.
-    org-meta-line
-    org-keyword
-    org-document-info-keyword
-    org-document-info)
-  "Metadata faces exempt from body stamping in `variable-spacing-mode'.
-
-Metadata faces cover structural annotations that are not part of the
-readable document content: drawers, property blocks, block delimiter
-lines, and file-level keyword lines (#+OPTIONS:, #+TITLE: tag, etc.).
-They are distinct from content faces (`variable-spacing-content-faces')
-which cover headings, blocks, tables, and quotes.
-
-Faces in this list do NOT receive a `(:inherit body)' remap.  They
-are also excluded from the body stamp applied by the after-fontify
-pass, so they inherit floor size from the `default' remap regardless of
-whether they arrive as `font-lock-face' or `face' text properties.
-
-Like `variable-spacing-content-faces', this variable can be set
-buffer-locally for per-document customisation."
-  :type '(repeat face)
-  :group 'variable-spacing)
+;; `face-extra-org-content-faces', `face-extra-org-metadata-faces', and
+;; `face-extra--org-explicit-face-p' are defined in face-extra.el (Section 4b).
 
 ;;;; ----------------------------------------------------------------
 ;;;; Internal state
@@ -203,43 +98,8 @@ buffer-locally for per-document customisation."
   "Text property sentinel marking spans styled by `variable-spacing-mode'.
 Scoped so only our own properties are cleared without affecting others.")
 
-(defun variable-spacing--has-explicit-face-p (face)
-  "Return non-nil if FACE contains at least one content or metadata face.
-FACE may be a symbol, an anonymous attribute plist such as
-`(:strike-through t)', or a list thereof, as stored in the `face' text
-property.
-
-A face is explicit if it appears in `variable-spacing-content-faces'
-(document content: headings, blocks, tables — receive a body remap)
-or `variable-spacing-metadata-faces' (document metadata: drawers,
-keyword tags, block delimiters — floor-sized, exempt from stamping).
-
-Anonymous plists (cons whose car is a keyword) are never explicit: they
-carry only inline display attributes such as `:strike-through' and
-contribute no sizing context.
-
-The after-fontify pass stamps `body' on characters where this
-returns nil and no `font-lock-face' is present.  The blacklist design
-means arbitrary faces from Org or font-lock that belong to neither list
-— e.g. `font-lock-function-name-face' on footnote labels — are treated
-as non-explicit and do not block the stamp."
-  (cond
-   ((null face) nil)
-   ;; Anonymous plist — never explicit.
-   ((and (consp face) (keywordp (car face))) nil)
-   ((symbolp face)
-    (or (memq face variable-spacing-content-faces)
-        (memq face variable-spacing-metadata-faces)))
-   ((listp face)
-    (cl-some (lambda (f)
-               (and (symbolp f)
-                    (or (memq f variable-spacing-content-faces)
-                        (memq f variable-spacing-metadata-faces))))
-             face))
-   (t nil)))
-
 (defvar-local variable-spacing--body-remap-cookies nil
-  "List of cookies from `face-remap-add-relative' for `body' injection.
+  "List of cookies from `face-remap-add-relative' for body-remap injection.
 Installed on `variable-spacing-mode' enable; removed on disable.")
 
 ;;;; ----------------------------------------------------------------
@@ -267,30 +127,7 @@ could not measure font height for face `%s'" face)))
          (px     (max 0 (round (* ratio height)))))
     `(space :width 0 :height (,px))))
 
-(defun variable-spacing--add-body-face (beg end)
-  "Add `body' as a low-priority `face' property over BEG..END.
-Uses `add-face-text-property' with APPEND=t so that any face already
-present at a position (e.g. `org-footnote', `org-cite') remains as the
-higher-priority entry and its own appearance is preserved."
-  (add-face-text-property beg end 'body t))
-
-(defun variable-spacing--remove-body-face (beg end)
-  "Remove only `body' from the `face' property in BEG..END.
-Handles both a singleton symbol and a list, leaving any other faces
-(e.g. `org-footnote') intact."
-  (let ((pos beg))
-    (while (< pos end)
-      (let* ((next (or (next-single-property-change pos 'face nil end) end))
-             (f    (get-text-property pos 'face)))
-        (cond
-         ((eq f 'body)
-          (remove-text-properties pos next '(face nil)))
-         ((and (listp f) (memq 'body f))
-          (let ((trimmed (remq 'body f)))
-            (if trimmed
-                (put-text-property pos next 'face trimmed)
-              (remove-text-properties pos next '(face nil))))))
-        (setq pos next)))))
+;; `face-extra--add-body-face', `face-extra-remove-body-face' are in face-extra.el.
 
 ;;;; ----------------------------------------------------------------
 ;;;; Public API — clear
@@ -318,129 +155,7 @@ when called interactively."
                                         'wrap-prefix nil)))
         (setq pos next)))))
 
-;;;; ----------------------------------------------------------------
-;;;; Buffer-local body face injection
-;;;; ----------------------------------------------------------------
-
-(defun variable-spacing--install-body-remaps ()
-  "Install buffer-local face remaps for the `body' floor/body model.
-
-Two things happen:
-
-  1. `default' is remapped with a floor `:height' of
-     `variable-spacing-floor-height', so structural/metadata elements
-     (drawers, property values, keywords, etc.) render small without
-     per-face configuration.
-
-  2. Each face in `variable-spacing-content-faces' receives a
-     `(:inherit body)' remap so it tracks `body' for sizing.
-     The `facep' guard is omitted: faces not yet defined at enable time
-     (e.g. `org-cite' from oc.el, which loads lazily) still get a remap
-     entry that takes effect when the face is first used for display.
-
-All remaps are buffer-local; cookies are stored in
-`variable-spacing--body-remap-cookies' for clean removal."
-  (setq variable-spacing--body-remap-cookies nil)
-  ;; 1. Floor on default.
-  (push (face-remap-add-relative 'default :height variable-spacing-floor-height)
-        variable-spacing--body-remap-cookies)
-  ;; 2. Body-size injection for content faces.
-  (dolist (face variable-spacing-content-faces)
-    (push (face-remap-add-relative face :inherit 'body)
-          variable-spacing--body-remap-cookies))
-  ;; 3. Anchor metadata faces to `default'.  Some metadata faces
-  ;;    (e.g. org-block-begin-line) globally inherit from a content
-  ;;    face (org-block) that now has a body remap.  Emacs follows
-  ;;    buffer-local remaps through inheritance chains, so without an
-  ;;    explicit anchor those faces would inherit body size.  Using
-  ;;    `(:inherit default)' makes them track `default' semantically —
-  ;;    when the floor remap on `default' is in effect they are
-  ;;    floor-sized, and they follow `default' if it ever changes.
-  (dolist (face variable-spacing-metadata-faces)
-    (push (face-remap-add-relative face :inherit 'default)
-          variable-spacing--body-remap-cookies)))
-
-(defun variable-spacing--remove-body-remaps ()
-  "Remove all buffer-local face remaps installed on `variable-spacing-mode' enable."
-  (dolist (cookie variable-spacing--body-remap-cookies)
-    (face-remap-remove-relative cookie))
-  (setq variable-spacing--body-remap-cookies nil))
-
-;;;; ----------------------------------------------------------------
-;;;; Org backend for face-extra — stamp body on bare characters
-;;;; ----------------------------------------------------------------
-
-(defun variable-spacing--stamp-body-text (beg end)
-  "Stamp `body' on characters in BEG..END that Org left unstyled.
-This is the :stamp-body-text backend function registered with
-`face-extra' for `org-mode'.  Called during pass 0 of each dispatch
-cycle, before pass-1 property apply functions run.
-
-After Org's full keyword list runs for a jit-lock chunk two categories
-of characters exist:
-
-  Styled   — Org set a `face' text property (anchor functions: blocks,
-              emphasis, links) or a `font-lock-face' property (regexp
-              keywords: headlines, tables, TODO keywords).
-
-  Unstyled — neither property is set.  This is plain paragraph text
-              that Org intentionally leaves bare.
-
-This function stamps `body' on the unstyled characters so they
-render at body-text size rather than falling through to the floor
-height of `default'.
-
-Newlines are handled within the span pass.  A `\\n' in the middle of
-a body-context span is stamped `body' along with the rest of that
-span.  A `\\n' that opens a body-context span is stamped with the
-preceding character's face so it renders at the height of the line it
-terminates.
-
-Stale stamps from a previous fontification cycle are cleared first."
-  ;; Only stamp in buffers where variable-spacing-mode is active.
-  ;; The backend is registered globally (so face-extra knows about it at
-  ;; load time) but the stamp must not run in untagged / non-WP buffers:
-  ;; without the buffer-local `default' floor remap, body's :height 2.0
-  ;; multiplies against the normal default size and makes body text huge.
-  (when (bound-and-true-p variable-spacing-mode)
-  (with-silent-modifications
-    ;; 1. Clear stale body stamps so newly Org-styled text is clean.
-    (variable-spacing--remove-body-face beg end)
-    ;; 2. Re-stamp on truly unstyled runs.
-    (let ((pos beg))
-      (while (< pos end)
-        (let* ((next-face    (next-single-property-change pos 'face nil end))
-               (next-fl-face (next-single-property-change
-                              pos 'font-lock-face nil end))
-               (next         (min (or next-face end) (or next-fl-face end))))
-          (when (and (null (get-text-property pos 'font-lock-face))
-                     (not (variable-spacing--has-explicit-face-p
-                           (get-text-property pos 'face))))
-            ;; Body-context span: stamp body on the whole region.
-            ;; Newline at span start: stamp the preceding face on it so
-            ;; it renders at the height of the line it terminates.
-            ;; Blank lines (\n preceded by \n) are stamped body.
-            (let ((stamp-start pos))
-              (when (and (eq (char-after pos) ?\n)
-                         (> pos (point-min))
-                         (not (eq (char-before pos) ?\n)))
-                (let ((prev-face (or (get-text-property (1- pos) 'face)
-                                     (get-text-property (1- pos)
-                                                        'font-lock-face))))
-                  (when prev-face
-                    (add-face-text-property pos (1+ pos) prev-face t)
-                    (setq stamp-start (1+ pos)))))
-              (when (< stamp-start next)
-                (add-face-text-property stamp-start next 'body t))))
-          (setq pos next)))))))
-
-(defvar variable-spacing-org-backend
-  (list :stamp-body-text #'variable-spacing--stamp-body-text)
-  "face-extra backend plist for `org-mode'.
-
-Supplies :stamp-body-text — the pass-0 bare-text stamper that marks
-unstyled paragraph text with the `body' face so it participates
-in variable spacing.")
+;; Body remaps, stamp function, and Org backend are in face-extra.el (Section 4b).
 
 ;;;; ----------------------------------------------------------------
 ;;;; text-scale-mode advice / body face-change hook
@@ -488,11 +203,18 @@ carries a `variable-spacing-ratio'."
   :lighter " VSpac"
   (if variable-spacing-mode
       (progn
-        (variable-spacing--install-body-remaps)
+        ;; Floor remap on `default' (spacing concern — stays here).
+        ;; Body/metadata face remaps (face concern — delegated to face-extra).
+        (setq variable-spacing--body-remap-cookies
+              (cons (face-remap-add-relative
+                     'default :height variable-spacing-floor-height)
+                    (face-extra--install-body-remaps
+                     face-extra-org-content-faces
+                     face-extra-org-metadata-faces)))
         ;; face-extra owns the dispatch loop; just enable it.
         (face-extra--enable-dispatch)
-        ;; Invalidate the face cache so the new buffer-local properties
-        ;; (from install-body-remaps) are picked up immediately.
+        ;; Invalidate the face cache so the new buffer-local remaps
+        ;; are picked up immediately.
         (face-extra--invalidate-cache)
         (advice-add 'text-scale-mode :after
                     #'variable-spacing--text-scale-refresh)
@@ -512,9 +234,10 @@ carries a `variable-spacing-ratio'."
           t)
         ;; Flush to trigger dispatch on already-fontified text.
         (font-lock-flush))
-    (variable-spacing--remove-body-remaps)
+    (face-extra--remove-body-remaps variable-spacing--body-remap-cookies)
+    (setq variable-spacing--body-remap-cookies nil)
     (variable-spacing-clear)
-    (variable-spacing--remove-body-face (point-min) (point-max))
+    (face-extra-remove-body-face (point-min) (point-max))
     (font-lock-remove-keywords nil
       '(("^[ \t]*:[^:\n]+:\\([ \t]+\\)[^\n]*\\([ \t]+\\)$"
          (1 'variable-spacing--default keep)
@@ -617,7 +340,8 @@ The per-buffer spacer text properties are cleaned up by
 
 ;; Register the Org backend so face-extra's pass-0 bare-text stamper
 ;; activates in org-mode buffers where variable-spacing-mode is on.
-(face-extra-register-backend 'org-mode variable-spacing-org-backend)
+;; TODO Phase 3: move this into body-face-mode's enable body.
+(face-extra-register-backend 'org-mode face-extra-org-body-backend)
 
 (provide 'variable-spacing)
 ;;; variable-spacing.el ends here

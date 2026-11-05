@@ -144,7 +144,7 @@ given spans are left untouched."
       (should-not (vs-test--has-spacer-p 1)))))
 
 ;;; -----------------------------------------------------------------------
-;;; variable-spacing--stamp-body-text (Org backend, pass 0)
+;;; face-extra--org-stamp-body-text (Org backend, pass 0)
 ;;; -----------------------------------------------------------------------
 
 (ert-deftest vs/stamp/unstyled-gets-body ()
@@ -152,7 +152,7 @@ given spans are left untouched."
   (vs-test--with-buffer
     (insert "plain")
     ;; No face properties set.
-    (variable-spacing--stamp-body-text 1 (point-max))
+    (face-extra--org-stamp-body-text 1 (point-max))
     ;; The stamp uses add-face-text-property with APPEND=t, so body
     ;; is the face or part of the face list.
     (let ((f (get-text-property 1 'face)))
@@ -164,7 +164,7 @@ given spans are left untouched."
   (vs-test--with-buffer
     (insert "heading")
     (put-text-property 1 8 'font-lock-face 'org-level-1)
-    (variable-spacing--stamp-body-text 1 (point-max))
+    (face-extra--org-stamp-body-text 1 (point-max))
     (let ((f (get-text-property 1 'face)))
       (should-not (or (eq f 'body)
                       (and (listp f) (memq 'body f)))))))
@@ -173,9 +173,9 @@ given spans are left untouched."
   "Characters already carrying a content face do NOT get body."
   (vs-test--with-buffer
     (insert "quoted text")
-    ;; org-quote is in variable-spacing-content-faces.
+    ;; org-quote is in face-extra-org-content-faces.
     (put-text-property 1 12 'face 'org-quote)
-    (variable-spacing--stamp-body-text 1 (point-max))
+    (face-extra--org-stamp-body-text 1 (point-max))
     ;; body should NOT have been added.
     (let ((f (get-text-property 1 'face)))
       (should (or (eq f 'org-quote)
@@ -188,7 +188,7 @@ given spans are left untouched."
   (vs-test--with-buffer
     (insert ":DRAWER:")
     (put-text-property 1 9 'face 'org-drawer)
-    (variable-spacing--stamp-body-text 1 (point-max))
+    (face-extra--org-stamp-body-text 1 (point-max))
     (let ((f (get-text-property 1 'face)))
       (should-not (and (listp f) (memq 'body f)))
       (should-not (eq f 'body)))))
@@ -199,7 +199,7 @@ given spans are left untouched."
     ;; Pre-load a stale body stamp on positions that now have org-quote.
     (insert "stale")
     (put-text-property 1 6 'face '(body org-quote))
-    (variable-spacing--stamp-body-text 1 (point-max))
+    (face-extra--org-stamp-body-text 1 (point-max))
     ;; body must be gone; org-quote must remain.
     (let ((f (get-text-property 1 'face)))
       (should-not (and (listp f) (memq 'body f)))
@@ -213,7 +213,7 @@ given spans are left untouched."
   (vs-test--with-buffer
     (insert "line1\nline2")
     ;; No face on any character.
-    (variable-spacing--stamp-body-text 1 (point-max))
+    (face-extra--org-stamp-body-text 1 (point-max))
     ;; The \n at position 6 is mid-span (preceded by 'l', a non-\n char,
     ;; but the preceding char has no explicit face, so the span doesn't split).
     ;; \n should be stamped body.
@@ -230,7 +230,7 @@ given spans are left untouched."
     ;;         123456 7 8901
     ;; Positions 1-6 have font-lock-face org-level-1; position 7 is \n.
     (put-text-property 1 7 'font-lock-face 'org-level-1)
-    (variable-spacing--stamp-body-text 1 (point-max))
+    (face-extra--org-stamp-body-text 1 (point-max))
     ;; Position 7 (\n) should have inherited the heading's face (not body),
     ;; since it's at the START of a body-context span and its preceding char
     ;; belongs to a non-body span.
@@ -267,7 +267,7 @@ applied even though :variable-spacing-ratio 0 was set via :faces."
                   ;; 3. Stamp org-quote on the text (as Org does for quote blocks).
                   (put-text-property 1 17 'face 'org-quote)
                   ;; 4. Run the stamp pass (backend pass 0).
-                  (variable-spacing--stamp-body-text 1 17)
+                  (face-extra--org-stamp-body-text 1 17)
                   ;; 5. Collect spans as the dispatch would.
                   (let ((spans-table (face-extra--collect-spans 1 17)))
                     ;; No variable-spacing-ratio spans should be collected for
@@ -345,65 +345,71 @@ This is the multi-face version of the org-quote spacing bug."
 (ert-deftest vs/remaps/floor-on-default-after-install ()
   "After install-body-remaps, default has a floor :height remap."
   (vs-test--with-buffer
-    ;; We need face-remapping-alist to be buffer-local.
-    (variable-spacing--install-body-remaps)
-    (unwind-protect
-        (let ((default-entry (assq 'default face-remapping-alist)))
-          (should default-entry)
-          ;; The remap spec must contain :height variable-spacing-floor-height.
-          (let ((spec (cdr default-entry)))
-            (should (cl-some (lambda (s)
-                               (and (listp s)
-                                    (equal (plist-get s :height)
-                                           variable-spacing-floor-height)))
-                             spec))))
-      (variable-spacing--remove-body-remaps))))
+    ;; The floor remap is now installed directly in variable-spacing-mode.
+    ;; Test via the mode enable path instead.
+    (let ((floor-cookie (face-remap-add-relative
+                         'default :height variable-spacing-floor-height))
+          (body-cookies (face-extra--install-body-remaps
+                         face-extra-org-content-faces
+                         face-extra-org-metadata-faces)))
+      (setq variable-spacing--body-remap-cookies
+            (cons floor-cookie body-cookies))
+      (unwind-protect
+          (let ((default-entry (assq 'default face-remapping-alist)))
+            (should default-entry)
+            (let ((spec (cdr default-entry)))
+              (should (cl-some (lambda (s)
+                                 (and (listp s)
+                                      (equal (plist-get s :height)
+                                             variable-spacing-floor-height)))
+                               spec))))
+        (face-extra--remove-body-remaps variable-spacing--body-remap-cookies)
+        (setq variable-spacing--body-remap-cookies nil)))))
 
 (ert-deftest vs/remaps/content-face-gets-body-inherit ()
   "After install-body-remaps, content faces have a (:inherit body) remap."
   (vs-test--with-buffer
-    (variable-spacing--install-body-remaps)
-    (unwind-protect
-        ;; Check a sample content face.
-        (let ((entry (assq 'org-level-1 face-remapping-alist)))
-          (should entry)
-          (should (cl-some (lambda (s)
-                             (and (listp s)
-                                  (eq (plist-get s :inherit) 'body)))
-                           (cdr entry))))
-      (variable-spacing--remove-body-remaps))))
+    (let ((cookies (face-extra--install-body-remaps
+                    face-extra-org-content-faces
+                    face-extra-org-metadata-faces)))
+      (unwind-protect
+          (let ((entry (assq 'org-level-1 face-remapping-alist)))
+            (should entry)
+            (should (cl-some (lambda (s)
+                               (and (listp s)
+                                    (eq (plist-get s :inherit) 'body)))
+                             (cdr entry))))
+        (face-extra--remove-body-remaps cookies)))))
 
 (ert-deftest vs/remaps/metadata-face-gets-default-inherit ()
   "After install-body-remaps, metadata faces have a (:inherit default) remap."
   (vs-test--with-buffer
-    (variable-spacing--install-body-remaps)
-    (unwind-protect
-        (let ((entry (assq 'org-drawer face-remapping-alist)))
-          (should entry)
-          (should (cl-some (lambda (s)
-                             (and (listp s)
-                                  (eq (plist-get s :inherit) 'default)))
-                           (cdr entry))))
-      (variable-spacing--remove-body-remaps))))
+    (let ((cookies (face-extra--install-body-remaps
+                    face-extra-org-content-faces
+                    face-extra-org-metadata-faces)))
+      (unwind-protect
+          (let ((entry (assq 'org-drawer face-remapping-alist)))
+            (should entry)
+            (should (cl-some (lambda (s)
+                               (and (listp s)
+                                    (eq (plist-get s :inherit) 'default)))
+                             (cdr entry))))
+        (face-extra--remove-body-remaps cookies)))))
 
 (ert-deftest vs/remaps/clean-after-remove ()
   "After remove-body-remaps, the mode's remaps are gone."
   (vs-test--with-buffer
-    (variable-spacing--install-body-remaps)
-    (variable-spacing--remove-body-remaps)
-    ;; The cookie list must be nil.
-    (should (null variable-spacing--body-remap-cookies))
-    ;; The floor remap on default must be gone.
-    ;; (Other packages might add their own, so we just check ours is absent
-    ;; by verifying no :height = floor-height remap remains.)
-    (let ((default-entry (assq 'default face-remapping-alist)))
-      (should-not
-       (and default-entry
-            (cl-some (lambda (s)
-                       (and (listp s)
-                            (equal (plist-get s :height)
-                                   variable-spacing-floor-height)))
-                     (cdr default-entry)))))))
+    (let ((cookies (face-extra--install-body-remaps
+                    face-extra-org-content-faces
+                    face-extra-org-metadata-faces)))
+      (face-extra--remove-body-remaps cookies)
+      ;; After removal, no (:inherit body) remap on content faces.
+      (let ((entry (assq 'org-level-1 face-remapping-alist)))
+        (should-not
+         (and entry
+              (cl-some (lambda (s)
+                         (and (listp s) (eq (plist-get s :inherit) 'body)))
+                       (cdr entry))))))))
 
 ;;; -----------------------------------------------------------------------
 ;;; Run

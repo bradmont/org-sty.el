@@ -490,6 +490,236 @@ BACKEND-PLIST must contain at least:
 
 
 ;;;; ================================================================
+;;;; Section 4b — Body face: Org backend and face hierarchy
+;;;; ================================================================
+;;
+;; The `body' face is a semantic identity face meaning "this character
+;; is prose body text."  It lives in face-extra (not variable-spacing)
+;; because it is a face/rendering concept consumed by multiple property
+;; packages: variable-spacing, horizontal-layout, text-align.  None of
+;; those packages own it.
+;;
+;; The Org backend (`face-extra-org-body-backend') is the reference
+;; implementation of the backend protocol.  Phase 3 will introduce
+;; `body-face-mode' to manage the backend lifecycle and make the
+;; defface attrs neutral; for now `defface body' retains :height 2.0
+;; so rendering is not broken before body-face-mode exists.
+;;
+;; `face-extra--install-body-remaps' and `face-extra--remove-body-remaps'
+;; manage the (:inherit body) remaps on content faces and the
+;; (:inherit default) anchors on metadata faces.  They are called by
+;; `variable-spacing-mode' on enable/disable; the floor remap on
+;; `default' (a spacing concern) stays in `variable-spacing.el'.
+
+(defgroup face-extra nil
+  "Generic synthetic face properties and body-face infrastructure."
+  :group 'faces)
+
+(defface body
+  '((t :inherit default :height 2.0))
+  "Semantic identity face for prose body text.
+
+Any character that is prose body text — as opposed to structural or
+metadata text — should carry this face.  Property packages
+\(`variable-spacing-mode', `horizontal-layout-mode', `text-align-mode')
+target `body' spans to apply spacing ratios, margins, and alignment.
+
+The `:height 2.0' multiplier is relative to `default'.  When
+`variable-spacing-mode' is active it remaps `default' to a small floor
+height (`variable-spacing-floor-height'), so body text renders at
+2.0 × floor — the same visible size without the floor being
+accidentally applied to body content.
+
+TODO Phase 3: change attrs to \\='((t :inherit default)) once
+`body-face-mode' supplies the body:floor ratio via a buffer-local
+remap on enable."
+  :group 'face-extra)
+
+(defcustom face-extra-org-content-faces
+  '(;; Heading faces — sized at body scale.
+    org-level-1 org-level-2 org-level-3 org-level-4
+    org-level-5 org-level-6 org-level-7 org-level-8
+    ;; org-document-title is the rendered title VALUE — content.
+    org-document-title
+    ;; Block-content faces.  Block delimiter lines (#+begin_/#+end_)
+    ;; are metadata and belong in `face-extra-org-metadata-faces'.
+    org-block org-table org-formula org-list-dt org-quote org-verse)
+  "Document-content faces that track body-text size in Org WP buffers.
+
+Each face in this list receives a buffer-local `(:inherit body)' remap
+when `body-face-mode' (or `variable-spacing-mode' as a temporary
+proxy) is enabled, lifting it above the floor height on `default'.
+
+Inline faces (bold, italic, org-code, org-link, org-cite, org-footnote,
+etc.) are intentionally absent: they can appear alongside a structural
+face in a list (e.g. `(italic org-level-2)') and a remap would cause
+body height to dominate incorrectly.  The pass-0 stamp handles them by
+marking bare-text runs with `body' directly.
+
+Can be set buffer-locally for per-document customisation."
+  :type '(repeat face)
+  :group 'face-extra)
+
+(defcustom face-extra-org-metadata-faces
+  '(;; Heading stars.
+    org-hide
+    ;; Drawer structure.
+    org-drawer org-special-keyword org-property-value
+    ;; Internal gap face — whitespace in property lines left unstyled.
+    variable-spacing--default
+    ;; Block delimiter lines (#+begin_X / #+end_X).
+    org-block-begin-line org-block-end-line
+    ;; File-level keyword lines.
+    org-meta-line org-keyword
+    org-document-info-keyword org-document-info)
+  "Metadata faces exempt from `body' stamping in Org WP buffers.
+
+Faces in this list do NOT receive a `(:inherit body)' remap and are
+excluded from the pass-0 body stamp, so they inherit floor size from
+the `default' remap regardless of whether they arrive as `font-lock-face'
+or `face' text properties.
+
+Can be set buffer-locally for per-document customisation."
+  :type '(repeat face)
+  :group 'face-extra)
+
+(defun face-extra--org-explicit-face-p (face)
+  "Return non-nil if FACE contains at least one Org content or metadata face.
+FACE may be a symbol, an anonymous attribute plist `(:strike-through t)',
+or a list thereof.
+
+A face is explicit if it appears in `face-extra-org-content-faces' or
+`face-extra-org-metadata-faces'.  Anonymous plists are never explicit.
+
+The pass-0 stamp stamps `body' on characters where this returns nil and
+no `font-lock-face' is present — the blacklist design means arbitrary
+faces not in either list are treated as non-explicit and do not block
+the stamp."
+  (cond
+   ((null face) nil)
+   ((and (consp face) (keywordp (car face))) nil)
+   ((symbolp face)
+    (or (memq face face-extra-org-content-faces)
+        (memq face face-extra-org-metadata-faces)))
+   ((listp face)
+    (cl-some (lambda (f)
+               (and (symbolp f)
+                    (or (memq f face-extra-org-content-faces)
+                        (memq f face-extra-org-metadata-faces))))
+             face))
+   (t nil)))
+
+(defun face-extra--add-body-face (beg end)
+  "Add `body' as a low-priority `face' property over BEG..END.
+Uses `add-face-text-property' with APPEND=t so that any face already
+present remains as the higher-priority entry."
+  (add-face-text-property beg end 'body t))
+
+;;;###autoload
+(defun face-extra-remove-body-face (beg end)
+  "Remove only `body' from the `face' property in BEG..END.
+Handles both a singleton symbol and a list, leaving any other faces
+\(e.g. `org-footnote') intact."
+  (let ((pos beg))
+    (while (< pos end)
+      (let* ((next (or (next-single-property-change pos 'face nil end) end))
+             (f    (get-text-property pos 'face)))
+        (cond
+         ((eq f 'body)
+          (remove-text-properties pos next '(face nil)))
+         ((and (listp f) (memq 'body f))
+          (let ((trimmed (remq 'body f)))
+            (if trimmed
+                (put-text-property pos next 'face trimmed)
+              (remove-text-properties pos next '(face nil))))))
+        (setq pos next)))))
+
+(defun face-extra--org-stamp-body-text (beg end)
+  "Stamp `body' on characters in BEG..END that Org left unstyled.
+
+Called during pass 0 of each dispatch cycle (before pass-1 property
+apply functions run) for `org-mode' buffers.
+
+After Org's full keyword list runs for a jit-lock chunk, characters fall
+into two categories:
+
+  Styled   — Org set a `face' or `font-lock-face' text property.
+  Unstyled — neither property is set (plain paragraph text Org leaves bare).
+
+This function stamps `body' on unstyled characters so they render at
+body-text size rather than falling through to the floor height of
+`default'.
+
+A \\='\\n' in the middle of a body-context span is stamped `body' along
+with the rest of that span.  A \\='\\n' that opens a body-context span is
+stamped with the preceding character's face so it renders at the height
+of the line it terminates.  Blank lines (\\n preceded by \\n) are stamped
+`body'.  Stale stamps from a previous cycle are cleared first."
+  ;; Guard: only stamp in buffers where variable-spacing-mode is active.
+  ;; TODO Phase 3: replace this guard with (bound-and-true-p body-face-mode)
+  ;; once body-face-mode owns the backend lifecycle.
+  (when (bound-and-true-p variable-spacing-mode)
+    (with-silent-modifications
+      (face-extra-remove-body-face beg end)
+      (let ((pos beg))
+        (while (< pos end)
+          (let* ((next-face    (next-single-property-change pos 'face nil end))
+                 (next-fl-face (next-single-property-change
+                                pos 'font-lock-face nil end))
+                 (next         (min (or next-face end) (or next-fl-face end))))
+            (when (and (null (get-text-property pos 'font-lock-face))
+                       (not (face-extra--org-explicit-face-p
+                             (get-text-property pos 'face))))
+              (let ((stamp-start pos))
+                (when (and (eq (char-after pos) ?\n)
+                           (> pos (point-min))
+                           (not (eq (char-before pos) ?\n)))
+                  (let ((prev-face (or (get-text-property (1- pos) 'face)
+                                       (get-text-property (1- pos)
+                                                          'font-lock-face))))
+                    (when prev-face
+                      (add-face-text-property pos (1+ pos) prev-face t)
+                      (setq stamp-start (1+ pos)))))
+                (when (< stamp-start next)
+                  (add-face-text-property stamp-start next 'body t))))
+            (setq pos next)))))))
+
+(defvar face-extra-org-body-backend
+  (list :stamp-body-text #'face-extra--org-stamp-body-text)
+  "face-extra backend plist for `org-mode'.
+
+Supplies `:stamp-body-text' — the pass-0 bare-text stamper that marks
+unstyled paragraph text with the `body' face.
+
+This is the reference implementation of the backend protocol.  Other
+major modes can define their own backend and register it via
+`face-extra-register-backend'.")
+
+(defun face-extra--install-body-remaps (content-faces metadata-faces)
+  "Install body-hierarchy face remaps for CONTENT-FACES and METADATA-FACES.
+
+For each face in CONTENT-FACES installs a buffer-local
+`(:inherit body)' remap so it tracks body-text size.  For each face in
+METADATA-FACES installs a `(:inherit default)' remap to anchor it at
+floor size even when it globally inherits from a content face.
+
+Returns the list of remap cookies.  Pass the returned list to
+`face-extra--remove-body-remaps' to undo."
+  (let (cookies)
+    (dolist (face content-faces)
+      (push (face-remap-add-relative face :inherit 'body) cookies))
+    (dolist (face metadata-faces)
+      (push (face-remap-add-relative face :inherit 'default) cookies))
+    cookies))
+
+(defun face-extra--remove-body-remaps (cookies)
+  "Remove face remaps installed by `face-extra--install-body-remaps'.
+COOKIES is the list returned by that function."
+  (dolist (cookie cookies)
+    (face-remap-remove-relative cookie)))
+
+
+;;;; ================================================================
 ;;;; Section 5 — Per-face cache resolver and dispatch
 ;;;; ================================================================
 
