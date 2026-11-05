@@ -2,26 +2,27 @@
 
 ## What this repo is
 
-Four independent Emacs Lisp minor modes that form a word-processor visual
-layer for Org mode. Each file is self-contained and loadable on its own;
-`org-sty` is the only one that `require`s the others.
+A collection of Emacs Lisp packages that together form a word-processor visual layer for Org mode. The packages are independently usable and publishable; `org-sty-config.el` is personal configuration, not a published package.
 
 | File | Purpose |
 |---|---|
-| `org-sty.el` | Reads `#+FILETAGS`, merges style plists, applies them; provides `org-sty-mode` |
-| `variable-spacing.el` | Per-element proportional line spacing via jit-lock |
-| `org-title-fold.el` | Folds `#+KEYWORD:` lines below `#+TITLE:` |
-| `org-block-appear.el` | Hides `#+begin_`/`#+end_` lines; reveals near point |
+| `face-extra.el` | Generic synthetic face-property engine: registry, pass dispatcher (passes 0–3), backend protocol, `body` face, Org backend, `face-extra-mode` and `body-face-mode` |
+| `variable-spacing.el` | Per-element proportional line spacing; depends on `face-extra` |
+| `horizontal-layout.el` | Left/right margins, hanging indent, text alignment (centre, right, justify); depends on `face-extra` |
+| `org-sty.el` | Style dispatcher: reads `#+FILETAGS`, merges style plists, applies them; provides `org-sty-mode`. Depends on `face-extra`; all other package deps optional via `:eval` |
+| `org-title-fold.el` | Folds `#+KEYWORD:` lines below `#+TITLE:`; standalone |
+| `org-block-appear.el` | Hides `#+begin_`/`#+end_` lines; reveals near point; standalone |
+| `org-footnote-extra.el` | Inline paragraph-local footnote rendering; depends on `face-extra`, `variable-spacing`, `horizontal-layout` |
+| `org-cite-appear.el` | Hides raw `[cite:@key]` markup behind rendered text; standalone (soft-dep citar) |
+| `page-metrics.el` | Physical page geometry (mm/pt/in → px); soft-dep olivetti |
+| `org-sty-config.el` | **Personal config, not a package.** Wires all modules into a WP style via `org-sty`'s `:eval` key |
 
 ## Build / test / lint
 
 - **No build system.** Files are plain `.el`; load with `require` or `load-file`.
-- **No test suite yet.** Verify changes by loading the file in a live Emacs
-  session (`M-x load-file`) and exercising the affected mode interactively.
-- **Byte-compile check:** `emacs --batch -f batch-byte-compile <file>.el`
-  is the closest thing to a CI pass. Fix all warnings (not just errors).
-- **Lint:** `package-lint` and `checkdoc` are the conventional Emacs Lisp
-  linters; run them if available, but they are not enforced by any CI.
+- **Test suite:** `test/` contains ERT tests per module. Run all: `bash test/run-tests.sh`. Run one suite: `emacs --batch -L . -l test/test-face-extra.el -f ert-run-tests-batch-and-exit`.
+- **Byte-compile check:** `emacs --batch -L . -f batch-byte-compile face-extra.el horizontal-layout.el` (adjust file list). Fix all warnings, not just errors. This is the CI pass.
+- **Lint:** `package-lint` and `checkdoc` are the conventional Emacs Lisp linters; run them before publishing.
 
 ## Code conventions
 
@@ -45,46 +46,33 @@ layer for Org mode. Each file is self-contained and loadable on its own;
 
 ### Long-term file structure
 
-The planned post-v1 dependency graph is:
+The post-refactor dependency graph (branch: `package-refactor`):
 
 ```
-face-extra.el          ← generic core: registry, pass dispatcher, backend protocol,
-    ↑                       text-body face defn + bare-text scan loop
-    ↑                       (no deps beyond Emacs + cl-lib)
-variable-spacing.el    ← spacing impl; depends on face-extra; standalone useful
-horizontal-layout.el   ← margin/indent impl; depends on face-extra
-org-title-fold.el      ← standalone; no new deps
-org-block-appear.el    ← standalone; no new deps
+face-extra.el          ← generic core: registry, dispatch (passes 0–3),
+                           backend protocol, `body' face + scan loop,
+                           face-extra-mode (auto), body-face-mode
     ↑
-org-sty.el             ← dispatcher
+variable-spacing.el    ← spacing only: floor height, spacer computation;
+                           depends on face-extra; major-mode agnostic
+horizontal-layout.el   ← layout only: margins, justify;
+                           depends on face-extra; major-mode agnostic
+org-title-fold.el      ← standalone; no project deps
+org-block-appear.el    ← standalone; no project deps
+org-footnote-extra.el  ← depends on face-extra, variable-spacing,
+                           horizontal-layout
+org-cite-appear.el     ← standalone (soft-dep citar)
+page-metrics.el        ← standalone (soft-dep olivetti)
+    ↑
+org-sty.el             ← style dispatcher; depends on face-extra only;
+                           all other deps are optional via :eval
 ```
 
-Pass 0 (face/font resolution) is the only mode-specific layer.  Passes 1–4
-are mode-agnostic — they operate on faces and geometry.  A backend for
-another major mode supplies pass 0 knowledge (face configuration + bare-text
-predicate) and the rest of the pipeline works unchanged.
+`org-sty-config.el` is not a module — it is personal configuration.
 
-**`text-body` belongs in `face-extra`, not `variable-spacing`.**  `text-body`
-is not a spacing concept — it is a semantic identity face meaning "this
-character is body text."  It is the stand-in for "any unspecified text" in
-the pipeline: anything that wants to operate on naked document text without
-touching `default` (which belongs to all of Emacs) uses `text-body`.
-Variable-spacing, horizontal-layout, and text-align are all consumers of
-`text-body`; none of them owns it.  The bare-text scan loop — the pass-0
-walk that stamps `text-body` on characters Org left unstyled — is likewise
-face-extra infrastructure, not a spacing feature.  The Org-specific
-bare-text predicate (what counts as "bare" in Org: no `face` and no
-`font-lock-face`) stays in the backend registration, which can remain in
-`variable-spacing.el` until there is a reason to split it out.
+**`org-sty` is standalone.** It depends only on `face-extra`. Variable-spacing, horizontal-layout, footnote support, etc. are wired in by the user via `:eval` in the style plist. `org-sty-config.el` is the reference implementation of that wiring. The hard `(require 'variable-spacing)` currently in `org-sty.el` is incorrect and will be removed in the refactor.
 
-`text-body` is useful beyond Org.  Any major mode backend that wants to
-distinguish body text from structural or metadata text can register a
-backend that stamps `text-body`, and all three property packages
-(variable-spacing, horizontal-layout, text-align) will then apply to that
-text automatically.  The `defface` should carry neutral default attrs
-(`'((t :inherit default))`) with no sizing opinion baked in — the size is
-supplied by `variable-spacing-mode`'s floor/body remap on enable, not by
-the face definition itself.
+Pass 0 (face/font resolution) is the only major-mode-specific layer. Passes 1–4 are mode-agnostic — they operate on faces and geometry. A backend for another major mode supplies pass 0 knowledge and the rest of the pipeline works unchanged. `body-face-mode` is the user-facing mode that activates pass 0 for the current major mode; `variable-spacing-mode` and `horizontal-layout-mode` are pass 1–3 consumers that work with any pass-0 backend.
 
 ### Independence of files
 The four files are deliberately decoupled. Do not add cross-`require`
@@ -248,96 +236,110 @@ each registered property should declare its pass number.  The after-fontify
 dispatcher iterates passes 1–3 in order, running all properties registered
 for each pass before moving to the next.
 
+## Package refactor plan (branch: `package-refactor`)
+
+This documents the full architectural refactor. All decisions are final unless explicitly revisited. Do not begin any phase without reading this section in full.
+
+### Design decisions
+
+**1. Rename `body` face (was `text-body`)**
+
+The face `text-body` is renamed to `body`. Every reference in every file must be updated. `body` is unambiguous, memorable, and not Org-specific. Rationale: `text-body` vs `body-text` required constant checking; `body` is unambiguous in context and shorter.
+
+**2. `face-extra-mode` — auto infrastructure minor mode**
+
+A new `face-extra-mode` defined in `face-extra.el` owns the dispatch lifecycle (`face-extra--enable-dispatch` / `--disable-dispatch`). It is auto-enabled when any property mode (`variable-spacing-mode`, `horizontal-layout-mode`, etc.) enables, and auto-disabled when the last one disables. Users never toggle it directly — it is pure infrastructure.
+
+**3. `body-face-mode` — generic face hierarchy minor mode**
+
+A new `body-face-mode` defined in `face-extra.el`:
+- On enable: looks up the backend registered for `major-mode`, installs `(:inherit body)` remaps on its `:content-faces`, registers its `:stamp-body-text` with `face-extra` for pass-0
+- On disable: removes remaps, deregisters backend
+- Enables `face-extra-mode` automatically as infrastructure
+- Is **not Org-specific**. The Org backend is the reference implementation shipped with `face-extra`. Any major mode can register a backend (e.g. a hypothetical `face-extra-markdown-body-backend` for `markdown-mode`). `variable-spacing-mode` works equally in any buffer where `body-face-mode` has a registered backend.
+- Ships with `face-extra-org-body-backend` as the Org reference implementation
+
+**4. Extended backend protocol**
+
+The backend plist gains two new keys alongside `:stamp-body-text`:
+
+```elisp
+(list :content-faces  '(org-level-1 org-quote ...)   ; get (:inherit body) remaps
+      :metadata-faces '(org-drawer org-block-begin-line ...)  ; exempt from stamping
+      :stamp-body-text #'face-extra--org-stamp-body-text)
+```
+
+`body-face-mode` reads all three from the registered backend.
+
+**5. `variable-spacing.el` becomes spacing-only**
+
+Everything about faces (not spacing) moves out of `variable-spacing.el`. What moves: content/metadata face lists, bare-text predicate, add/remove body-face helpers, stamp-body-text, Org backend plist, install/remove body remaps functions. What stays: `variable-spacing-floor-height` (the floor remap on `default` — this IS a spacing concept), `variable-spacing--spacer`, `variable-spacing--apply-ratio`, text-scale integration, `variable-spacing-mode`. On enable, `variable-spacing-mode` enables `body-face-mode` as a dependency.
+
+**6. `org-sty.el` has no hard dep on `variable-spacing`**
+
+The `(require 'variable-spacing)` in `org-sty.el` is removed. It was always wrong — `fboundp` guards were already in place for this exact reason. `org-sty.el` depends only on `face-extra`.
+
+**7. Module contracts and stable API surfaces**
+
+Each module's public stable API is explicitly declared in a header comment block in the file. Cross-module changes to stable API must be treated as breaking changes (semver bump). The dispatch internals of `face-extra` are entirely private; property modules (`variable-spacing`, `horizontal-layout`) must not reach into them except via the documented enable/disable functions.
+
+Stable surfaces:
+- `face-extra`: `face-extra-define-property`, `face-extra-add`, `face-extra-add-relative`, `face-extra-remove`, `face-extra-register-body-backend`, `face-extra-deregister-body-backend`, `face-extra-invalidate-cache-functions`
+- `variable-spacing`: `variable-spacing-mode`, `variable-spacing-ratio` property symbol, `variable-spacing-floor-height`
+- `horizontal-layout`: `horizontal-layout-mode`, `horizontal-layout-margin-left`, `horizontal-layout-margin-right`, `horizontal-layout-hanging-wrap`, `text-align` property symbol
+- `org-sty`: `org-sty-mode`, `org-sty-alist`, `org-sty-remap`, the `:font`/`:font-size`/`:faces`/`:eval`/`:num-level`/`:indent`/`:olivetti-width` plist keys
+
+**8. Publishing strategy**
+
+Monorepo for development; individual packages published via MELPA `:files` recipes pointing to the monorepo. No subtree splitting required. Each `.el` file needs a proper `Package-Requires` header with declared version deps before MELPA submission.
+
+### What moves where (complete inventory)
+
+| Current symbol | Current file | Destination | New name |
+|---|---|---|---|
+| `defface text-body` | `variable-spacing.el` | `face-extra.el` | `defface body` |
+| `variable-spacing-content-faces` | `variable-spacing.el` | `face-extra.el` | `face-extra-org-content-faces` |
+| `variable-spacing-metadata-faces` | `variable-spacing.el` | `face-extra.el` | `face-extra-org-metadata-faces` |
+| `variable-spacing--has-explicit-face-p` | `variable-spacing.el` | `face-extra.el` | `face-extra--org-explicit-face-p` |
+| `variable-spacing--add-body-face` | `variable-spacing.el` | `face-extra.el` | `face-extra--add-body-face` |
+| `variable-spacing--remove-body-face` | `variable-spacing.el` | `face-extra.el` | `face-extra-remove-body-face` (public) |
+| `variable-spacing--stamp-body-text` | `variable-spacing.el` | `face-extra.el` | `face-extra--org-stamp-body-text` |
+| `variable-spacing-org-backend` | `variable-spacing.el` | `face-extra.el` | `face-extra-org-body-backend` |
+| `variable-spacing--install-body-remaps` | `variable-spacing.el` | `face-extra.el` | `face-extra--install-body-remaps` |
+| `variable-spacing--remove-body-remaps` | `variable-spacing.el` | `face-extra.el` | `face-extra--remove-body-remaps` |
+| Load-time backend registration | `variable-spacing.el` bottom | `body-face-mode` enable body | (removed from load-time) |
+
+New symbols added to `face-extra.el`:
+- `face-extra-mode` — auto infrastructure minor mode
+- `body-face-mode` — face hierarchy minor mode
+- `face-extra-register-body-backend (major-mode backend-plist)`
+- `face-extra-deregister-body-backend (major-mode)`
+
+### Phased execution
+
+**Phase 1 — Rename `text-body` → `body`**
+Single commit touching every file. Find-and-replace: `text-body` → `body`, `defface text-body` → `defface body`, `(:inherit text-body)` → `(:inherit body)`, `'text-body` → `'body`, `text-align--line-next-word-prop` and other compound names are unaffected (they don't contain `text-body`). Also rename `variable-spacing-content-faces` and `variable-spacing-metadata-faces` references in callers (they will be renamed in Phase 2 but callers should be updated in one pass). Byte-compile all files; zero warnings required.
+
+**Phase 2 — Move face taxonomy and body-face machinery into `face-extra.el`**
+Move all items from the inventory table. Update all callers in `variable-spacing.el`, `horizontal-layout.el`, `org-sty.el`, `org-sty-config.el`, `org-footnote-extra.el`. The `defface body` changes from `:height 2.0` to `'((t :inherit default))` — neutral, no sizing opinion. Byte-compile; zero warnings.
+
+**Phase 3 — New minor modes in `face-extra.el`**
+Implement `face-extra-mode` (auto dispatch lifecycle) and `body-face-mode` (face hierarchy). Wire `body-face-mode` enable/disable to call `face-extra--install-body-remaps` / `face-extra--remove-body-remaps` and register/deregister the backend. Move backend registration out of load-time bottom of `variable-spacing.el` into `body-face-mode` enable body. Remove the `(bound-and-true-p variable-spacing-mode)` guard from the stamp function — it becomes unnecessary once registration is mode-scoped. Property modes (`variable-spacing-mode`, `horizontal-layout-mode`) call `(face-extra-mode 1)` / `(face-extra-mode -1)` instead of the raw `--enable-dispatch` / `--disable-dispatch` functions.
+
+**Phase 4 — Strip `variable-spacing.el` to spacing-only**
+Delete all moved symbols. `variable-spacing-mode` on enable calls `(body-face-mode 1)` and on disable calls `(body-face-mode -1)`. Byte-compile; zero warnings.
+
+**Phase 5 — Fix `org-sty.el`**
+Remove `(require 'variable-spacing)`. Verify all remaining callers use `fboundp` guards. Byte-compile.
+
+**Phase 6 — Package headers**
+Add proper `Package-Requires`, `Version`, `URL`, `Keywords`, `;;; Commentary:`, `;;; Code:` to all publishable `.el` files (`face-extra`, `variable-spacing`, `horizontal-layout`, `org-sty`, `org-title-fold`, `org-block-appear`, `org-footnote-extra`, `org-cite-appear`, `page-metrics`). `org-sty-config.el` is excluded — it is not a published package.
+
 ## Known planned work (not yet implemented)
 
-### ⚑ HIGH PRIORITY — Move `text-body` and bare-text scan to `face-extra`
+### ~~⚑ HIGH PRIORITY — Move `text-body` and bare-text scan to `face-extra`~~ — superseded
 
-**Rationale:** `text-body` is a semantic identity face ("this character is
-body text"), not a spacing concept.  It is the correct target for any
-property that wants to operate on naked document text without touching
-`default`.  Variable-spacing, horizontal-layout, and text-align are all
-consumers; none of them should own it.  The bare-text scan loop (pass 0) is
-face-extra infrastructure.  Leaving both in `variable-spacing.el` is a
-layering violation that has already caused one bug (text-body stamped in
-untagged buffers because the backend registration was global) and will
-cause more as new property packages are added.
-
-**Scope of changes:**
-
-1. **`face-extra.el`** — add:
-   - `defface text-body` with neutral attrs `'((t :inherit default))` — no
-     `:height`, no sizing opinion.
-   - `face-extra--stamp-body-text` — the generic scan-and-stamp loop,
-     extracted verbatim from `variable-spacing--stamp-body-text` minus the
-     `(bound-and-true-p variable-spacing-mode)` guard (that guard becomes
-     unnecessary once registration is mode-scoped; see below).
-   - `face-extra-remove-body-face` — thin public wrapper around the existing
-     `variable-spacing--remove-body-face` logic, so callers outside
-     variable-spacing can clean up stamps.
-   - Update the backend protocol doc: `:stamp-body-text` may call
-     `face-extra--stamp-body-text` directly, or supply its own function.
-
-2. **`variable-spacing.el`** — change:
-   - Remove `defface text-body` and the scan loop; `(require 'face-extra)`
-     already pulls them in.
-   - `variable-spacing-mode` enable: install the floor remap on `default`
-     and the `(:inherit text-body)` remaps on content faces (unchanged).
-     The `text-body` face itself stays neutral; variable-spacing makes it
-     sized via the floor model.
-   - Move `(face-extra-register-backend 'org-mode ...)` from load-time into
-     `variable-spacing-mode`'s enable/disable body (register on enable,
-     deregister on disable).  This makes `face-extra--active-backend` return
-     nil in inactive buffers naturally — the `(bound-and-true-p
-     variable-spacing-mode)` guard added to fix the text-body-huge bug can
-     then be removed.
-   - Update `variable-spacing--stamp-body-text` to delegate to
-     `face-extra--stamp-body-text` (or remove it if the backend directly
-     names the face-extra function).
-
-3. **`horizontal-layout.el`**, **`text-align` / `face-extra.el`** — no
-   functional change; they already operate on `text-body` spans and will
-   continue to do so.  Remove any `(require 'variable-spacing)` that was
-   added solely for `text-body`.
-
-4. **`org-sty-config.el`** / user configs — no change; `text-body` is still
-   the same symbol.
-
-**Debugging concerns (the main risk):**
-
-- **Neutral `defface` may break existing `:height` expectations.**  Any
-  code that currently relies on `text-body` having `:height 2.0` at face
-  definition time (before `variable-spacing-mode` runs) will silently render
-  at floor size.  The fix is to ensure `variable-spacing-mode` runs before
-  any fontification — already the case via `org-sty-apply` + `font-lock-flush`
-  ordering, but worth instrumenting explicitly during the migration.  A
-  temporary `(face-attribute 'text-body :height)` assertion in the mode body
-  can catch this.
-
-- **Mode-scoped backend registration means the scan loop doesn't run if
-  `variable-spacing-mode` is not yet on when the first jit-lock cycle fires.**
-  This is the same ordering constraint as today; the idle-0 refresh after
-  mode enable handles it.  Verify by opening a WP buffer and confirming
-  body text renders correctly before and after a `font-lock-flush`.
-
-- **Other buffers that happen to `require 'variable-spacing`** will lose the
-  global `text-body` defface if they haven't also loaded `face-extra`.  The
-  `(require 'face-extra)` at the top of `variable-spacing.el` ensures
-  `text-body` is always defined when variable-spacing is loaded; no user
-  config change is needed.
-
-- **`variable-spacing--remove-body-face` is currently private.** Callers
-  outside variable-spacing (e.g. a future `text-align` cleanup path) need
-  the public `face-extra-remove-body-face` wrapper.  Audit all callers before
-  removing the private function.
-
-**Effort estimate:** ~2–3 hours of focused work.  The scan loop is ~50 lines
-of well-understood code; the `defface` move is mechanical; the registration
-change is ~10 lines.  The bulk of the time is verification: open an untagged
-Org buffer, a WP-tagged buffer, and a non-Org buffer, confirm no spurious
-stamping, confirm variable-spacing renders correctly, byte-compile all four
-files clean.  The `(bound-and-true-p variable-spacing-mode)` guard added as
-a stopgap can be removed as the final step, which gives a clean before/after
-regression test point.
+This work is superseded and significantly expanded by the package refactor plan. See **Package refactor plan** above.
 
 ### v1 release
 
