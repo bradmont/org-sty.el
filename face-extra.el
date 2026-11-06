@@ -196,8 +196,8 @@ PLIST must contain:
   :apply  Function — see :pass above for call signature.
   :mode   The minor-mode symbol that owns this property (e.g.
           `variable-spacing-mode').  Required.  The dispatcher checks
-          `(symbol-value :mode)' before invoking :apply, :pre-clear,
-          or :pre-command in any buffer.  This is how globally-registered
+          `(symbol-value :mode)' before invoking :apply, :before-pass3-walk,
+          or :before-keystroke in any buffer.  This is how globally-registered
           properties are suppressed in buffers where the owning mode is
           not active — the check lives in the dispatcher, not in the
           individual callback functions.
@@ -207,9 +207,11 @@ Optional:
   :after      List of property symbols in the same PASS that must run before
               this property.  Cross-pass references are rejected.  Not valid
               for pass 0.
-  :pre-clear  Function called with (beg end) before the pass-3 walk.
-  :pre-command  Function called with (vline-beg vline-end) from
-              `pre-command-hook'.
+  :before-pass3-walk  Function called with (beg end) before the pass-3
+              visual-line walk.  Used to clear stale pass-3 stamps so
+              `vertical-motion' sees natural character widths.
+  :before-keystroke  Function called with (vline-beg vline-end) from
+              `pre-command-hook' before each editing keystroke.
 
 Properties are registered at load time, once globally, and remain in
 the registry permanently.  Buffer-local lifecycle is managed via
@@ -219,8 +221,8 @@ the registry permanently.  Buffer-local lifecycle is managed via
         (after        (plist-get plist :after))
         (apply-fn     (plist-get plist :apply))
         (clear-fn     (plist-get plist :clear))
-        (pre-clear    (plist-get plist :pre-clear))
-        (pre-command  (plist-get plist :pre-command)))
+        (before-pass3-walk (plist-get plist :before-pass3-walk))
+        (before-keystroke  (plist-get plist :before-keystroke)))
     (unless (memql pass '(0 1 2 3))
       (error "face-extra-define-property: :pass must be 0, 1, 2, or 3 (got %S)" pass))
     (unless (symbolp mode)
@@ -236,8 +238,8 @@ the registry permanently.  Buffer-local lifecycle is managed via
         (face-extra--validate-after property after pass))
       (puthash ref-key
                (list :pass pass :mode mode :after after :apply apply-fn
-                     :clear clear-fn :pre-clear pre-clear
-                     :pre-command pre-command)
+                     :clear clear-fn :before-pass3-walk before-pass3-walk
+                     :before-keystroke before-keystroke)
                face-extra--registry)
       (when (> pass 0)
         (face-extra--sort-pass pass))
@@ -352,7 +354,7 @@ When nil, geometry is settled and the walk may proceed.")
     evil-delete-backward-char-and-join    ; Evil normal/insert backspace
     evil-delete-char)                     ; Evil forward delete
   "Commands treated as active typing for passes 1–2 narrowing and
-`:pre-command' dispatch.  During these commands, passes 1–2 are narrowed
+`:before-keystroke' dispatch.  During these commands, passes 1–2 are narrowed
 to point's logical line, keeping per-keystroke cost near zero.  All other
 commands — scrolling, initial render, fontified=nil re-fontification —
 get full unrestricted passes.  `self-insert-command' is first so the
@@ -1240,7 +1242,7 @@ the user is not looking at.  `face-extra--window-selected' reschedules
 the flush when the buffer's frame regains focus.
 
 Existing justify/alignment stamps are intentionally preserved in this
-case — the `:pre-clear' in `face-extra--dispatch-pass3' would strip
+case — the `:before-pass3-walk' in `face-extra--dispatch-pass3' would strip
 them before re-applying, so leaving the function early without calling
 dispatch keeps the buffer correctly stamped until focus returns."
   (when (buffer-live-p buf)
@@ -1251,7 +1253,7 @@ dispatch keeps the buffer correctly stamped until focus returns."
             ;; Buffer not visible in the selected frame.  Leave the pending
             ;; beg/end in place so `face-extra--window-selected' can
             ;; reschedule the flush when focus returns.  Do NOT call
-            ;; `face-extra--dispatch-pass3': that would run `:pre-clear'
+            ;; `face-extra--dispatch-pass3': that would run `:before-pass3-walk'
             ;; (stripping justify stamps) and then fail to re-apply them
             ;; because `window-text-pixel-size' needs a live window.
             nil
@@ -1545,14 +1547,13 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                                     (make-hash-table :test #'eq)))))
           ;; Clear the reused table from any previous walk.
           (clrhash line-spans)
-          ;; Pre-clear pass: call :pre-clear for each registered pass-3 property.
-          ;; text-align no longer registers :pre-clear (it does per-line clearing
-          ;; inside text-align--apply using content hashes).  Other properties
-          ;; may still register :pre-clear here.
+          ;; Before-pass3-walk pass: call :before-pass3-walk for each registered
+          ;; pass-3 property.  Used to clear stale stamps so vertical-motion
+          ;; during the walk sees natural character widths.
           (dolist (prop (gethash 3 face-extra--pass-order))
             (let* ((entry  (gethash (cons prop 3) face-extra--registry))
                    (mode   (plist-get entry :mode))
-                   (pre-fn (plist-get entry :pre-clear)))
+                   (pre-fn (plist-get entry :before-pass3-walk)))
               (when (and pre-fn mode (symbol-value mode))
                 (funcall pre-fn rbeg rend))))
           (save-excursion
@@ -1630,7 +1631,7 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                 (max rend (or face-extra--pass3-last-flushed-end rend))))))))))) ; closes let force-full
 
 (defun face-extra--pre-command ()
-  "Dispatch `:pre-command' callbacks for registered pass-3 properties.
+  "Dispatch `:before-keystroke' callbacks for registered pass-3 properties.
 Added to `pre-command-hook' buffer-locally by
 `face-extra--enable-dispatch-pass3'.
 
@@ -1661,11 +1662,11 @@ Maintains a cached visual line in `face-extra--vline-beg' and
                        (setq face-extra--vline-end (point)))
                      face-extra--vline-beg)))
            (vend face-extra--vline-end))
-      ;; Dispatch to each pass-3 property that registered :pre-command.
+      ;; Dispatch to each pass-3 property that registered :before-keystroke.
       (dolist (prop (gethash 3 face-extra--pass-order))
         (let* ((entry   (gethash (cons prop 3) face-extra--registry))
                (mode    (plist-get entry :mode))
-               (pre-cmd (plist-get entry :pre-command)))
+               (pre-cmd (plist-get entry :before-keystroke)))
           (when (and pre-cmd mode (symbol-value mode))
             (funcall pre-cmd vbeg vend)))))))
 

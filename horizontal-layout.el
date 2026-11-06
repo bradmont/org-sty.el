@@ -581,12 +581,12 @@ Mode guard enforced by dispatcher via :mode \\='horizontal-layout-mode."
 
 (defun horizontal-layout--pre-clear-right-margin (beg end)
   "Remove right-margin overlays and restore `line-prefix' to left+right.
-Called as `:pre-clear' before the pass-3 `vertical-motion' walk.
+Called as `:before-pass3-walk' before the pass-3 `vertical-motion' walk.
 
 After pass-3 `:apply' has run, `line-prefix' at each visual-line BOL
 carries only the left-margin width (step 1 of `:apply' restores it from
 `left+right' to `left'), with the right margin held in an after-string
-overlay.  If `:pre-clear' only deletes the overlay and does not restore
+overlay.  If `:before-pass3-walk' only deletes the overlay and does not restore
 `line-prefix', the walk runs with `avail - left' word-wrap geometry
 instead of `avail - left - right', producing wrong `lend' values for
 every visual line — wrong span list, wrong slack for justify, etc.
@@ -698,7 +698,7 @@ owns pass 3 (right-margin expansion).  Both are managed here."
 
 (face-extra-define-property 'horizontal-layout-margin-right
   :pass 3 :mode 'horizontal-layout-mode :after nil
-  :pre-clear #'horizontal-layout--pre-clear-right-margin
+  :before-pass3-walk #'horizontal-layout--pre-clear-right-margin
   :apply #'horizontal-layout--apply-margin-right-pass3
   :clear #'horizontal-layout--clear-margin-right-pass3)
 
@@ -851,7 +851,8 @@ paragraph reflow is needed.")
 (defconst text-align--line-justified-prop 'text-align--line-justified
   "Text property on visual-line BOL: non-nil when justify stamps are present.
 Set to t by `text-align--stamp' after stamps are applied; removed by
-`text-align--pre-clear-stamps' (the `:pre-clear' callback) before each walk.
+`text-align--pre-clear-stamps' (the `:before-pass3-walk' callback) before
+each walk.
 Allows consumers to tell at a glance whether a line is currently stamped,
 independently of the hash or natural-width cache.")
 
@@ -1635,7 +1636,8 @@ Removes itself, then looks up the just-typed character's pixel width
 
 (defun text-align--pre-command-justify (vbeg vend)
   "Pre-command callback for justify: clear stamps and schedule ring walk.
-VBEG and VEND are the visual-line bounds supplied by `face-extra--pre-command'.
+VBEG and VEND are the visual-line bounds supplied by the
+`:before-keystroke' dispatcher.
 
 When the ring is warm, skips clearing so the line stays justified
 throughout; the ring-walk redistributes slack in post-command.
@@ -1892,13 +1894,13 @@ is registered and handles cleanup on disable."
 ;;;; Section 8 — face-extra registration (load time, at bottom of file)
 ;;;; ================================================================
 ;; The text-align registration is at the bottom of the file so that all
-;; referenced functions (:apply, :pre-clear, :pre-command, :clear) are
+;; referenced functions (:apply, :before-pass3-walk, :before-keystroke, :clear) are
 ;; already defined when face-extra-define-property validates them.
 
 (defun text-align--pre-clear-stamps (beg end)
   "Pre-clear: remove justify stamps and the `justified' sentinel from [BEG, END).
 
-Called as `:pre-clear' before each pass-3 visual-line walk.
+Called as `:before-pass3-walk' before each pass-3 visual-line walk.
 
 Clears justify space stamps (display + `text-align--justify-prop') and the
 `text-align--line-justified-prop' sentinel so `vertical-motion' during the
@@ -2074,13 +2076,13 @@ two calls are redundant but cheap and make the intent explicit."
 ;; Placed here (after all function definitions) so that #' references
 ;; are resolved correctly by the byte-compiler.
 (face-extra-define-property 'text-align
-  :pass       3
-  :mode       'text-align-mode
-  :after      '(horizontal-layout-margin-right)
-  :pre-clear  #'text-align--pre-clear-stamps
-  :pre-command #'text-align--pre-command-justify
-  :apply      #'text-align--apply
-  :clear      #'text-align--clear-marker)
+  :pass              3
+  :mode              'text-align-mode
+  :after             '(horizontal-layout-margin-right)
+  :before-pass3-walk #'text-align--pre-clear-stamps
+  :before-keystroke  #'text-align--pre-command-justify
+  :apply             #'text-align--apply
+  :clear             #'text-align--clear-marker)
 
 (provide 'horizontal-layout)
 ;;; horizontal-layout.el ends here
