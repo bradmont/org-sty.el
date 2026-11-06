@@ -2,7 +2,9 @@
 
 ;; Author: Brad
 ;; Keywords: org, bib, convenience
-;; Version: 0.1
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "29.1") (cl-lib "0.5") (org "9.6"))
+;; URL: https://github.com/braddelong/org-sty
 
 ;;; Commentary:
 

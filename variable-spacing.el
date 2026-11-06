@@ -1,7 +1,10 @@
 ;;; variable-spacing.el --- Variable line spacing via pluggable backends -*- lexical-binding: t -*-
 
 ;; Author: Brad
+;; Keywords: faces, display, wp
 ;; Version: 0.3.0
+;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (org "9.5") (body-face "0.1.0"))
+;; URL: https://github.com/braddelong/org-sty
 
 ;;; Commentary:
 
@@ -35,16 +38,17 @@
 ;; The `default' face is remapped buffer-locally to a small floor height
 ;; (`variable-spacing-floor-height') so that structural/metadata
 ;; elements (drawers, keywords, property values) that carry no explicit
-;; face naturally render small.  Faces in `face-extra-org-content-faces'
-;; receive a buffer-local `(:inherit body)' remap so they track
-;; the body-text size.
+;; face naturally render small.  Content and metadata face remaps
+;; (`(:inherit body)' and `(:inherit default)') are managed by
+;; `body-face-mode', which `variable-spacing-mode' enables as a
+;; dependency.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'org)
 (require 'face-remap)
-(require 'face-extra)
+(require 'body-face)
 
 ;;;; ----------------------------------------------------------------
 ;;;; User options
@@ -86,8 +90,8 @@ The remap is strictly buffer-local and is removed on mode disable."
   :type 'integer
   :group 'variable-spacing)
 
-;; `face-extra-org-content-faces', `face-extra-org-metadata-faces', and
-;; `face-extra--org-explicit-face-p' are defined in face-extra.el (Section 4b).
+;; `body-face-org-content-faces', `body-face-org-metadata-faces', and
+;; `body-face--org-explicit-face-p' are defined in body-face.el.
 
 ;;;; ----------------------------------------------------------------
 ;;;; Internal state
@@ -127,7 +131,7 @@ could not measure font height for face `%s'" face)))
          (px     (max 0 (round (* ratio height)))))
     `(space :width 0 :height (,px))))
 
-;; `face-extra--add-body-face', `face-extra-remove-body-face' are in face-extra.el.
+;; `body-face-remove-body-face' is in body-face.el.
 
 ;;;; ----------------------------------------------------------------
 ;;;; Public API — clear
@@ -155,7 +159,7 @@ when called interactively."
                                         'wrap-prefix nil)))
         (setq pos next)))))
 
-;; Body remaps, stamp function, and Org backend are in face-extra.el (Section 4b).
+;; Body remaps, stamp function, and Org backend are in body-face.el.
 
 ;;;; ----------------------------------------------------------------
 ;;;; text-scale-mode advice / body face-change hook
@@ -208,15 +212,13 @@ carries a `variable-spacing-ratio'."
   (if variable-spacing-mode
       (progn
         ;; Floor remap on `default' (spacing concern — stays here).
-        ;; Body/metadata face remaps (face concern — delegated to face-extra).
+        ;; Body/metadata face remaps are managed by body-face-mode.
         (setq variable-spacing--body-remap-cookies
-              (cons (face-remap-add-relative
-                     'default :height variable-spacing-floor-height)
-                    (face-extra--install-body-remaps
-                     face-extra-org-content-faces
-                     face-extra-org-metadata-faces)))
-        ;; Activate face-extra dispatch in this buffer.
-        (face-extra-mode-require)
+              (list (face-remap-add-relative
+                     'default :height variable-spacing-floor-height)))
+        ;; Enable body-face-mode as a dependency so content/metadata remaps
+        ;; and pass-0 body stamping are active.
+        (body-face-mode 1)
         ;; Invalidate the face cache so the new buffer-local remaps
         ;; are picked up immediately.
         (face-extra--invalidate-cache)
@@ -238,10 +240,11 @@ carries a `variable-spacing-ratio'."
           t)
         ;; Flush to trigger dispatch on already-fontified text.
         (font-lock-flush))
-    (face-extra--remove-body-remaps variable-spacing--body-remap-cookies)
+    (dolist (c variable-spacing--body-remap-cookies)
+      (face-remap-remove-relative c))
     (setq variable-spacing--body-remap-cookies nil)
     (variable-spacing-clear)
-    (face-extra-remove-body-face (point-min) (point-max))
+    (body-face-mode -1)
     (font-lock-remove-keywords nil
       '(("^[ \t]*:[^:\n]+:\\([ \t]+\\)[^\n]*\\([ \t]+\\)$"
          (1 'variable-spacing--default keep)
@@ -251,8 +254,7 @@ carries a `variable-spacing-ratio'."
     (advice-remove 'text-scale-mode
                    #'variable-spacing--text-scale-refresh)
     (advice-remove 'set-face-attribute
-                   #'variable-spacing--body-face-refresh)
-    (face-extra-mode-release)))
+                   #'variable-spacing--body-face-refresh)))
 
 ;;;; ----------------------------------------------------------------
 ;;;; face-extra registration and apply function
@@ -344,8 +346,8 @@ The per-buffer spacer text properties are cleaned up by
   :apply #'variable-spacing--apply-ratio
   :clear #'variable-spacing--clear-ratio)
 
-;; The Org body-backend is registered at load time in face-extra.el
-;; (Section 4b).  body-face-mode reads it on enable.
+;; The Org body-backend is registered at load time in body-face.el.
+;; body-face-mode reads it on enable.
 
 (provide 'variable-spacing)
 ;;; variable-spacing.el ends here

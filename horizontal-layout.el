@@ -1,8 +1,10 @@
 ;;; horizontal-layout.el --- Synthetic face properties for horizontal text layout -*- lexical-binding: t; -*-
 
 ;; Author: Brad
-;; Keywords: faces, display
+;; Keywords: faces, display, wp
 ;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (face-extra "0.1.0"))
+;; URL: https://github.com/braddelong/org-sty
 
 ;;; Commentary:
 

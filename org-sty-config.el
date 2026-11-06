@@ -135,13 +135,6 @@
                    ;(lsp-ltex-plus-mode 1)
                    (org-block-appear-mode 1)
                    (org-cite-appear-mode 1)
-                   (org-footnote-extra-mode 1)
-                   ;; body-face-mode: installs (:inherit body) remaps on
-                   ;; content faces and (:inherit default) anchors on metadata
-                   ;; faces.  Must come before the variable-spacing-ratio
-                   ;; suppressors and variable-spacing-mode so the remap chain
-                   ;; is in place before any fontification cycle fires.
-                   (body-face-mode 1)
                    ;; Suppress inherited body ratio on block/quote faces
                    ;; BEFORE variable-spacing-mode enables.  variable-spacing-mode
                    ;; may trigger a fontification cycle; if the suppressors arrive
@@ -153,6 +146,10 @@
                    (org-sty-remap 'org-verse :variable-spacing-ratio 0)
                    (org-sty-remap 'org-block :variable-spacing-ratio 0)
                    (variable-spacing-mode 1)
+                   ;; org-footnote-extra-mode must come AFTER variable-spacing-mode
+                   ;; so that install-styling sees variable-spacing-mode active and
+                   ;; installs the (:inherit body) remap on org-footnote.
+                   (org-footnote-extra-mode 1)
 
                    ;; superscripts & subscripts are set relative to 'default rather
                    ;; than 'body; make them 0.8x 'body
@@ -214,7 +211,7 @@
                    ;; Setting the ratio here also makes it buffer-local (via
                    ;; face-extra-add-relative) rather than global (put), so it
                    ;; is cleaned up correctly on re-apply or mode disable.
-                   (body           . (:variable-spacing-ratio 1.6))
+                   (body           . (:height 2.0 :variable-spacing-ratio 1.6))
                    ;; Slant for quote/verse.  Each wp-faces entry must carry
                    ;; ALL standard-face attrs for that face because the shallow
                    ;; :faces merge means this entry replaces the org-sty-default

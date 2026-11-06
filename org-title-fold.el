@@ -2,7 +2,9 @@
 
 ;; Author: Brad
 ;; Keywords: org, convenience, outlines
-;; Version: 0.1
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1") (org "9.6"))
+;; URL: https://github.com/braddelong/org-sty
 
 ;;; Commentary:
 

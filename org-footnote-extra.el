@@ -1,7 +1,12 @@
 ;;; org-footnote-extra.el --- Enhanced footnote placement and rendering -*- lexical-binding: t -*-
 
 ;; Author: Brad
+;; Keywords: org, convenience, wp
 ;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (org "9.5")
+;;                   (face-extra "0.1.0") (body-face "0.1.0")
+;;                   (horizontal-layout "0.1.0"))
+;; URL: https://github.com/braddelong/org-sty
 
 ;;; Commentary:
 
@@ -44,6 +49,7 @@
 (require 'cl-lib)
 (require 'org-footnote)
 (require 'face-extra)
+(require 'body-face)
 (require 'variable-spacing)
 (require 'horizontal-layout)
 
@@ -452,8 +458,8 @@ avoiding the face duplication that caused hanging-wrap double-application.")
   ;; 2. Register org-footnote as a content face buffer-locally so
   ;;    `face-extra--org-explicit-face-p' returns t for it and
   ;;    body is not stamped over definition text.
-  (setq-local face-extra-org-content-faces
-              (cons 'org-footnote face-extra-org-content-faces))
+  (setq-local body-face-org-content-faces
+              (cons 'org-footnote body-face-org-content-faces))
   ;; 3. `variable-spacing-mode' installs content-face remaps at enable
   ;;    time, before this mode exists.  Install the (:inherit body)
   ;;    remap for org-footnote now so it scales with body text.
@@ -475,8 +481,8 @@ avoiding the face duplication that caused hanging-wrap double-application.")
   (font-lock-remove-keywords nil org-footnote-extra--def-font-lock-keywords)
   (org-footnote-extra--clear-reference-display (point-min) (point-max))
   (font-lock-remove-keywords nil org-footnote-extra--font-lock-keywords)
-  (setq-local face-extra-org-content-faces
-              (delq 'org-footnote face-extra-org-content-faces))
+  (setq-local body-face-org-content-faces
+              (delq 'org-footnote body-face-org-content-faces))
   (when org-footnote-extra--remap-cookie
     (face-remap-remove-relative org-footnote-extra--remap-cookie)
     (setq org-footnote-extra--remap-cookie nil))
