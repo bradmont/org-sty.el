@@ -136,12 +136,17 @@
                    (org-block-appear-mode 1)
                    (org-cite-appear-mode 1)
                    (org-footnote-extra-mode 1)
+                   ;; body-face-mode: installs (:inherit body) remaps on
+                   ;; content faces and (:inherit default) anchors on metadata
+                   ;; faces.  Must come before the variable-spacing-ratio
+                   ;; suppressors and variable-spacing-mode so the remap chain
+                   ;; is in place before any fontification cycle fires.
+                   (body-face-mode 1)
                    ;; Suppress inherited body ratio on block/quote faces
                    ;; BEFORE variable-spacing-mode enables.  variable-spacing-mode
-                   ;; installs (:inherit body) remaps and may trigger a
-                   ;; fontification cycle; if the suppressors arrive later (via
-                   ;; :faces) the cache is built without them and spacers are
-                   ;; stamped on these faces before the suppressor can block it.
+                   ;; may trigger a fontification cycle; if the suppressors arrive
+                   ;; later (via :faces) the cache is built without them and spacers
+                   ;; are stamped on these faces before the suppressor can block it.
                    ;; Those stale spacers are never cleared by the span-only clear
                    ;; loop in variable-spacing--apply-ratio.
                    (org-sty-remap 'org-quote :variable-spacing-ratio 0)

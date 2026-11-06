@@ -173,7 +173,8 @@ Cancelled and replaced on each new keystroke that triggers deferral.")
   "Value of `buffer-chars-modified-tick' when the bib-files cache was filled.")
 
 (defconst org-sty--known-eval-modes
-  '(variable-spacing-mode org-title-fold-mode org-block-appear-mode
+  '(body-face-mode variable-spacing-mode horizontal-layout-mode
+    text-align-mode org-title-fold-mode org-block-appear-mode
     org-cite-appear-mode org-footnote-extra-mode org-num-mode)
   "Minor modes that `:eval' commonly activates; tracked for teardown.")
 

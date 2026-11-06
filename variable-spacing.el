@@ -215,8 +215,8 @@ carries a `variable-spacing-ratio'."
                     (face-extra--install-body-remaps
                      face-extra-org-content-faces
                      face-extra-org-metadata-faces)))
-        ;; face-extra owns the dispatch loop; just enable it.
-        (face-extra--enable-dispatch)
+        ;; Activate face-extra dispatch in this buffer.
+        (face-extra-mode-require)
         ;; Invalidate the face cache so the new buffer-local remaps
         ;; are picked up immediately.
         (face-extra--invalidate-cache)
@@ -252,8 +252,7 @@ carries a `variable-spacing-ratio'."
                    #'variable-spacing--text-scale-refresh)
     (advice-remove 'set-face-attribute
                    #'variable-spacing--body-face-refresh)
-    ;; Remove dispatch advice only if no other buffer still needs it.
-    (face-extra--disable-dispatch)))
+    (face-extra-mode-release)))
 
 ;;;; ----------------------------------------------------------------
 ;;;; face-extra registration and apply function
@@ -288,8 +287,8 @@ Spacer height measurement uses two paths:
 
 The cache key is (ratio . measure-face) so the same ratio value at
 different face sizes produces distinct spacers."
-  (when (bound-and-true-p variable-spacing-mode)
-    (with-silent-modifications
+  ;; Mode guard enforced by dispatcher via :mode 'variable-spacing-mode.
+  (with-silent-modifications
       ;; Clear stale spacers for every span first.
       (dolist (span spans)
         (variable-spacing-clear (nth 0 span) (nth 1 span)))
@@ -327,7 +326,7 @@ different face sizes produces distinct spacers."
                                    s))))
                 (put-text-property beg end 'line-prefix spacer)
                 (put-text-property beg end 'wrap-prefix spacer)
-                (put-text-property beg end variable-spacing--prop t)))))))))
+                (put-text-property beg end variable-spacing--prop t))))))))
 
 (defun variable-spacing--clear-ratio (_cookie)
   "No-op :clear function for `variable-spacing-ratio' registration.
@@ -336,16 +335,17 @@ The per-buffer spacer text properties are cleaned up by
 `variable-spacing-clear' on mode disable or the next dispatch cycle."
   nil)
 
+;; Register variable-spacing-ratio at load time.
+;; Buffer-local lifecycle is managed by face-extra-mode-require/release.
 (face-extra-define-property 'variable-spacing-ratio
   :pass  1
+  :mode  'variable-spacing-mode
   :after nil
   :apply #'variable-spacing--apply-ratio
   :clear #'variable-spacing--clear-ratio)
 
-;; Register the Org backend so face-extra's pass-0 bare-text stamper
-;; activates in org-mode buffers where variable-spacing-mode is on.
-;; TODO Phase 3: move this into body-face-mode's enable body.
-(face-extra-register-backend 'org-mode face-extra-org-body-backend)
+;; The Org body-backend is registered at load time in face-extra.el
+;; (Section 4b).  body-face-mode reads it on enable.
 
 (provide 'variable-spacing)
 ;;; variable-spacing.el ends here
