@@ -50,7 +50,7 @@
   "The org-mode backend is registered with face-extra after load."
   (should (alist-get 'org-mode face-extra--backend-alist))
   (should (plist-get (alist-get 'org-mode face-extra--backend-alist)
-                     :stamp-body-text)))
+                     :add-face)))
 
 ;;; -----------------------------------------------------------------------
 ;;; variable-spacing--apply-ratio
@@ -144,38 +144,38 @@ given spans are left untouched."
       (should-not (vs-test--has-spacer-p 1)))))
 
 ;;; -----------------------------------------------------------------------
-;;; face-extra--org-stamp-body-text (Org backend, pass 0)
+;;; body-face--org-add-face (Org backend, pass 0)
 ;;; -----------------------------------------------------------------------
 
-(ert-deftest vs/stamp/unstyled-gets-body ()
-  "Characters with no face/font-lock-face are stamped with body."
+(ert-deftest vs/add-face/unstyled-gets-body ()
+  "Characters with no face/font-lock-face have body added."
   (vs-test--with-buffer
     (insert "plain")
     ;; No face properties set.
-    (face-extra--org-stamp-body-text 1 (point-max))
-    ;; The stamp uses add-face-text-property with APPEND=t, so body
-    ;; is the face or part of the face list.
+    (body-face--org-add-face 1 (point-max))
+    ;; add-face-text-property uses APPEND=t, so body is the face or part of
+    ;; the face list.
     (let ((f (get-text-property 1 'face)))
       (should (or (eq f 'body)
                   (and (listp f) (memq 'body f)))))))
 
-(ert-deftest vs/stamp/font-lock-face-blocks-stamp ()
-  "Characters with font-lock-face set do NOT get body stamped."
+(ert-deftest vs/add-face/font-lock-face-blocks-add ()
+  "Characters with font-lock-face set do NOT get body added."
   (vs-test--with-buffer
     (insert "heading")
     (put-text-property 1 8 'font-lock-face 'org-level-1)
-    (face-extra--org-stamp-body-text 1 (point-max))
+    (body-face--org-add-face 1 (point-max))
     (let ((f (get-text-property 1 'face)))
       (should-not (or (eq f 'body)
                       (and (listp f) (memq 'body f)))))))
 
-(ert-deftest vs/stamp/content-face-blocks-stamp ()
+(ert-deftest vs/add-face/content-face-blocks-add ()
   "Characters already carrying a content face do NOT get body."
   (vs-test--with-buffer
     (insert "quoted text")
-    ;; org-quote is in face-extra-org-content-faces.
+    ;; org-quote is in body-face-org-content-faces.
     (put-text-property 1 12 'face 'org-quote)
-    (face-extra--org-stamp-body-text 1 (point-max))
+    (body-face--org-add-face 1 (point-max))
     ;; body should NOT have been added.
     (let ((f (get-text-property 1 'face)))
       (should (or (eq f 'org-quote)
@@ -183,23 +183,23 @@ given spans are left untouched."
                        (memq 'org-quote f)
                        (not (memq 'body f))))))))
 
-(ert-deftest vs/stamp/metadata-face-blocks-stamp ()
+(ert-deftest vs/add-face/metadata-face-blocks-add ()
   "Characters carrying a metadata face do NOT get body."
   (vs-test--with-buffer
     (insert ":DRAWER:")
     (put-text-property 1 9 'face 'org-drawer)
-    (face-extra--org-stamp-body-text 1 (point-max))
+    (body-face--org-add-face 1 (point-max))
     (let ((f (get-text-property 1 'face)))
       (should-not (and (listp f) (memq 'body f)))
       (should-not (eq f 'body)))))
 
-(ert-deftest vs/stamp/clears-stale-body ()
-  "Stale body stamps are removed before re-stamping."
+(ert-deftest vs/add-face/clears-stale-body ()
+  "Stale body faces are removed before re-adding."
   (vs-test--with-buffer
-    ;; Pre-load a stale body stamp on positions that now have org-quote.
+    ;; Pre-load a stale body face on positions that now have org-quote.
     (insert "stale")
     (put-text-property 1 6 'face '(body org-quote))
-    (face-extra--org-stamp-body-text 1 (point-max))
+    (body-face--org-add-face 1 (point-max))
     ;; body must be gone; org-quote must remain.
     (let ((f (get-text-property 1 'face)))
       (should-not (and (listp f) (memq 'body f)))
@@ -208,20 +208,20 @@ given spans are left untouched."
       (should (or (eq f 'org-quote)
                   (and (listp f) (memq 'org-quote f)))))))
 
-(ert-deftest vs/stamp/newline-mid-span-gets-body ()
-  "A newline in the middle of an unstyled span is stamped body."
+(ert-deftest vs/add-face/newline-mid-span-gets-body ()
+  "A newline in the middle of an unstyled span has body added."
   (vs-test--with-buffer
     (insert "line1\nline2")
     ;; No face on any character.
-    (face-extra--org-stamp-body-text 1 (point-max))
+    (body-face--org-add-face 1 (point-max))
     ;; The \n at position 6 is mid-span (preceded by 'l', a non-\n char,
     ;; but the preceding char has no explicit face, so the span doesn't split).
-    ;; \n should be stamped body.
+    ;; \n should have body added.
     (let ((f (get-text-property 6 'face)))
       (should (or (eq f 'body)
                   (and (listp f) (memq 'body f)))))))
 
-(ert-deftest vs/stamp/newline-after-heading-inherits-heading-face ()
+(ert-deftest vs/add-face/newline-after-heading-inherits-heading-face ()
   "A \\n that immediately follows a heading span inherits the heading face."
   (vs-test--with-buffer
     ;; Simulate: heading text (org-level-1 via font-lock-face) followed by \n,
@@ -230,7 +230,7 @@ given spans are left untouched."
     ;;         123456 7 8901
     ;; Positions 1-6 have font-lock-face org-level-1; position 7 is \n.
     (put-text-property 1 7 'font-lock-face 'org-level-1)
-    (face-extra--org-stamp-body-text 1 (point-max))
+    (body-face--org-add-face 1 (point-max))
     ;; Position 7 (\n) should have inherited the heading's face (not body),
     ;; since it's at the START of a body-context span and its preceding char
     ;; belongs to a non-body span.
@@ -264,10 +264,10 @@ applied even though :variable-spacing-ratio 0 was set via :faces."
                          'org-quote 'variable-spacing-ratio 0)))
             (unwind-protect
                 (progn
-                  ;; 3. Stamp org-quote on the text (as Org does for quote blocks).
+                  ;; 3. Add org-quote face (as Org does for quote blocks).
                   (put-text-property 1 17 'face 'org-quote)
-                  ;; 4. Run the stamp pass (backend pass 0).
-                  (face-extra--org-stamp-body-text 1 17)
+                  ;; 4. Run the pass-0 add-face step.
+                  (body-face--org-add-face 1 17)
                   ;; 5. Collect spans as the dispatch would.
                   (let ((spans-table (face-extra--collect-spans 1 17)))
                     ;; No variable-spacing-ratio spans should be collected for
@@ -315,7 +315,7 @@ This is the multi-face version of the org-quote spacing bug."
                          'org-quote 'variable-spacing-ratio 0)))
             (unwind-protect
                 (progn
-                  ;; Simulate a face list that has BOTH body (stale stamp)
+                  ;; Simulate a face list that has BOTH body (stale face)
                   ;; and org-quote (set by Org) at the same position.
                   (put-text-property 1 8 'face '(body org-quote))
                   (let ((spans-table (face-extra--collect-spans 1 8)))

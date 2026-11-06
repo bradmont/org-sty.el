@@ -22,9 +22,9 @@
 ;;
 ;; After each font-lock fontification cycle two passes run in order:
 ;;
-;;   1. Face-stamp pass (`variable-spacing--after-fontify'): stamps
-;;      the `body' face onto characters that Org left completely
-;;      unstyled (plain paragraph text), so they participate in spacing.
+;;   1. Add-face pass (`variable-spacing--after-fontify'): adds the
+;;      `body' face to characters that Org left completely unstyled
+;;      (plain paragraph text), so they participate in spacing.
 ;;
 ;;   2. Spacing pass (`variable-spacing--spacing-pass'): walks the
 ;;      fontified region, reads the active face at each span, looks up
@@ -67,8 +67,8 @@
 Org's property-line keyword covers only the :KEY: and VALUE subgroups
 of `org-property-re', leaving the whitespace between them — and any
 trailing whitespace after the value — with no face at all.  Without
-this face those characters are stamped `body' by the stamp pass
-and rendered at body-text height.
+this face those characters would have `body' added by the pass-0
+fontifier and rendered at body-text height.
 
 This face inherits `default' so it is floor-sized in
 `variable-spacing-mode' and otherwise invisible.  It may be reused
@@ -205,7 +205,7 @@ face property, set with `face-extra-add-relative' (buffer-local) or
   (face-extra-add-relative \\='org-quote \\='variable-spacing-ratio 1.0)
 
 After each font-lock cycle `face-extra--dispatch' runs: the Org backend
-stamps `body' on unstyled characters (pass 0), then the spacing
+adds the `body' face to unstyled characters (pass 0), then the spacing
 pass (pass 1) applies pixel spacers to all characters whose active face
 carries a `variable-spacing-ratio'."
   :lighter " VSpac"
@@ -217,7 +217,7 @@ carries a `variable-spacing-ratio'."
               (list (face-remap-add-relative
                      'default :height variable-spacing-floor-height)))
         ;; Enable body-face-mode as a dependency so content/metadata remaps
-        ;; and pass-0 body stamping are active.
+        ;; and pass-0 body face addition are active.
         (body-face-mode 1)
         ;; Invalidate the face cache so the new buffer-local remaps
         ;; are picked up immediately.
@@ -228,9 +228,9 @@ carries a `variable-spacing-ratio'."
                     #'variable-spacing--body-face-refresh)
         ;; Cover whitespace gaps that Org's property-line font-lock keyword
         ;; leaves unstyled: the [ \t]+ between :KEY: and VALUE, and any
-        ;; trailing [ \t]+ after VALUE.  Without this the stamp pass treats
-        ;; them as bare body text.  `keep' is character-by-character so we
-        ;; never clobber anything Org already stamped.
+        ;; trailing [ \t]+ after VALUE.  Without this the pass-0 fontifier
+        ;; treats them as bare body text.  `keep' is character-by-character
+        ;; so we never clobber anything Org already fontified.
         (font-lock-add-keywords nil
           '(("^[ \t]*:[^:\n]+:\\([ \t]+\\)[^\n]*\\([ \t]+\\)$"
              (1 'variable-spacing--default keep)

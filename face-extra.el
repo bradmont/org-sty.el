@@ -193,7 +193,7 @@ call to `face-extra-mode-require'."
 
 PLIST must contain:
   :pass   Integer 0, 1, 2, or 3 (pipeline pass number).
-          Pass 0: bare-text stamping; :apply called as (fn beg end).
+          Pass 0: bare-text fontification; :apply called as (fn beg end).
           Passes 1–3: :apply called with a list of (beg end value) triples.
   :apply  Function — see :pass above for call signature.
   :mode   The minor-mode symbol that owns this property (e.g.
@@ -734,7 +734,7 @@ with zero overhead."
             (funcall apply-fn (nreverse spans))))))))
 
 (defun face-extra--dispatch (beg end &optional _loudly)
-  "After-fontify dispatch: stamp body text and run pass-1/2/3 properties.
+  "After-fontify dispatch: add body face to bare text; run pass-1/2/3 properties.
 
 Advises `font-lock-fontify-keywords-region' with :after.  Active while
 `face-extra-mode' is on (i.e. while the registry is non-empty).
@@ -746,9 +746,9 @@ Steps:
   ;; Run pass-0 and passes 1-2 when dispatch is active (face-extra-mode is on
   ;; iff the registry is non-empty, i.e. some mode has defined properties).
   (when face-extra-mode
-    ;; Pass 0: call every registered pass-0 :apply function with (beg end),
-    ;; guarded by the property's :mode so it only runs in buffers where the
-    ;; owning mode is active.
+    ;; Pass 0: add face to bare text — call every registered pass-0 :apply
+    ;; function with (beg end), guarded by the property's :mode so it only
+    ;; runs in buffers where the owning mode is active.
     (maphash (lambda (key entry)
                (let ((mode (plist-get entry :mode)))
                  (when (and (consp key) (= (cdr key) 0)

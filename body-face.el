@@ -10,7 +10,7 @@
 
 ;; `body-face-mode' installs the semantic body-face hierarchy in a buffer:
 ;; content faces receive `(:inherit body)' remaps, metadata faces receive
-;; `(:inherit default)' anchors, and the pass-0 bare-text stamper is
+;; `(:inherit default)' anchors, and the pass-0 bare-text fontifier is
 ;; activated via face-extra dispatch.
 ;;
 ;; The `body' face is a neutral semantic identity face; its visual size in
@@ -23,7 +23,7 @@
 ;;   (body-face-register-backend 'my-mode
 ;;     :content-faces  '(my-content-face ...)
 ;;     :metadata-faces '(my-metadata-face ...)
-;;     :stamp-body-text #'my-stamp-fn)
+;;     :add-face #'my-add-face-fn)
 ;;
 ;; Then enable `body-face-mode' in that mode's hook or via a style `:eval'.
 
@@ -67,18 +67,19 @@ set buffer-locally by `org-sty-config' via `face-extra-add-relative'."
 Each backend plist must supply:
   :content-faces   Faces that receive `(:inherit body)' remaps on enable.
   :metadata-faces  Faces that receive `(:inherit default)' anchors on enable.
-  :stamp-body-text A function (beg end) for pass-0 body stamping.
+  :add-face        A function (beg end) that adds the `body' face to bare text
+                   (pass-0 fontification).
 
 Register via `body-face-register-backend'.")
 
 (defun body-face-register-backend (major-mode-sym &rest plist)
   "Register PLIST as the body-face backend for MAJOR-MODE-SYM.
 
-PLIST must contain :content-faces, :metadata-faces, and :stamp-body-text.
+PLIST must contain :content-faces, :metadata-faces, and :add-face.
 Called at load time (or by user config) before `body-face-mode' is enabled.
 `body-face-mode' reads the plist when it enables in a buffer of MAJOR-MODE-SYM."
-  (unless (plist-get plist :stamp-body-text)
-    (error "body-face-register-backend: `%s' backend lacks :stamp-body-text"
+  (unless (plist-get plist :add-face)
+    (error "body-face-register-backend: `%s' backend lacks :add-face"
            major-mode-sym))
   (unless (plist-get plist :content-faces)
     (error "body-face-register-backend: `%s' backend lacks :content-faces"
@@ -125,7 +126,7 @@ COOKIES is the list returned by that function."
 
 
 ;;;; ================================================================
-;;;; Section 4 — Body-stamp utilities
+;;;; Section 4 — Add-face utilities
 ;;;; ================================================================
 
 (defun body-face-remove-body-face (beg end)
@@ -205,8 +206,8 @@ when `body-face-mode' is enabled, lifting it above the floor height on
 Inline faces (bold, italic, org-code, org-link, org-cite, org-footnote,
 etc.) are intentionally absent: they can appear alongside a structural
 face in a list (e.g. `(italic org-level-2)') and a remap would cause
-body height to dominate incorrectly.  The pass-0 stamp handles them by
-marking bare-text runs with `body' directly.
+body height to dominate incorrectly.  The pass-0 fontifier handles them by
+adding `body' directly to bare-text runs.
 
 Can be set buffer-locally for per-document customisation."
   :type '(repeat face)
@@ -222,7 +223,7 @@ Can be set buffer-locally for per-document customisation."
   "Metadata faces exempt from `body' stamping in Org WP buffers.
 
 Faces in this list do NOT receive a `(:inherit body)' remap and are
-excluded from the pass-0 body stamp, so they inherit floor size from
+excluded from the pass-0 body face, so they inherit floor size from
 the `default' remap.
 
 Can be set buffer-locally for per-document customisation."
@@ -233,7 +234,7 @@ Can be set buffer-locally for per-document customisation."
   "Return non-nil if FACE contains at least one Org content or metadata face.
 FACE may be a symbol, an anonymous attribute plist, or a list thereof.
 
-The pass-0 stamp stamps `body' on characters where this returns nil and
+The pass-0 fontifier adds `body' to characters where this returns nil and
 no `font-lock-face' is present."
   (cond
    ((null face) nil)
@@ -249,8 +250,8 @@ no `font-lock-face' is present."
              face))
    (t nil)))
 
-(defun body-face--org-stamp-body-text (beg end)
-  "Stamp `body' on characters in BEG..END that Org left unstyled.
+(defun body-face--org-add-face (beg end)
+  "Add the `body' face to characters in BEG..END that Org left unstyled.
 
 Called during pass 0 of each dispatch cycle for `org-mode' buffers.
 Mode guard enforced by dispatcher via :mode \\='body-face-mode."
@@ -265,7 +266,7 @@ Mode guard enforced by dispatcher via :mode \\='body-face-mode."
           (when (and (null (get-text-property pos 'font-lock-face))
                      (not (body-face--org-explicit-face-p
                            (get-text-property pos 'face))))
-            (let ((stamp-start pos))
+            (let ((run-start pos))
               (when (and (eq (char-after pos) ?\n)
                          (> pos (point-min))
                          (not (eq (char-before pos) ?\n)))
@@ -274,22 +275,22 @@ Mode guard enforced by dispatcher via :mode \\='body-face-mode."
                                                         'font-lock-face))))
                   (when prev-face
                     (add-face-text-property pos (1+ pos) prev-face t)
-                    (setq stamp-start (1+ pos)))))
-              (when (< stamp-start next)
-                (add-face-text-property stamp-start next 'body t))))
+                    (setq run-start (1+ pos)))))
+              (when (< run-start next)
+                (add-face-text-property run-start next 'body t))))
           (setq pos next))))))
 
 ;; Register the Org backend at load time.
 (body-face-register-backend 'org-mode
   :content-faces  body-face-org-content-faces
   :metadata-faces body-face-org-metadata-faces
-  :stamp-body-text #'body-face--org-stamp-body-text)
+  :add-face #'body-face--org-add-face)
 
-;; Register the pass-0 body-stamp property at load time.
-(face-extra-define-property 'body-stamp
+;; Register the pass-0 add-face property at load time.
+(face-extra-define-property 'body-add-face
   :pass 0
   :mode 'body-face-mode
-  :apply #'body-face--org-stamp-body-text)
+  :apply #'body-face--org-add-face)
 
 
 (provide 'body-face)
