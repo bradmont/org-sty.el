@@ -5,6 +5,8 @@ A collection of Emacs minor modes that together aim to emulate a
 word-processor interface inside Org mode. Each file is independently
 usable; they are wired together through =org-sty='s =:eval= escape hatch.
 
+[[file:screenshot.png]]
+
 * Files
 
 ** =face-extra.el= — synthetic face-property engine
