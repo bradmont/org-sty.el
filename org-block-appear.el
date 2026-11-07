@@ -2,7 +2,9 @@
 
 ;; Author: Brad
 ;; Keywords: org, convenience
-;; Version: 0.1
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (org "9.5"))
+;; URL: https://github.com/braddelong/org-sty
 
 ;;; Commentary:
 

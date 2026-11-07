@@ -3,6 +3,8 @@
 ;; Author: Brad
 ;; Keywords: faces, display
 ;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1") (cl-lib "0.5"))
+;; URL: https://github.com/braddelong/org-sty
 
 ;;; Commentary:
 
@@ -21,7 +23,7 @@
 ;; Properties can be attached to faces globally or buffer-locally:
 ;;
 ;;   ;; Global — affects all buffers:
-;;   (face-extra-add 'text-body 'variable-spacing-ratio 1.5)
+;;   (face-extra-add 'body 'variable-spacing-ratio 1.5)
 ;;
 ;;   ;; Buffer-local — per-document styling:
 ;;   (face-extra-add-relative 'org-quote 'variable-spacing-ratio 1.0)
@@ -71,18 +73,25 @@ is called with a cookie to undo a global installation.")
 Entries are recomputed by `face-extra--sort-pass' whenever a new
 property is registered for that pass.")
 
+
 (defun face-extra-registered-p (property)
   "Return non-nil if PROPERTY is registered in any pass."
-  (or (gethash (cons property 1) face-extra--registry)
+  (or (gethash (cons property 0) face-extra--registry)
+      (gethash (cons property 1) face-extra--registry)
       (gethash (cons property 2) face-extra--registry)
       (gethash (cons property 3) face-extra--registry)))
 
 (defun face-extra--validate-after (property after pass)
-  "Signal an error if any symbol in AFTER is not registered in PASS."
+  "Signal an error if any symbol in AFTER is not registered in PASS.
+This enforces that modes defining properties with `:after' dependencies
+must be enabled after the modes that own those dependencies.  An error
+here means modes were enabled out of order — check the `:eval' block
+in your style config and ensure the dependency mode is enabled first."
   (dolist (dep after)
     (unless (gethash (cons dep pass) face-extra--registry)
-      (error "face-extra: :after dependency `%s' for `%s' is not registered in pass %d"
-             dep property pass))))
+      (error "face-extra: `%s' (pass %d) has :after `%s' but that \
+property is not registered; enable the mode that provides it first"
+             property pass dep))))
 
 (defun face-extra--sort-pass (pass)
   "Compute the topological sort order for all properties in PASS.
@@ -129,57 +138,115 @@ remove zero-in-degree nodes."
             (error "face-extra: dependency cycle detected in pass %d properties" pass))
           (puthash pass (nreverse sorted) face-extra--pass-order))))))
 
+;; `face-extra-mode' is defined here (before `face-extra-define-property')
+;; so that `face-extra-mode-require' can call `(face-extra-mode 1)'.
+(define-minor-mode face-extra-mode
+  "Infrastructure minor mode: active while face-extra dispatch is running.
+
+Enabled by `face-extra-mode-require' when the first property mode
+enables in the current buffer; disabled by `face-extra-mode-release'
+when the last property mode disables.  Do not toggle directly — use
+`face-extra-mode-require' and `face-extra-mode-release' instead."
+  :lighter " FExtra"
+  :interactive nil
+  (if face-extra-mode
+      (face-extra--enable-dispatch)
+    (face-extra--disable-dispatch)))
+
+(defvar-local face-extra--buffer-users 0
+  "Ref count: number of property modes currently active in this buffer.
+Incremented by `face-extra-mode-require'; decremented by
+`face-extra-mode-release'.  When it transitions 0→1 `face-extra-mode'
+is enabled; when it transitions 1→0 `face-extra-mode' is disabled.")
+
+(defun face-extra-mode-require ()
+  "Increment the face-extra ref count in the current buffer.
+
+Called from property mode enable bodies (e.g. `variable-spacing-mode',
+`horizontal-layout-mode', `body-face-mode').  On the 0→1 transition,
+enables `face-extra-mode' (which installs dispatch advice globally and
+registers pass-3 jit-lock dispatch in this buffer).
+
+Each call to `face-extra-mode-require' must be paired with exactly one
+call to `face-extra-mode-release' in the corresponding disable body."
+  (cl-incf face-extra--buffer-users)
+  (when (= face-extra--buffer-users 1)
+    (face-extra-mode 1)))
+
+(defun face-extra-mode-release ()
+  "Decrement the face-extra ref count in the current buffer.
+
+Called from property mode disable bodies.  On the 1→0 transition,
+disables `face-extra-mode' (which removes dispatch advice and unregisters
+pass-3 jit-lock dispatch from this buffer).
+
+Each call to `face-extra-mode-release' must be paired with an earlier
+call to `face-extra-mode-require'."
+  (cl-decf face-extra--buffer-users)
+  (when (<= face-extra--buffer-users 0)
+    (setq face-extra--buffer-users 0)
+    (face-extra-mode -1)))
+
 ;;;###autoload
 (defun face-extra-define-property (property &rest plist)
   "Register a synthetic face PROPERTY with the face-extra dispatch system.
 
 PLIST must contain:
-  :pass   Integer 1, 2, or 3 (rendering pipeline pass number).
-  :apply  Function called with (spans) — a list of (beg end value) triples
-          collected for this property across the dispatch region.
-  :clear  Function called with a cookie (as returned by `face-extra-add')
-          to undo a global property installation.
+  :pass   Integer 0, 1, 2, or 3 (pipeline pass number).
+          Pass 0: bare-text fontification; :apply called as (fn beg end).
+          Passes 1–3: :apply called with a list of (beg end value) triples.
+  :apply  Function — see :pass above for call signature.
+  :mode   The minor-mode symbol that owns this property (e.g.
+          `variable-spacing-mode').  Required.  The dispatcher checks
+          `(symbol-value :mode)' before invoking :apply, :before-pass3-walk,
+          or :before-keystroke in any buffer.  This is how globally-registered
+          properties are suppressed in buffers where the owning mode is
+          not active — the check lives in the dispatcher, not in the
+          individual callback functions.
 
 Optional:
+  :clear      Function called with a cookie to undo a global installation.
   :after      List of property symbols in the same PASS that must run before
-              this property.  Cross-pass references are rejected.
-  :pre-clear  Function called with (beg end) once before the pass-3
-              visual-line walk begins.  Use this to remove display artifacts
-              (e.g. overlays) that would affect `vertical-motion' layout
-              calculations.  Only meaningful for pass-3 properties.
-  :pre-command  Function called with (vline-beg vline-end) from
-              `pre-command-hook' before each self-inserting or deleting
-              keystroke.  vline-beg is the cached visual BOL (recomputed
-              via `vertical-motion' only when point has left the last-known
-              visual line); vline-end is the logical EOL via
-              `line-end-position' (recomputed cheaply each call).
-              Only meaningful for pass-3 properties.
+              this property.  Cross-pass references are rejected.  Not valid
+              for pass 0.
+  :before-pass3-walk  Function called with (beg end) before the pass-3
+              visual-line walk.  Used to clear stale pass-3 stamps so
+              `vertical-motion' sees natural character widths.
+  :before-keystroke  Function called with (vline-beg vline-end) from
+              `pre-command-hook' before each editing keystroke.
 
-Registering a property clears the entire face cache (via
-`face-extra--invalidate-all-caches') because existing per-face cache
-entries may be stale.  At load time this is inexpensive and rare."
-  (let ((pass       (plist-get plist :pass))
-        (after      (plist-get plist :after))
+Properties are registered at load time, once globally, and remain in
+the registry permanently.  Buffer-local lifecycle is managed via
+`face-extra-mode-require' and `face-extra-mode-release'."
+  (let ((pass         (plist-get plist :pass))
+        (mode         (plist-get plist :mode))
+        (after        (plist-get plist :after))
         (apply-fn     (plist-get plist :apply))
         (clear-fn     (plist-get plist :clear))
-        (pre-clear    (plist-get plist :pre-clear))
-        (pre-command  (plist-get plist :pre-command)))
-    (unless (memql pass '(1 2 3))
-      (error "face-extra-define-property: :pass must be 1, 2, or 3 (got %S)" pass))
+        (before-pass3-walk (plist-get plist :before-pass3-walk))
+        (before-keystroke  (plist-get plist :before-keystroke)))
+    (unless (memql pass '(0 1 2 3))
+      (error "face-extra-define-property: :pass must be 0, 1, 2, or 3 (got %S)" pass))
+    (unless (symbolp mode)
+      (error "face-extra-define-property: :mode must be a symbol (got %S)" mode))
+    (unless mode
+      (error "face-extra-define-property: :mode is required"))
     (unless (functionp apply-fn)
       (error "face-extra-define-property: :apply must be a function"))
-    ;; :after validation — must run after any prior properties exist.
-    ;; We validate lazily (after registration) so that forward-declarations
-    ;; are impossible; :after must only name already-registered symbols.
-    (face-extra--validate-after property after pass)
-    (puthash (cons property pass)
-             (list :pass pass :after after :apply apply-fn :clear clear-fn
-                   :pre-clear pre-clear :pre-command pre-command)
-             face-extra--registry)
-    ;; Re-sort the affected pass bucket.
-    (face-extra--sort-pass pass)
-    ;; Invalidate all per-face caches — rare (load-time only).
-    (face-extra--invalidate-all-caches)))
+    (when (and after (= pass 0))
+      (error "face-extra-define-property: :after is not valid for pass 0"))
+    (let ((ref-key (cons property pass)))
+      (when (and (> pass 0) after)
+        (face-extra--validate-after property after pass))
+      (puthash ref-key
+               (list :pass pass :mode mode :after after :apply apply-fn
+                     :clear clear-fn :before-pass3-walk before-pass3-walk
+                     :before-keystroke before-keystroke)
+               face-extra--registry)
+      (when (> pass 0)
+        (face-extra--sort-pass pass))
+      ;; Invalidate all caches since a new property may affect resolution.
+      (face-extra--invalidate-all-caches))))
 
 
 ;;;; ================================================================
@@ -289,7 +356,7 @@ When nil, geometry is settled and the walk may proceed.")
     evil-delete-backward-char-and-join    ; Evil normal/insert backspace
     evil-delete-char)                     ; Evil forward delete
   "Commands treated as active typing for passes 1–2 narrowing and
-`:pre-command' dispatch.  During these commands, passes 1–2 are narrowed
+`:before-keystroke' dispatch.  During these commands, passes 1–2 are narrowed
 to point's logical line, keeping per-keystroke cost near zero.  All other
 commands — scrolling, initial render, fontified=nil re-fontification —
 get full unrestricted passes.  `self-insert-command' is first so the
@@ -410,7 +477,7 @@ variable-spacing).  Global library-level defaults should use
     ;; that inherits from FACE through face-remapping-alist or face :inherit
     ;; may have cached a stale value resolved before this change was made.
     ;; Single-face invalidation (`face-extra--invalidate-face') is
-    ;; insufficient when the changed face is a base like `text-body' whose
+    ;; insufficient when the changed face is a base like `body' whose
     ;; properties propagate transitively to dozens of inheriting faces (e.g.
     ;; `org-list-dt', all `org-level-*', etc.).  A full wipe is safe because
     ;; the cache is rebuilt lazily on next access.
@@ -460,37 +527,22 @@ unset)."
 
 
 ;;;; ================================================================
-;;;; Section 4 — Backend protocol
+;;;; Section 4 — Pass-0 registration is handled via
+;;;;              face-extra-define-property :pass 0 in Section 1.
+;;;;              Body-face machinery (body face, backends, remaps,
+;;;;              body-face-mode) has moved to body-face.el.
 ;;;; ================================================================
 
-(defvar face-extra--backend-alist nil
-  "Alist mapping major-mode symbol → backend plist.
 
-Each backend plist must supply at minimum:
-  :stamp-body-text  A function (beg end) that stamps the pass-0
-                    body-text face on unstyled bare-text runs in BEG..END.
-                    Called once at the start of each dispatch cycle, before
-                    the property scan.
-
-Register a backend with `face-extra-register-backend'.")
-
-(defun face-extra-register-backend (major-mode-sym backend-plist)
-  "Register BACKEND-PLIST as the backend for MAJOR-MODE-SYM.
-
-BACKEND-PLIST must contain at least:
-  :stamp-body-text  A function (beg end) — see `face-extra--backend-alist'."
-  (unless (plist-get backend-plist :stamp-body-text)
-    (error "face-extra-register-backend: backend for `%s' lacks :stamp-body-text"
-           major-mode-sym))
-  (setf (alist-get major-mode-sym face-extra--backend-alist) backend-plist))
-
-(defun face-extra--active-backend ()
-  "Return the backend plist for the current buffer's major mode, or nil."
-  (alist-get major-mode face-extra--backend-alist))
-
+(defgroup face-extra nil
+  "Generic synthetic face properties and dispatch infrastructure."
+  :group 'faces)
 
 ;;;; ================================================================
 ;;;; Section 5 — Per-face cache resolver and dispatch
+;;;; ================================================================
+
+
 ;;;; ================================================================
 
 ;;;; ------ Cache resolver ------
@@ -620,8 +672,8 @@ Suppressor-wins semantics: if ANY face in the face list at a position
 has an explicit local suppressor (value 0 in
 `face-extra--local-properties') for a property, that property is NOT
 collected from any face at that position.  This prevents a stale
-`text-body' stamp alongside a suppressed face (e.g. `org-quote') from
-leaking the `text-body' ratio through."
+`body' stamp alongside a suppressed face (e.g. `org-quote') from
+leaking the `body' ratio through."
   (let ((spans (make-hash-table :test #'eq))
         (pos beg))
     (while (< pos end)
@@ -676,29 +728,33 @@ with zero overhead."
     (let ((spans (gethash prop spans-table)))
       (when spans
         (let* ((entry    (gethash (cons prop pass-num) face-extra--registry))
+               (mode     (plist-get entry :mode))
                (apply-fn (plist-get entry :apply)))
-          (funcall apply-fn (nreverse spans)))))))
+          (when (and mode (symbol-value mode))
+            (funcall apply-fn (nreverse spans))))))))
 
 (defun face-extra--dispatch (beg end &optional _loudly)
-  "After-fontify dispatch: stamp body text and run pass-1/2/3 properties.
+  "After-fontify dispatch: add body face to bare text; run pass-1/2/3 properties.
 
-Advises `font-lock-fontify-keywords-region' with :after.  Active in all
-buffers that have at least one buffer-local property or a registered
-backend for their major mode.
+Advises `font-lock-fontify-keywords-region' with :after.  Active while
+`face-extra-mode' is on (i.e. while the registry is non-empty).
 
 Steps:
-  1. Call the active backend's :stamp-body-text (pass 0 completion).
+  1. Call every registered pass-0 :apply function with (beg end).
   2. Scan BEG..END once, building per-property span lists.
   3. Run pass-1, pass-2, pass-3 properties in order."
-  ;; Only run if there is something to do in this buffer.
-  (when (or face-extra--local-properties
-            (face-extra--active-backend))
-    (let ((backend (face-extra--active-backend)))
-      ;; Pass 0: mode-specific bare-text stamping.
-      (when backend
-        (let ((stamp-fn (plist-get backend :stamp-body-text)))
-          (when stamp-fn
-            (funcall stamp-fn beg end))))
+  ;; Run pass-0 and passes 1-2 when dispatch is active (face-extra-mode is on
+  ;; iff the registry is non-empty, i.e. some mode has defined properties).
+  (when face-extra-mode
+    ;; Pass 0: add face to bare text — call every registered pass-0 :apply
+    ;; function with (beg end), guarded by the property's :mode so it only
+    ;; runs in buffers where the owning mode is active.
+    (maphash (lambda (key entry)
+               (let ((mode (plist-get entry :mode)))
+                 (when (and (consp key) (= (cdr key) 0)
+                            mode (symbol-value mode))
+                   (funcall (plist-get entry :apply) beg end))))
+             face-extra--registry)
       ;; Always accumulate the FULL region for pass-3 before any narrowing,
       ;; so the pass-3 flush covers everything font-lock dirtied.
       (setq face-extra--pass3-pending
@@ -750,7 +806,7 @@ Steps:
         (unless (= passes-beg passes-end)
           (let ((spans-table (face-extra--collect-spans passes-beg passes-end)))
             (face-extra--run-pass 1 spans-table)
-            (face-extra--run-pass 2 spans-table)))))))
+            (face-extra--run-pass 2 spans-table))))))
 
 ;;;; ------ Advice wiring ------
 
@@ -766,8 +822,7 @@ This advice closes that gap: after `font-lock-ensure' finishes (outside
 jit-lock, so `vertical-motion' is safe), pass-3 is run on the currently
 visible window region.  Off-screen content is corrected lazily when the
 user scrolls and jit-lock processes it normally."
-  (when (and (or face-extra--local-properties
-                 (face-extra--active-backend))
+  (when (and face-extra-mode
              (gethash 3 face-extra--pass-order))
     (let ((win (get-buffer-window (current-buffer) t)))
       (when win
@@ -784,8 +839,7 @@ gets stamped when scrolled into view."
   (let ((buf (window-buffer win)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (when (and (or face-extra--local-properties
-                       (face-extra--active-backend))
+        (when (and face-extra-mode
                    (gethash 3 face-extra--pass-order))
           (let ((wstart (window-start win))
                 (wend   (window-end win t)))
@@ -803,42 +857,24 @@ gets stamped when scrolled into view."
               (face-extra--schedule-pass3-flush buf wstart wend))))))))
 
 (defun face-extra--enable-dispatch ()
-  "Add `face-extra--dispatch' as :after advice on fontification.
-Advises `font-lock-fontify-keywords-region' so the dispatch runs
-after Org (and all other font-lock keywords) have fully annotated the
-region.  Also advises `font-lock-ensure' so that `font-lock-update'
-(which bypasses jit-lock) still triggers pass-3.  Adds a
-`window-scroll-functions' hook to flush pass-3 on scroll for regions
-that jit-lock never re-dirtied, and a `window-selection-change-functions'
-hook to reschedule deferred flushes when a buffer regains focus.
-Idempotent."
-  (advice-add 'font-lock-fontify-keywords-region :after
-              #'face-extra--dispatch)
-  (advice-add 'font-lock-ensure :after #'face-extra--after-ensure)
-  (add-hook 'window-scroll-functions #'face-extra--window-scroll)
-  (add-hook 'window-selection-change-functions #'face-extra--window-selected))
+  "Register pass-3 jit-lock dispatch in the current buffer.
+Called by `face-extra-mode' enable body.  Also registers advice and
+global hooks if not already installed (idempotent — `advice-add' and
+`add-hook' are both idempotent).
+
+The global dispatch advice (`face-extra--dispatch') is installed at load
+time, so this function only needs to handle the per-buffer pass-3
+registration."
+  (when (gethash 3 face-extra--pass-order)
+    (face-extra--enable-dispatch-pass3)))
 
 (defun face-extra--disable-dispatch ()
-  "Remove the `face-extra--dispatch' advice.
-
-Only removes the advice when no live buffer still requires it — i.e.
-when no buffer has `face-extra--local-properties' set and no registered
-backend matches any live buffer's major mode."
-  (let ((still-needed
-         (cl-some
-          (lambda (buf)
-            (when (buffer-live-p buf)
-              (with-current-buffer buf
-                (or face-extra--local-properties
-                    (face-extra--active-backend)))))
-          (buffer-list))))
-    (unless still-needed
-      (advice-remove 'font-lock-fontify-keywords-region
-                     #'face-extra--dispatch)
-      (advice-remove 'font-lock-ensure
-                     #'face-extra--after-ensure)
-      (remove-hook 'window-scroll-functions #'face-extra--window-scroll)
-      (remove-hook 'window-selection-change-functions #'face-extra--window-selected))))
+  "Unregister pass-3 jit-lock dispatch from the current buffer.
+Called by `face-extra-mode' disable body.  Global advice and hooks
+installed at load time are intentionally left in place — removing them
+here would break any other buffer that still has `face-extra-mode'
+active."
+  (face-extra--disable-dispatch-pass3))
 
 ;;;; ------ Pass-3 jit-lock dispatch ------
 
@@ -878,7 +914,7 @@ the user is not looking at.  `face-extra--window-selected' reschedules
 the flush when the buffer's frame regains focus.
 
 Existing justify/alignment stamps are intentionally preserved in this
-case — the `:pre-clear' in `face-extra--dispatch-pass3' would strip
+case — the `:before-pass3-walk' in `face-extra--dispatch-pass3' would strip
 them before re-applying, so leaving the function early without calling
 dispatch keeps the buffer correctly stamped until focus returns."
   (when (buffer-live-p buf)
@@ -889,7 +925,7 @@ dispatch keeps the buffer correctly stamped until focus returns."
             ;; Buffer not visible in the selected frame.  Leave the pending
             ;; beg/end in place so `face-extra--window-selected' can
             ;; reschedule the flush when focus returns.  Do NOT call
-            ;; `face-extra--dispatch-pass3': that would run `:pre-clear'
+            ;; `face-extra--dispatch-pass3': that would run `:before-pass3-walk'
             ;; (stripping justify stamps) and then fail to re-apply them
             ;; because `window-text-pixel-size' needs a live window.
             nil
@@ -1040,8 +1076,7 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
   ;; is processed after the outer walk finishes and geometry settles again.
   (if face-extra--pass3-geometry-unsettled
       (face-extra--schedule-pass3-flush (current-buffer) beg end)
-    (when (and (or face-extra--local-properties
-                   (face-extra--active-backend))
+    (when (and face-extra-mode
                (gethash 3 face-extra--pass-order))
       (let ((face-extra--pass3-geometry-unsettled t)
             (pass3-narrowed nil))
@@ -1184,14 +1219,14 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                                     (make-hash-table :test #'eq)))))
           ;; Clear the reused table from any previous walk.
           (clrhash line-spans)
-          ;; Pre-clear pass: call :pre-clear for each registered pass-3 property.
-          ;; text-align no longer registers :pre-clear (it does per-line clearing
-          ;; inside text-align--apply using content hashes).  Other properties
-          ;; may still register :pre-clear here.
+          ;; Before-pass3-walk pass: call :before-pass3-walk for each registered
+          ;; pass-3 property.  Used to clear stale stamps so vertical-motion
+          ;; during the walk sees natural character widths.
           (dolist (prop (gethash 3 face-extra--pass-order))
             (let* ((entry  (gethash (cons prop 3) face-extra--registry))
-                   (pre-fn (plist-get entry :pre-clear)))
-              (when pre-fn
+                   (mode   (plist-get entry :mode))
+                   (pre-fn (plist-get entry :before-pass3-walk)))
+              (when (and pre-fn mode (symbol-value mode))
                 (funcall pre-fn rbeg rend))))
           (save-excursion
             (goto-char rbeg)
@@ -1211,7 +1246,7 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                      (lend  (point))
                      ;; Face at visual-line BOL.  font-lock-face takes
                      ;; priority (Org regexp keywords); fall back to face
-                     ;; (Org anchor functions, text-body stamp).
+                     ;; (Org anchor functions, body stamp).
                      ;;
                      ;; When lbeg is inside an invisible (folded) region —
                      ;; e.g. the "#+TITLE: " prefix folded by
@@ -1241,7 +1276,7 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                   ;; Resolve pass-3 properties from the face cache.
                   ;; Use a per-line alist to take the first (highest-priority)
                   ;; value when multiple faces on the same BOL carry the same
-                  ;; property (e.g. text-body + org-cite both have text-align).
+                  ;; property (e.g. body + org-cite both have text-align).
                   (let ((line-props nil))
                     (dolist (face faces)
                       (let ((entry (face-extra--get-cache-entry face)))
@@ -1268,7 +1303,7 @@ inside the :after advice where `face-extra--dispatch' (passes 1-2) runs."
                 (max rend (or face-extra--pass3-last-flushed-end rend))))))))))) ; closes let force-full
 
 (defun face-extra--pre-command ()
-  "Dispatch `:pre-command' callbacks for registered pass-3 properties.
+  "Dispatch `:before-keystroke' callbacks for registered pass-3 properties.
 Added to `pre-command-hook' buffer-locally by
 `face-extra--enable-dispatch-pass3'.
 
@@ -1299,36 +1334,44 @@ Maintains a cached visual line in `face-extra--vline-beg' and
                        (setq face-extra--vline-end (point)))
                      face-extra--vline-beg)))
            (vend face-extra--vline-end))
-      ;; Dispatch to each pass-3 property that registered :pre-command.
+      ;; Dispatch to each pass-3 property that registered :before-keystroke.
       (dolist (prop (gethash 3 face-extra--pass-order))
         (let* ((entry   (gethash (cons prop 3) face-extra--registry))
-               (pre-cmd (plist-get entry :pre-command)))
-          (when pre-cmd
+               (mode    (plist-get entry :mode))
+               (pre-cmd (plist-get entry :before-keystroke)))
+          (when (and pre-cmd mode (symbol-value mode))
             (funcall pre-cmd vbeg vend)))))))
 
 (defun face-extra--enable-dispatch-pass3 ()
   "Register `face-extra--dispatch-pass3' as a jit-lock function.
 Also adds `face-extra--pre-command' to `pre-command-hook' buffer-locally.
 `jit-lock-register' is buffer-local; this must be called in each buffer
-that requires pass-3 dispatch.  Idempotent."
+that requires pass-3 dispatch.  Called by `face-extra-mode-require' (via
+`face-extra--enable-dispatch') when pass-3 properties exist.  Idempotent."
   (jit-lock-register #'face-extra--dispatch-pass3)
   (add-hook 'pre-command-hook #'face-extra--pre-command nil t))
 
 (defun face-extra--disable-dispatch-pass3 ()
   "Unregister `face-extra--dispatch-pass3' from jit-lock in the current buffer.
 Also removes `face-extra--pre-command' from `pre-command-hook'.
+Called by `face-extra-mode-release' when the ref count reaches zero."
+  (jit-lock-unregister #'face-extra--dispatch-pass3)
+  (remove-hook 'pre-command-hook #'face-extra--pre-command t))
 
-Only unregisters when no pass-3 properties remain active in this buffer
-— i.e. when `face-extra--local-properties' carries no pass-3 values and
-no registered backend is active.  This prevents one mode disabling pass-3
-while another mode still requires it in the same buffer."
-  (let ((still-needed
-         (and (or face-extra--local-properties
-                  (face-extra--active-backend))
-              (gethash 3 face-extra--pass-order))))
-    (unless still-needed
-      (jit-lock-unregister #'face-extra--dispatch-pass3)
-      (remove-hook 'pre-command-hook #'face-extra--pre-command t))))
+
+;;;; ================================================================
+;;;; Section 9 — Load-time dispatch wiring
+;;;; ================================================================
+;;
+;; The dispatch advice is installed once at load time, globally and permanently.
+;; The buffer-local `face-extra-mode' guard makes it a cheap no-op in
+;; inactive buffers.  `jit-lock-register' cannot be made buffer-local via
+;; advice; pass-3 is registered per-buffer by `face-extra-mode-require'.
+
+(advice-add 'font-lock-fontify-keywords-region :after #'face-extra--dispatch)
+(advice-add 'font-lock-ensure :after #'face-extra--after-ensure)
+(add-hook 'window-scroll-functions #'face-extra--window-scroll)
+(add-hook 'window-selection-change-functions #'face-extra--window-selected)
 
 
 (provide 'face-extra)

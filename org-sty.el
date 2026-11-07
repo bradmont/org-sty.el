@@ -1,8 +1,11 @@
 ;;; org-sty.el --- Per-filetag visual styling for Org buffers -*- lexical-binding: t; -*-
 
 ;; Author: Brad
-;; Keywords: org, convenience
+;; Keywords: org, faces, convenience, wp
 ;; Version: 1.0-beta
+;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (org "9.5")
+;;                   (face-extra "0.1.0") (body-face "0.1.0"))
+;; URL: https://github.com/braddelong/org-sty
 
 ;;; Commentary:
 
@@ -41,7 +44,7 @@
 (require 'org-element)
 (require 'face-remap)
 (require 'face-extra)
-(require 'variable-spacing)
+(require 'body-face)
 
 (defgroup org-sty nil
   "Apply visual styles to Org buffers based on filetags."
@@ -173,7 +176,8 @@ Cancelled and replaced on each new keystroke that triggers deferral.")
   "Value of `buffer-chars-modified-tick' when the bib-files cache was filled.")
 
 (defconst org-sty--known-eval-modes
-  '(variable-spacing-mode org-title-fold-mode org-block-appear-mode
+  '(variable-spacing-mode horizontal-layout-mode
+    text-align-mode org-title-fold-mode org-block-appear-mode
     org-cite-appear-mode org-footnote-extra-mode org-num-mode)
   "Minor modes that `:eval' commonly activates; tracked for teardown.")
 

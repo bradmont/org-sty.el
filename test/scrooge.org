@@ -16,7 +16,7 @@ EXPECT: all full lines flush left and right; last line of each paragraph
 left-aligned (not stretched).  Interword spaces vary slightly line to line.
 #+end_quote
 
-MARLEY was dead: to begin with. There is no doubt whatever about that. The register of his burial was signed by the clergyman, the cl[fn:1]erk, the underta[fn:2]ker, and the chief mourner. Scrooge signed it: and Scrooge's [fn:3]name was good upon 'Change, for anything he chose to put his hand to. Old Marley was as dead as a door-nail[fn:4].
+MARLEY was dead: to begin with. There is no doubt whatever about that. The register of his burial was signed by the clergyman, thand wee cl[fn:1]erk, the underta[fn:2]ker, and the chief mourner. Scrooge signed it: and Scrooge's [fn:3]name was good upon 'Change, for anything he chose to put his hand to. Old Marley was as dead as a door-nail[fn:4].
 [fn:1] And another one...
 [fn:2] that worked
 [fn:3] that too

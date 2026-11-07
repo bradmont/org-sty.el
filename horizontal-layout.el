@@ -1,8 +1,10 @@
 ;;; horizontal-layout.el --- Synthetic face properties for horizontal text layout -*- lexical-binding: t; -*-
 
 ;; Author: Brad
-;; Keywords: faces, display
+;; Keywords: faces, display, wp
 ;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (face-extra "0.1.0"))
+;; URL: https://github.com/braddelong/org-sty
 
 ;;; Commentary:
 
@@ -233,9 +235,9 @@ when the block is revealed.  All other characters — including \\n
 characters that separate paragraphs within the block — receive
 `line-prefix' normally.
 
-Only runs when `horizontal-layout-mode' is active in the current buffer."
-  (when (bound-and-true-p horizontal-layout-mode)
-    (with-silent-modifications
+Mode guard enforced by dispatcher via :mode \\='horizontal-layout-mode."
+  ;; Mode guard enforced by dispatcher via :mode 'horizontal-layout-mode.
+  (with-silent-modifications
       ;; Clear stale margins before re-applying.
       (dolist (span spans)
         (horizontal-layout-clear (nth 0 span) (nth 1 span)))
@@ -289,7 +291,7 @@ Only runs when `horizontal-layout-mode' is active in the current buffer."
                       (put-text-property pos next 'wrap-prefix  prefix)
                       (put-text-property pos next
                                          horizontal-layout--prop t))
-                    (setq pos next)))))))))))
+                    (setq pos next))))))))))
 
 (defun horizontal-layout--clear-margin-left (_cookie)
   "No-op `:clear' callback for `horizontal-layout-margin-left'.
@@ -331,9 +333,9 @@ Used by `horizontal-layout-clear' to find and restore those positions.")
 SPANS is a list of (beg end value) triples where VALUE is the extra
 indent width for continuation lines, in canonical character widths.
 Runs after `horizontal-layout-margin-left' (pass 2), so `wrap-prefix'
-already carries the left-margin width; this adds VALUE on top of it."
-  (when (bound-and-true-p horizontal-layout-mode)
-    (with-silent-modifications
+already carries the left-margin width; this adds VALUE on top of it.
+Mode guard enforced by dispatcher via :mode \\='horizontal-layout-mode."
+  (with-silent-modifications
       ;; Clear stale hang stamps before re-applying.
       (dolist (span spans)
         (horizontal-layout--clear-hang-region (nth 0 span) (nth 1 span)))
@@ -361,7 +363,7 @@ already carries the left-margin width; this adds VALUE on top of it."
                                    `(space :width ,new-w))))
                   (put-text-property pos next 'wrap-prefix prefix)
                   (put-text-property pos next horizontal-layout--hang-prop t)
-                  (setq pos next))))))))))
+                  (setq pos next)))))))))
 
 
 
@@ -425,9 +427,8 @@ Reads `(space :width left :height H)' and replaces `:width' with
 `left+right', narrowing the display text area so word-wrap fires at
 `avail - left - right'.
 
-Only runs when `horizontal-layout-mode' is active."
-  (when (bound-and-true-p horizontal-layout-mode)
-    (with-silent-modifications
+Mode guard enforced by dispatcher via :mode \\='horizontal-layout-mode."
+  (with-silent-modifications
       (dolist (span spans)
         (let ((beg   (nth 0 span))
               (end   (nth 1 span))
@@ -460,7 +461,7 @@ Only runs when `horizontal-layout-mode' is active."
                   (put-text-property pos next 'line-prefix  prefix)
                   (put-text-property pos next 'wrap-prefix  prefix)
                   (put-text-property pos next horizontal-layout--prop t)
-                  (setq pos next))))))))))
+                  (setq pos next)))))))))
 
 (defun horizontal-layout--clear-margin-right (_cookie)
   "No-op `:clear' callback for `horizontal-layout-margin-right'.
@@ -483,9 +484,8 @@ For each visual line, within `with-silent-modifications':
        (b) The face at lbeg has a non-nil `text-align' — alignment
            takes ownership of the right boundary.
 
-Only runs when `horizontal-layout-mode' is active."
-  (when (bound-and-true-p horizontal-layout-mode)
-    (with-silent-modifications
+Mode guard enforced by dispatcher via :mode \\='horizontal-layout-mode."
+  (with-silent-modifications
       (dolist (span spans)
         (let* ((lbeg  (nth 0 span))
                (lend  (nth 1 span))
@@ -579,16 +579,16 @@ Only runs when `horizontal-layout-mode' is active."
                                  (propertize " "
                                              'face trail-face
                                              'display `(space :width ,right)))
-                    (overlay-put ov horizontal-layout--right-prop t)))))))))))
+                    (overlay-put ov horizontal-layout--right-prop t))))))))))
 
 (defun horizontal-layout--pre-clear-right-margin (beg end)
   "Remove right-margin overlays and restore `line-prefix' to left+right.
-Called as `:pre-clear' before the pass-3 `vertical-motion' walk.
+Called as `:before-pass3-walk' before the pass-3 `vertical-motion' walk.
 
 After pass-3 `:apply' has run, `line-prefix' at each visual-line BOL
 carries only the left-margin width (step 1 of `:apply' restores it from
 `left+right' to `left'), with the right margin held in an after-string
-overlay.  If `:pre-clear' only deletes the overlay and does not restore
+overlay.  If `:before-pass3-walk' only deletes the overlay and does not restore
 `line-prefix', the walk runs with `avail - left' word-wrap geometry
 instead of `avail - left - right', producing wrong `lend' values for
 every visual line — wrong span list, wrong slack for justify, etc.
@@ -670,13 +670,11 @@ owns pass 3 (right-margin expansion).  Both are managed here."
   :lighter " HLay"
   (if horizontal-layout-mode
       (progn
-        (face-extra--enable-dispatch)
-        (face-extra--enable-dispatch-pass3)
+        (face-extra-mode-require)
         (face-extra--invalidate-cache)
         (font-lock-flush))
-    (horizontal-layout-clear)
-    (face-extra--disable-dispatch-pass3)
-    (face-extra--disable-dispatch)))
+    (face-extra-mode-release)
+    (horizontal-layout-clear)))
 
 
 ;;;; ================================================================
@@ -684,29 +682,27 @@ owns pass 3 (right-margin expansion).  Both are managed here."
 ;;;; ================================================================
 
 (face-extra-define-property 'horizontal-layout-margin-left
-  :pass  2
-  :after nil
-  :apply  #'horizontal-layout--apply-margin-left
-  :clear  #'horizontal-layout--clear-margin-left)
+  :pass 2 :mode 'horizontal-layout-mode :after nil
+  :apply #'horizontal-layout--apply-margin-left
+  :clear #'horizontal-layout--clear-margin-left)
 
 (face-extra-define-property 'horizontal-layout-margin-right
-  :pass  2
+  :pass 2 :mode 'horizontal-layout-mode
   :after '(horizontal-layout-margin-left)
-  :apply  #'horizontal-layout--apply-margin-right-pass2
-  :clear  #'horizontal-layout--clear-margin-right)
+  :apply #'horizontal-layout--apply-margin-right-pass2
+  :clear #'horizontal-layout--clear-margin-right)
 
 (face-extra-define-property 'horizontal-layout-hanging-wrap
-  :pass  2
+  :pass 2 :mode 'horizontal-layout-mode
   :after '(horizontal-layout-margin-left)
-  :apply  #'horizontal-layout--apply-hanging-wrap
-  :clear  #'horizontal-layout--clear-hanging-wrap)
+  :apply #'horizontal-layout--apply-hanging-wrap
+  :clear #'horizontal-layout--clear-hanging-wrap)
 
 (face-extra-define-property 'horizontal-layout-margin-right
-  :pass       3
-  :after      nil
-  :pre-clear  #'horizontal-layout--pre-clear-right-margin
-  :apply      #'horizontal-layout--apply-margin-right-pass3
-  :clear      #'horizontal-layout--clear-margin-right-pass3)
+  :pass 3 :mode 'horizontal-layout-mode :after nil
+  :before-pass3-walk #'horizontal-layout--pre-clear-right-margin
+  :apply #'horizontal-layout--apply-margin-right-pass3
+  :clear #'horizontal-layout--clear-margin-right-pass3)
 
 
 ;;;; ================================================================
@@ -857,7 +853,8 @@ paragraph reflow is needed.")
 (defconst text-align--line-justified-prop 'text-align--line-justified
   "Text property on visual-line BOL: non-nil when justify stamps are present.
 Set to t by `text-align--stamp' after stamps are applied; removed by
-`text-align--pre-clear-stamps' (the `:pre-clear' callback) before each walk.
+`text-align--pre-clear-stamps' (the `:before-pass3-walk' callback) before
+each walk.
 Allows consumers to tell at a glance whether a line is currently stamped,
 independently of the hash or natural-width cache.")
 
@@ -887,7 +884,14 @@ cached character widths and the derived ring state stale."
         text-align--line-natural-px     nil
         text-align--space-ring          nil
         text-align--ring-cursor-idx     nil
-        text-align--pending-delete-px   nil))
+        text-align--pending-delete-px   nil)
+  ;; Clear per-line content hashes so the next pass-3 run re-measures
+  ;; stamps at the new font metrics rather than skipping on hash hits.
+  ;; Without this, font/scale changes leave old justify stamps in place
+  ;; because buffer content is unchanged and the hash check declares hits.
+  (with-silent-modifications
+    (remove-text-properties (point-min) (point-max)
+                            (list text-align--line-hash-prop nil))))
 
 (defun text-align--justify-clear (beg end)
   "Remove stale justify display stamps from space characters in BEG..END.
@@ -1339,9 +1343,9 @@ Dispatches on value:
                   line of paragraph.
   `test-marker' — dev stub: highlights the character-position midpoint
                   in hot pink; use `face-extra-add-relative' with value
-                  `test-marker' to activate."
-  (when (bound-and-true-p text-align-mode)
-    (with-silent-modifications
+                  `test-marker' to activate.
+Mode guard enforced by dispatcher via :mode \\='text-align-mode."
+  (with-silent-modifications
       (dolist (span spans)
         (let ((lbeg  (nth 0 span))
               (lend  (nth 1 span))
@@ -1394,7 +1398,7 @@ Dispatches on value:
                                     'face '( :background "#ff0066"
                                              :foreground "white"
                                              :weight bold))
-                 (put-text-property mid (1+ mid) text-align--prop t))))))))))
+                 (put-text-property mid (1+ mid) text-align--prop t)))))))))
 
 (defun text-align--clear-marker (_cookie)
   "No-op `:clear' callback for `text-align' registration.
@@ -1484,7 +1488,7 @@ condition cannot be satisfied — ensures stamps are never left stale."
              (new-natural (- text-align--line-natural-px char-px))
              ;; Look up natural space width.  Use nil as the face key for
              ;; bare body text (no font-lock-face or face property) — the
-             ;; text-body remap gives it a consistent space width that was
+             ;; body remap gives it a consistent space width that was
              ;; already cached under (nil . ?\s) by text-align--natural-space-px.
              (natural-space-px
               (when (and text-align--space-ring text-align--char-width-cache)
@@ -1634,7 +1638,8 @@ Removes itself, then looks up the just-typed character's pixel width
 
 (defun text-align--pre-command-justify (vbeg vend)
   "Pre-command callback for justify: clear stamps and schedule ring walk.
-VBEG and VEND are the visual-line bounds supplied by `face-extra--pre-command'.
+VBEG and VEND are the visual-line bounds supplied by the
+`:before-keystroke' dispatcher.
 
 When the ring is warm, skips clearing so the line stays justified
 throughout; the ring-walk redistributes slack in post-command.
@@ -1873,30 +1878,31 @@ For self-inserting commands:
 Alignment values are configured via `face-extra-add-relative' (buffer-local)
 or `face-extra-add' (global):
 
-  (face-extra-add-relative \\='text-body \\='text-align \\='center)
+  (face-extra-add-relative \\='body \\='text-align \\='center)
 
 `face-extra--dispatch-pass3' owns the apply loop; this mode ensures it
 is registered and handles cleanup on disable."
   :lighter " TAlign"
   (if text-align-mode
       (progn
-        (face-extra--enable-dispatch)
-        (face-extra--enable-dispatch-pass3)
+        (face-extra-mode-require)
         (face-extra--invalidate-cache)
         (font-lock-flush))
-    (text-align-clear)
-    (face-extra--disable-dispatch-pass3)
-    (face-extra--disable-dispatch)))
+    (face-extra-mode-release)
+    (text-align-clear)))
 
 
 ;;;; ================================================================
-;;;; Section 8 — face-extra registration (load time)
+;;;; Section 8 — face-extra registration (load time, at bottom of file)
 ;;;; ================================================================
+;; The text-align registration is at the bottom of the file so that all
+;; referenced functions (:apply, :before-pass3-walk, :before-keystroke, :clear) are
+;; already defined when face-extra-define-property validates them.
 
 (defun text-align--pre-clear-stamps (beg end)
   "Pre-clear: remove justify stamps and the `justified' sentinel from [BEG, END).
 
-Called as `:pre-clear' before each pass-3 visual-line walk.
+Called as `:before-pass3-walk' before each pass-3 visual-line walk.
 
 Clears justify space stamps (display + `text-align--justify-prop') and the
 `text-align--line-justified-prop' sentinel so `vertical-motion' during the
@@ -1944,25 +1950,7 @@ line to be cleared and re-measured like any other line."
           (clear-stamps beg end)
           (remove-text-properties beg end (list text-align--line-justified-prop nil)))))))
 
-(face-extra-define-property 'text-align
-  :pass       3
-  :after      '(horizontal-layout-margin-right)
-  ;; :pre-clear removes justify space stamps and the justified sentinel from
-  ;; [beg, end) so `vertical-motion' during the walk sees natural character
-  ;; widths.  Hash and natural-px are NOT cleared here — they are only
-  ;; removed inside `text-align--stamp' when new values are being written,
-  ;; keeping the cache valid for hash-hit lines that need re-stamping without
-  ;; a fresh `window-text-pixel-size' measurement.
-  :pre-clear   #'text-align--pre-clear-stamps
-  ;; :pre-command strips justify space stamps from point's visual line
-  ;; before the keystroke is processed and rendered.  This prevents a
-  ;; justified line from overflowing when a character is inserted into
-  ;; fully-expanded spaces — the display engine sees natural widths for
-  ;; the render that shows the new character, and the idle flush
-  ;; re-justifies correctly afterward.
-  :pre-command #'text-align--pre-command-justify
-  :apply       #'text-align--apply
-  :clear       #'text-align--clear-marker)
+;; text-align property is registered in text-align-mode enable body.
 
 ;; Clear the natural-space-width cache whenever face metrics change.
 ;; `face-extra--invalidate-cache' is called after org-sty-apply (font-family
@@ -2085,6 +2073,18 @@ two calls are redundant but cheap and make the intent explicit."
               #'horizontal-layout--org-appear-restamp)
   (advice-add 'org-appear--hide-invisible :after
               #'horizontal-layout--org-appear-restamp))
+
+;; Section 8 — text-align face-extra registration.
+;; Placed here (after all function definitions) so that #' references
+;; are resolved correctly by the byte-compiler.
+(face-extra-define-property 'text-align
+  :pass              3
+  :mode              'text-align-mode
+  :after             '(horizontal-layout-margin-right)
+  :before-pass3-walk #'text-align--pre-clear-stamps
+  :before-keystroke  #'text-align--pre-command-justify
+  :apply             #'text-align--apply
+  :clear             #'text-align--clear-marker)
 
 (provide 'horizontal-layout)
 ;;; horizontal-layout.el ends here

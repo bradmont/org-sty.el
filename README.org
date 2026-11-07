@@ -7,6 +7,31 @@ usable; they are wired together through =org-sty='s =:eval= escape hatch.
 
 * Files
 
+** =face-extra.el= — synthetic face-property engine
+
+Provides a generic mechanism for synthetic face attributes — display
+effects not expressible as standard Emacs face attributes (line-spacing
+ratios, text alignment, etc.). Properties are registered once at load
+time with a pass number (1–3) and apply/clear callbacks; the dispatch
+is hooked into jit-lock via advice on
+=font-lock-fontify-keywords-region=.
+
+Properties are attached to faces globally or buffer-locally:
+
+#+begin_src emacs-lisp
+(face-extra-add-relative 'org-quote 'variable-spacing-ratio 1.0)
+#+end_src
+
+=face-extra-mode= is ref-counted: use =face-extra-mode-require= /
+=face-extra-mode-release= from dependent modes rather than toggling it
+directly.
+
+** =body-face.el= — body-face hierarchy
+
+=body-face-mode= installs a semantic body-face layer in a buffer. Content faces (headings, prose, blocks, links, …) receive =(:inherit body)= remaps, decoupling them from emacs' basic =default= face behaviour; metadata faces (drawers, keywords, block delimiters, …) remain anchored to =default=. This way, they can be styled separately from body text, for example, making variable-spacing mode possible and for allowing a buffer to use faces that are smaller than primary content, a significant drawback of the standard emacs approach which =default=. A pass-0 fontifier adds the =body= face on bare paragraph text that Org leaves unfaced. (org is a first-class citizen, it's our design target, but a simple, pluggable backend structure allows using this module for other major modes).
+
+=body= is intentionally neutral (=:inherit default=), but it can be styled completely independently of =default=.
+
 ** =org-sty.el= — style dispatcher
 
 Applies a visual "profile" to an Org buffer based on its =#+FILETAGS=.
@@ -15,19 +40,19 @@ matching style(s) are merged and applied.
 
 *** Recognised plist keys
 
-| Key              | Effect                                                  |
-|------------------+---------------------------------------------------------|
-| =:font=          | Font family name, e.g. ="Times New Roman"=              |
-| =:font-size=     | Point size, e.g. =12=                                   |
-| =:num-level=     | Heading depth for =org-num-mode=; =0= to disable        |
-| =:indent=        | =t=/=nil= to enable/disable =org-indent-mode=           |
-| =:olivetti-width=| Body width for =olivetti-mode=                          |
-| =:faces=         | Alist of =(FACE . ATTRS)= buffer-local face remaps      |
-| =:eval=          | A form or list of forms evaluated after all other keys  |
+| Key               | Effect                                                 |
+|-------------------+--------------------------------------------------------|
+| =:font=           | Font family name, e.g. ="Times New Roman"=             |
+| =:font-size=      | Point size, e.g. =12=                                  |
+| =:num-level=      | Heading depth for =org-num-mode=; =0= to disable       |
+| =:indent=         | =t=/=nil= to enable/disable =org-indent-mode=          |
+| =:olivetti-width= | Body width for =olivetti-mode=                         |
+| =:faces=          | Alist of =(FACE . ATTRS)= buffer-local face remaps     |
+| =:eval=           | A form or list of forms evaluated after all other keys |
 
-=:eval= is the escape hatch for anything not covered above — including
-enabling the other modes in this collection. Line spacing, block
-appearance, and title folding are all wired in via =:eval=.
+=:eval= is the escape hatch for anything not covered above — enabling
+the other modes in this collection, calling =org-sty-remap= for runtime
+face remaps, etc.
 
 *** Merge semantics
 
@@ -35,12 +60,19 @@ If a buffer has multiple matching tags, their styles are merged in
 =org-sty-alist= order (later entries win). =org-sty-default= provides a
 baseline applied to every Org buffer before any tag-specific style.
 
-*** Font handling
+*** =:faces= and =org-sty-remap=
 
-=:font= owns the =default= face remap outright (stripping any prior
-remap) so hook ordering doesn't matter. Heading faces
-(=org-level-1=…=org-document-title=) get a separate =:family=-only
-relative remap so their =:height=/:weight= set elsewhere is preserved.
+=:faces= accepts an alist of =(FACE . ATTRS)= and installs buffer-local
+face remaps tracked in =org-sty--face-remap-cookies=. For runtime logic
+use =org-sty-remap= inside =:eval=:
+
+#+begin_src emacs-lisp
+(org-sty-remap 'org-quote :slant 'italic :variable-spacing-ratio 1.3)
+#+end_src
+
+All remaps (including =:variable-spacing-ratio=, routed through
+=face-extra-add-relative=) are cleaned up automatically on style
+re-apply or buffer kill.
 
 *** Setup
 
@@ -49,93 +81,69 @@ relative remap so their =:height=/:weight= set elsewhere is preserved.
 
 (setq org-sty-default
       '(:font "Iosevka Aile"
-        :eval (...)))           ; baseline face setup for all Org buffers
+        :eval (...)))           ; baseline for all Org buffers
 
 (setq org-sty-alist
       '(("thesis" . (:font "Times New Roman" :font-size 12
                      :num-level 3 :indent nil :olivetti-width 68
+                     :faces ((org-level-1 . (:height 2.4))
+                             (org-level-2 . (:height 2.2)))
                      :eval (progn
-                             (hl-line-mode 0)
                              (variable-spacing-mode 1)
+                             (horizontal-layout-mode 1)
                              (org-block-appear-mode 1)
                              (org-title-fold-mode 1))))))
 #+end_src
 
-** =variable-spacing.el= — proportional line spacing via pluggable backends
+** =variable-spacing.el= — proportional line spacing
 
-=variable-spacing-mode= applies proportional line spacing to buffer
-elements on a per-type basis.  The backend (element detection logic) is
-chosen automatically based on the major mode; two are bundled.
+=variable-spacing-mode= applies proportional line spacing to buffer elements on a per-face basis. Spacing is implemented as pixel-height =line-prefix=/=wrap-prefix= display properties applied lazily via jit-lock. The pixel height is computed from the live rendered font so it tracks =text-scale-mode= correctly.
 
-Spacing is implemented as pixel-height =line-prefix=/=wrap-prefix=
-display properties (not the built-in =line-spacing= variable, which
-applies uniformly to every line).  The pixel height is computed from
-the live rendered font via =font-at=, so it tracks =text-scale-mode=
-correctly.  Work is done lazily via jit-lock.
+Depends on =body-face-mode= (enabled automatically).
 
 *** Usage
 
+Spacing ratios are attached to faces via the face-extra API:
+
 #+begin_src emacs-lisp
-(setq-local variable-spacing-rules '(paragraph 1.6))
+(face-extra-add-relative 'body      'variable-spacing-ratio 1.6)
+(face-extra-add-relative 'org-quote 'variable-spacing-ratio 1.3)
+(face-extra-add-relative 'org-block 'variable-spacing-ratio 0) ; suppress
 (variable-spacing-mode 1)
 #+end_src
 
-Rules can cover multiple element types with individual ratios:
+In practice, ratios are declared in an =org-sty= style plist under =:faces= and applied automatically via =org-sty-remap=.
+
+** =horizontal-layout.el= — margins, indent, text alignment
+
+=horizontal-layout-mode= provides synthetic face properties for
+horizontal text placement, implemented as face-extra pass-2 (margins)
+and pass-3 (alignment) plugins.
+
+Supported properties:
+
+| Property                          | Effect                              |
+|-----------------------------------+-------------------------------------|
+| =horizontal-layout-margin-left=   | Left margin in character widths     |
+| =horizontal-layout-margin-right=  | Right margin in character widths    |
+| =text-align=                      | =left=, =center=, =right=, =justify= |
+
+Properties are attached to faces via the face-extra API or declared
+in an org-sty =:faces= block:
 
 #+begin_src emacs-lisp
-(setq-local variable-spacing-rules
-            '(paragraph   1.6
-              item        1.2
-              quote-block 1.3
-              src-block   nil))   ; nil = explicitly excluded
+(face-extra-add-relative 'org-quote 'horizontal-layout-margin-left 4)
+(face-extra-add-relative 'body      'text-align                   'justify)
 #+end_src
 
-=variable-spacing-rules= is buffer-local with a default of ='(paragraph 1.5)=.
-
-*Parent wins:* any type present in the plist (even with =nil=) causes the
-walker to jump past the whole element and never visit its children.  A
-=nil= entry explicitly excludes that type and everything inside it.
-
-*Absent types:* a type not in the plist is entered transparently if the
-backend considers it a container (org backend: =org-element-greater-elements=)
-and jumped past otherwise.
-
-*** Backends
-
-The active backend is selected at mode-enable time from
-=variable-spacing-mode-backends= using =derived-mode-p=.
-
-| Backend | Active in | Element model |
-|---------+-----------+---------------|
-| =variable-spacing-org-backend= | =org-mode= | org-element cache; full type hierarchy |
-| =variable-spacing-text-backend= | everything else | one =line= element per physical line |
-
-A custom backend is a plist of functions.  Use =:parent= to inherit from
-an existing backend and override only what differs:
-
-#+begin_src emacs-lisp
-(defconst my-backend
-  (list :parent variable-spacing-org-backend
-        :element-type #'my-type-fn))
-
-(add-to-list 'variable-spacing-mode-backends '(my-mode . my-backend))
-#+end_src
-
-Interactive commands =variable-spacing-apply= and =variable-spacing-clear=
-are also available for manual use.
+Justify adds per-space =display= properties so the display engine
+distributes slack across a line without changing buffer text.
 
 ** =org-title-fold.el= — fold =#+KEYWORD:= lines below =#+TITLE:=
 
 Treats =#+TITLE:= as a pseudo-headline: TAB on that line folds/unfolds
-the contiguous run of =#+KEYWORD:= lines immediately below it (down to
-the first blank line, heading, or non-keyword line). The ellipsis
-appears at the end of the =#+TITLE:= line, matching the drawer-fold
-convention.
-
-Built on =org-fold-core= (Org 9.6+), so the fold is first-class:
-participates in isearch, no overlay lifecycle to manage.
-
-=#+TITLE:= does not need to be the first line in the file.
+the contiguous run of =#+KEYWORD:= lines immediately below it. Built on
+=org-fold-core= (Org 9.6+). =#+TITLE:= does not need to be first.
 
 *** Usage
 
@@ -149,20 +157,9 @@ See =org-title-fold-fold-on-enable= to change this.
 ** =org-block-appear.el= — hide block delimiters, reveal near point
 
 Hides =#+begin_=/=#+end_= block delimiter lines, revealing them only
-when point is inside the block — analogous to =org-appear= for emphasis
-markers, but for whole lines.
-
-- *Hiding* rides on font-lock/jit-lock: a font-lock keyword sets
-  =invisible= on each delimiter line. Re-hiding after edits is free.
-- *Revealing* is driven by =post-command-hook=, with a cheap numeric
-  range check to avoid calling =org-element-at-point= on every
-  keystroke. Only when point crosses a block boundary is
-  =org-element-at-point= called (backed by Org's incremental element
-  cache).
-
-Handles nested blocks correctly: the outer block's =#+end_= is always
-the last delimiter in its span, so revealing the innermost block never
-disturbs the outer one.
+when point is inside the block. Hiding rides on font-lock/jit-lock;
+revealing is driven by =post-command-hook= with a cheap numeric range
+check. Handles nested blocks correctly.
 
 *** Usage
 
@@ -170,20 +167,87 @@ disturbs the outer one.
 (org-block-appear-mode 1)
 #+end_src
 
+** =org-footnote-extra.el= — paragraph-local footnote placement and rendering
+
+Adds a third footnote-definition placement strategy alongside Org's
+built-in options: set =org-footnote-section= to ="*paragraph*"= to place
+each definition immediately after the paragraph containing its reference.
+
+Also renders =[fn:N]= references as raised small-caps labels with a
+hanging-indent gap, using face-extra pass-1 and =body-face=.
+
+Depends on =face-extra=, =body-face=, =horizontal-layout=.
+
+*** Usage
+
+#+begin_src emacs-lisp
+(setq org-footnote-section "*paragraph*")
+(org-footnote-extra-mode 1)
+#+end_src
+
+** =org-cite-appear.el= — render =[cite:@key]= as formatted citations
+
+Hides raw =org-cite= markup and replaces each citation with a formatted
+display string such as =(Smith, 2020)= or =(Smith & Jones, 2019, p. 14)=.
+The raw markup is revealed when point enters the citation.
+
+Citations are covered by persistent overlays (not font-lock). An idle
+timer processes one pending overlay per firing, amortising citar lookup
+across idle time. Soft-depends on =citar=.
+
+*** Usage
+
+#+begin_src emacs-lisp
+(org-cite-appear-mode 1)
+#+end_src
+
+** =page-metrics.el= — physical page geometry
+
+Translates a physical page model (page size and margins in mm/pt/in)
+into the Emacs parameters =olivetti-mode= needs to render a fixed-width
+page. Provides unit-conversion helpers used by other modules:
+
+#+begin_src emacs-lisp
+(page-metrics-mm-to-px mm &optional frame)
+(page-metrics-pt-to-px pt &optional frame)
+(page-metrics-in-to-px in &optional frame)
+#+end_src
+
+All functions accept an optional frame argument for multi-monitor use.
+Soft-depends on =olivetti=.
+
+This module is largely a stub; it's eventual use will be to define measurements for page rendering.
+
 * Design notes
 
 ** Why =:eval= for spacing/folding/blocks?
 
-=org-sty= intentionally knows nothing about spacing, title-folding, or
-block appearance. Each of those concerns lives in its own file with its
-own minor mode. The =:eval= key is the composition point — it lets the
-style author wire up whatever combination of modes makes sense for a given
-tag, without =org-sty= needing to grow new keys for every feature.
+=org-sty= intentionally knows nothing about spacing, alignment,
+title-folding, or block appearance. Each concern lives in its own file
+with its own minor mode. =:eval= is the composition point — the style
+author wires up whatever combination makes sense for a given tag, without
+=org-sty= growing new keys for every feature.
 
-** Buffer-local floor height
+** Floor height and the =body= face model
 
 =variable-spacing-mode= remaps =default= to a small floor height
 (=variable-spacing-floor-height=, default 60 = 6pt) buffer-locally.
-Body text opts up via the =text-body= face (height 2.0 relative to
-=default=). The global =default= face is never touched; non-sty buffers
-are unaffected.
+Prose body text opts up via the =body= face, whose visual size is set
+by the =variable-spacing-ratio= synthetic property (e.g. =2.0= relative
+to =default=). The global =default= face is never touched; non-sty
+buffers are unaffected.
+
+** Rendering pipeline
+
+Face-extra dispatches four passes after Org's keyword fontification
+for each jit-lock chunk:
+
+| Pass | Work                                               |
+|------+----------------------------------------------------|
+| 0    | Stamp =body= on bare paragraph text (body-face)    |
+| 1    | Vertical metrics: spacing ratios (variable-spacing) |
+| 2    | Horizontal bounds: margins and indent (horizontal-layout) |
+| 3    | Line-break-dependent: justification and alignment (horizontal-layout) |
+
+Pass 3 is debounced: it narrows to point's visual line during typing and
+defers a full paragraph re-justify to an idle timer (default 2 s).

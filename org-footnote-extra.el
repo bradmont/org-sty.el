@@ -1,7 +1,12 @@
 ;;; org-footnote-extra.el --- Enhanced footnote placement and rendering -*- lexical-binding: t -*-
 
 ;; Author: Brad
+;; Keywords: org, convenience, wp
 ;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1") (cl-lib "0.5") (org "9.5")
+;;                   (face-extra "0.1.0") (body-face "0.1.0")
+;;                   (horizontal-layout "0.1.0"))
+;; URL: https://github.com/braddelong/org-sty
 
 ;;; Commentary:
 
@@ -44,6 +49,7 @@
 (require 'cl-lib)
 (require 'org-footnote)
 (require 'face-extra)
+(require 'body-face)
 (require 'variable-spacing)
 (require 'horizontal-layout)
 
@@ -71,7 +77,7 @@ distinct from main paragraph content.  The default simply inherits
 
 Applied to the label portion of `[fn:N]' references after the `[fn:'
 prefix and `]' suffix are hidden via display properties.  Sets the label to 1.2× the inherited (floor) size — the `org-footnote'
-remap chains through `text-body', so the effective size is relative to
+remap chains through `body', so the effective size is relative to
 the floor face, not body text.  Raise 0.5 lifts it to roughly cap-height.  The vertical raise is applied separately as
 a `display' \\='(raise 0.7) property.  (`:raise' is not a valid face
 attribute; see AGENTS.md for planned face-extra support.)
@@ -450,16 +456,16 @@ avoiding the face duplication that caused hanging-wrap double-application.")
   ;; 1c. Stamp org-footnote across entire definition lines.
   (font-lock-add-keywords nil org-footnote-extra--font-lock-keywords t)
   ;; 2. Register org-footnote as a content face buffer-locally so
-  ;;    `variable-spacing--has-explicit-face-p' returns t for it and
-  ;;    text-body is not stamped over definition text.
-  (setq-local variable-spacing-content-faces
-              (cons 'org-footnote variable-spacing-content-faces))
+  ;;    `face-extra--org-explicit-face-p' returns t for it and
+  ;;    body is not stamped over definition text.
+  (setq-local body-face-org-content-faces
+              (cons 'org-footnote body-face-org-content-faces))
   ;; 3. `variable-spacing-mode' installs content-face remaps at enable
-  ;;    time, before this mode exists.  Install the (:inherit text-body)
+  ;;    time, before this mode exists.  Install the (:inherit body)
   ;;    remap for org-footnote now so it scales with body text.
   (when (bound-and-true-p variable-spacing-mode)
     (setq org-footnote-extra--remap-cookie
-          (face-remap-add-relative 'org-footnote :inherit 'text-body)))
+          (face-remap-add-relative 'org-footnote :inherit 'body)))
   ;; 4. Justify definition lines.  Spacing ratio is intentionally not
   ;;    set here — it is the style config's responsibility (e.g. via
   ;;    :variable-spacing-ratio in :faces) so that the config can
@@ -475,8 +481,8 @@ avoiding the face duplication that caused hanging-wrap double-application.")
   (font-lock-remove-keywords nil org-footnote-extra--def-font-lock-keywords)
   (org-footnote-extra--clear-reference-display (point-min) (point-max))
   (font-lock-remove-keywords nil org-footnote-extra--font-lock-keywords)
-  (setq-local variable-spacing-content-faces
-              (delq 'org-footnote variable-spacing-content-faces))
+  (setq-local body-face-org-content-faces
+              (delq 'org-footnote body-face-org-content-faces))
   (when org-footnote-extra--remap-cookie
     (face-remap-remove-relative org-footnote-extra--remap-cookie)
     (setq org-footnote-extra--remap-cookie nil))

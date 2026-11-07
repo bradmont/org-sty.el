@@ -1,0 +1,495 @@
+#+TITLE: org-sty Architecture
+#+AUTHOR: Brad Stewart
+#+OPTIONS: toc:2 num:nil ^:nil
+
+* Preamble
+
+This document is the authoritative source of truth for the architecture of
+the org-sty package family. All implementation MUST conform to it.
+
+Any change that would conflict with a contract stated here is an
+*architectural redesign*. It must be planned and recorded in this document
+before any code is written. This is a hard rule: no code that violates an
+existing contract may be written until the contract has been updated here and
+the change reviewed.
+
+Bug fixes, performance work, and feature additions that fit within existing
+contracts do not require a document update. The following always do (see §9
+for the complete list).
+
+* 1. Module inventory and dependency rules
+
+** 1.1 File inventory
+
+| File                   | Package              | Standalone? | Direct project deps             |
+|------------------------+----------------------+-------------+---------------------------------|
+| =face-extra.el=        | =face-extra=         | Yes         | (none)                          |
+| =body-face.el=         | =body-face=          | No          | face-extra                      |
+| =variable-spacing.el=  | =variable-spacing=   | No          | body-face                       |
+| =horizontal-layout.el= | =horizontal-layout=  | No          | face-extra                      |
+| =org-sty.el=           | =org-sty=            | No          | face-extra, body-face           |
+| =org-title-fold.el=    | =org-title-fold=     | Yes         | (none)                          |
+| =org-block-appear.el=  | =org-block-appear=   | Yes         | (none)                          |
+| =org-footnote-extra.el= | =org-footnote-extra= | No         | face-extra, body-face, horizontal-layout |
+| =org-cite-appear.el=   | =org-cite-appear=    | Yes         | (none; soft: citar)             |
+| =page-metrics.el=      | =page-metrics=       | Yes         | (none; soft: olivetti)          |
+| =org-sty-config.el=    | —                    | n/a         | personal config, not a package  |
+
+** 1.2 Dependency graph
+
+#+begin_example
+face-extra.el      ← core: registry, dispatch (passes 0–3),
+                       face-extra-mode + require/release lifecycle
+                       (no Org deps; no body-face deps)
+     ↑
+body-face.el       ← body-face hierarchy: defface body, body-face-mode,
+                       backend registry, Org backend, body-stamp pass-0
+     ↑
+variable-spacing.el  ← spacing only: floor remap on `default', spacer
+                         computation; major-mode-agnostic
+horizontal-layout.el ← margins, hanging indent, text alignment;
+                         depends on face-extra only (not body-face)
+org-title-fold.el    ← standalone
+org-block-appear.el  ← standalone
+org-footnote-extra.el ← depends on face-extra, body-face, horizontal-layout
+org-cite-appear.el   ← standalone
+page-metrics.el      ← standalone
+     ↑
+org-sty.el         ← style dispatcher; depends on face-extra and body-face;
+                       all other deps are optional via :eval in user config
+#+end_example
+
+** 1.3 Dependency rules (MUST NOT violate)
+
+1. =face-extra.el= MUST NOT require any Org-specific package. It is
+   major-mode-agnostic.
+
+2. =face-extra.el= MUST NOT require =body-face.el= or any module above it in
+   the dependency graph.
+
+3. =body-face.el= MUST NOT require =variable-spacing.el= or
+   =horizontal-layout.el=.
+
+4. =variable-spacing.el= MUST NOT require =horizontal-layout.el= and vice
+   versa. These two modules are peer consumers of =face-extra=; they MUST
+   NOT know about each other's internals.
+
+5. =horizontal-layout.el= (including =text-align=) MUST access geometry only
+   through the face-extra registry (=face-extra--resolve-property=). It MUST
+   NOT read display properties (=line-prefix=, =wrap-prefix=) stamped by
+   =variable-spacing.el= and MUST NOT import any symbol from it.
+
+6. =org-sty.el= MUST NOT require =variable-spacing.el=, =horizontal-layout.el=,
+   or any module except =face-extra= and =body-face=. All other wiring is
+   done via =:eval= in the user's style config.
+
+7. Standalone files (=org-title-fold=, =org-block-appear=, =org-cite-appear=,
+   =page-metrics=) MUST NOT require any other file in this project.
+
+* 2. The rendering pipeline
+
+The pipeline runs in a fixed sequence of passes on each jit-lock chunk.
+Dependencies between properties are shallow and map cleanly to this sequence;
+no general dependency resolver is needed.
+
+** 2.1 Pass overview
+
+| Pass | Name                  | Trigger                                    | Scope                                 |
+|------+-----------------------+--------------------------------------------+---------------------------------------|
+|    0 | Body stamping         | =font-lock-fontify-keywords-region= :after | Stamps =body= on unstyled characters  |
+|    1 | Vertical metrics      | Same :after advice                         | Spacers; no line-break dependency     |
+|    2 | Horizontal bounds     | Same :after advice                         | Margins; affects line-breaking        |
+|    3 | Line-break-dependent  | =jit-lock-register= (buffer-local)         | Alignment; after geometry settles     |
+|    4 | Page layout           | Idle timer (not yet implemented)           | Height accumulation; page breaks      |
+
+** 2.2 Pass 0 — Body stamping
+
+- Runs before any pass-1/2/3 property apply functions.
+- Major-mode-specific. The active backend (registered via
+  =body-face-register-backend=) provides a =(fn beg end)= stamper.
+- Stamps the =body= face on characters the major mode left unstyled.
+- The =body-face-mode= guard is enforced by the dispatcher via the property's
+  =:mode= key. The stamper function itself MUST NOT contain a mode guard.
+
+** 2.3 Pass 1 — Vertical metrics
+
+- Applies =line-prefix= / =wrap-prefix= pixel spacers derived from font metrics.
+- Current properties: =variable-spacing-ratio=.
+- MUST NOT depend on where lines break.
+- MUST NOT call =vertical-motion= or =window-text-pixel-size=.
+- Spacers MUST use =(space :height (Npx))= display specs. The =line-spacing=
+  variable is FORBIDDEN — it applies uniformly to all lines, defeating the
+  per-element design.
+
+** 2.4 Pass 2 — Horizontal bounds
+
+- Applies =line-prefix= / =wrap-prefix= width specs that narrow the available
+  text area, causing word-wrap to fire at margin boundaries.
+- Current properties: =horizontal-layout-margin-left=,
+  =horizontal-layout-margin-right= (pass 2), =horizontal-layout-hanging-wrap=.
+- Intra-pass ordering: margin-left MUST run before margin-right and
+  hanging-wrap (enforced by =:after= constraints at registration).
+- =line-prefix= encodes left margin only. =wrap-prefix= encodes left + right
+  combined, so word-wrap respects the right boundary without any explicit
+  override of the display engine.
+- MUST NOT call =vertical-motion= or =window-text-pixel-size=.
+
+** 2.5 Pass 3 — Line-break-dependent
+
+- Linewise, not spanwise. The walk iterates visual lines via =vertical-motion=.
+- =vertical-motion= is ONLY permitted in pass 3. It is FORBIDDEN in passes
+  0–2 (geometry is not settled; calls would produce wrong line boundaries).
+- =window-text-pixel-size= is ONLY permitted in pass 3 for the same reason.
+- Current properties: =horizontal-layout-margin-right= (pass 3), =text-align=.
+- =text-align= MUST run after =horizontal-layout-margin-right= pass 3
+  (enforced by =:after= constraint at registration).
+- =:before-pass3-walk= callbacks run once before the visual-line walk to clear
+  stale stamps from a previous cycle.
+- =:before-keystroke= callbacks run from =pre-command-hook= before each
+  editing keystroke (live justify ring-walk, overflow detection).
+- Pass 3 is registered per-buffer by =face-extra-mode-require= via
+  =jit-lock-register= and unregistered by =face-extra-mode-release=.
+
+** 2.6 Pass 4 — Page layout (not yet implemented)
+
+- Runs as a separate idle-timer pass after jit-lock settles.
+- Accumulates per-line pixel heights to locate page breaks.
+- Depends on pass 1 spacers being stamped before it reads line heights.
+- Requires the =variable-spacing--spacer= off-screen height fix to be complete
+  before implementation can begin (see AGENTS.md § Known issues).
+
+** 2.7 Chunk expansion rule (pass 3)
+
+Pass 3 expands =beg= backward to BOL and =end= forward to EOL, but only as far
+as text is already fontified (=fontified= text property). Drop partial lines at
+unfontified boundaries; they will be processed when their own jit-lock chunk
+fires. Re-processing an already-correct line is idempotent.
+
+** 2.8 Window resize
+
+A =window-size-change-functions= hook MUST call =font-lock-flush= to
+re-trigger full fontification when window width changes. All pass-3 stamps
+encode the window width at stamp time and are stale after a resize.
+
+* 3. The face-extra property system
+
+** 3.1 Property registration
+
+Properties are registered at *load time*, once globally, and remain in the
+registry permanently. The registry is a static description of what properties
+exist — it is not a lifecycle mechanism and does not change at runtime.
+
+#+begin_src elisp
+(face-extra-define-property SYMBOL
+  :pass   PASS-NUMBER         ; required: 0, 1, 2, or 3
+  :mode   MODE-SYMBOL         ; required: owning minor mode
+  :apply  FUNCTION            ; required: (fn beg end) for pass 0,
+                              ;           (fn spans) for passes 1–3
+                              ;           spans = list of (beg end value)
+  :clear  FUNCTION            ; optional: (fn cookie) — undo global install
+  :after  SYMBOL-LIST         ; optional: same-pass ordering (passes 1–3 only)
+  :before-pass3-walk FUNCTION ; optional: (fn beg end) — before pass-3 walk
+  :before-keystroke  FUNCTION); optional: (fn vbeg vend) — from pre-command-hook
+#+end_src
+
+Rules:
+- =:mode= is REQUIRED. Registration without it signals an error at load time.
+- =:after= MUST only name properties in the same pass. Cross-pass =:after=
+  references are rejected.
+- =:after= is NOT valid for pass 0.
+- =face-extra-define-property= call sites MUST appear at the bottom of the
+  file, after all function definitions they reference, so that =#'fn=
+  references resolve correctly at load time.
+
+** 3.2 The :mode guard
+
+The dispatcher checks =(symbol-value :mode)= before invoking =:apply=,
+=:before-pass3-walk=, or =:before-keystroke= in any buffer. This is the sole
+mechanism for suppressing a globally-registered property in buffers where the
+owning mode is not active.
+
+Individual callback functions MUST NOT contain their own
+=(when (bound-and-true-p mode) ...)= guard. The dispatcher enforces it
+centrally. A mode guard inside a callback is a code smell indicating the
+=:mode= contract is being bypassed.
+
+** 3.3 Dispatch wiring
+
+The =face-extra--dispatch= advice on =font-lock-fontify-keywords-region= is
+installed at load time, globally, permanently. It is NEVER removed.
+
+The buffer-local =face-extra-mode= variable serves as the cheap guard that
+makes it a no-op in inactive buffers. The permanent global advice is one of
+two intentional load-time global side effects in =face-extra.el= (the other
+being the load-time =face-extra-define-property= registry calls).
+
+** 3.4 Per-face property cache
+
+The resolver walks =face-remapping-alist= and face =:inherit= chains to
+resolve synthetic property values. The cache is buffer-local, keyed by face
+symbol, and must be invalidated on:
+- =face-remapping-alist= changes (=org-sty-apply=, =text-scale-mode=)
+- =face-extra--local-properties= changes (=face-extra-add-relative=,
+  =face-extra-remove=)
+- Global symbol property mutation
+
+Invalidation is signalled by running =face-extra-invalidate-cache-functions=.
+Every module that maintains a secondary cache derived from font metrics MUST
+register a cleanup function on this hook.
+
+Suppressor-wins semantics: if any face in a multi-face span has an explicit
+value of 0 for a property in =face-extra--local-properties=, that property is
+suppressed for the entire span, regardless of other faces in the list.
+
+* 4. face-extra-mode lifecycle
+
+** 4.1 The API
+
+=face-extra-mode= is a =define-minor-mode= with =:interactive nil=. It MUST
+NOT be toggled directly by any code outside =face-extra.el=. The public API is:
+
+- =face-extra-mode-require= :: Called from property mode *enable* bodies.
+  Increments the per-buffer =face-extra--buffer-users= ref counter. Calls
+  =(face-extra-mode 1)= at the 0→1 transition only.
+- =face-extra-mode-release= :: Called from property mode *disable* bodies.
+  Decrements =face-extra--buffer-users=. Calls =(face-extra-mode -1)= at the
+  1→0 transition only.
+
+Every call to =face-extra-mode-require= MUST be paired with exactly one call
+to =face-extra-mode-release= in the corresponding disable body. Leaking a
+require (no matching release) will prevent face-extra-mode from ever
+disabling in that buffer.
+
+The use of =define-minor-mode= with an explicit ref counter (rather than
+calling =(face-extra-mode 1)= directly from each property mode) is intentional.
+=define-minor-mode= has idempotency semantics: =(face-extra-mode 1)= when
+already on is a no-op. With two property modes both calling it, the second
+call would not increment any counter, so the first mode's disable would turn
+it off even while the second mode is still active. The ref counter avoids this.
+
+** 4.2 Who calls require/release
+
+| Mode                     | Mechanism                                              |
+|--------------------------+--------------------------------------------------------|
+| =body-face-mode=         | Calls =require= / =release= directly                  |
+| =variable-spacing-mode=  | Calls =(body-face-mode 1/−1)=, which calls =require=/=release= |
+| =horizontal-layout-mode= | Calls =require= / =release= directly                  |
+| =text-align-mode=        | Calls =require= / =release= directly                  |
+
+=variable-spacing-mode= MUST NOT call =face-extra-mode-require= directly. It
+enables =body-face-mode= as a dependency, which calls it. This preserves the
+invariant that =body-face-mode= is the single owner of the content/metadata
+face remaps and is responsible for the =face-extra-mode= ref count associated
+with that remap layer.
+
+** 4.3 Mode enable ordering constraints
+
+These ordering requirements MUST be preserved in any configuration that
+enables these modes. Violating them causes silent rendering failures.
+
+1. *Suppressors before variable-spacing-mode.* Any =face-extra-add-relative=
+   or =org-sty-remap= call that suppresses =variable-spacing-ratio= on a
+   specific face (e.g. =org-quote=, =org-verse=, =org-block=) MUST execute
+   before =(variable-spacing-mode 1)=. Reason: mode enable may trigger a
+   jit-lock cycle; the face-extra cache is built at that moment and must
+   already contain the suppressors. Stale spacers stamped before the
+   suppressor arrives are never cleared by the span-only clear loop.
+
+2. *variable-spacing-mode before org-footnote-extra-mode.*
+   =org-footnote-extra--install-styling= checks
+   =(bound-and-true-p variable-spacing-mode)= before installing the
+   =(:inherit body)= remap on =org-footnote=. If =variable-spacing-mode= is
+   not yet active, the remap is skipped and =org-footnote= renders at floor
+   size (6pt).
+
+* 5. Body-face backend protocol
+
+A body-face backend is a plist with three required keys:
+
+#+begin_src elisp
+(list :content-faces   LIST-OF-FACES  ; receive (:inherit body) remaps on enable
+      :metadata-faces  LIST-OF-FACES  ; receive (:inherit default) anchors on enable
+      :stamp-body-text FUNCTION)      ; (fn beg end) — pass-0 body stamper
+#+end_src
+
+Backends are registered at load time:
+
+#+begin_src elisp
+(body-face-register-backend 'major-mode-symbol
+  :content-faces  '(face-a face-b ...)
+  :metadata-faces '(face-c face-d ...)
+  :stamp-body-text #'my-stamp-fn)
+#+end_src
+
+=body-face-mode= looks up the backend for the current =major-mode= when it
+enables. If no backend is registered, =body-face-mode= signals an error and
+does not enable.
+
+The =:stamp-body-text= function:
+- Is called during pass 0 for every jit-lock chunk.
+- Receives =(beg end)= bounds.
+- MUST be idempotent: it MUST clear stale stamps before re-stamping.
+- MUST NOT contain a mode guard — the dispatcher enforces it via =:mode=.
+
+* 6. Public API surfaces
+
+The following symbols are stable public API. Changes to them require a semver
+bump. All symbols with =--= (double-dash) are private; cross-module use of
+private symbols is FORBIDDEN except through the contracts in this document.
+
+** face-extra.el
+- =face-extra-define-property=
+- =face-extra-add=, =face-extra-add-relative=, =face-extra-remove=
+- =face-extra-mode-require=, =face-extra-mode-release=
+- =face-extra-registered-p=
+- =face-extra-invalidate-cache-functions= (hook)
+
+** body-face.el
+- =body-face-mode=
+- =body-face-register-backend=, =body-face-deregister-backend=
+- =body-face-remove-body-face=
+- =body-face-org-content-faces=, =body-face-org-metadata-faces= (defcustoms)
+
+** variable-spacing.el
+- =variable-spacing-mode=
+- =variable-spacing-ratio= (property symbol, registered in face-extra)
+- =variable-spacing-floor-height= (defcustom)
+
+** horizontal-layout.el
+- =horizontal-layout-mode=, =text-align-mode=
+- =horizontal-layout-margin-left=, =horizontal-layout-margin-right=,
+  =horizontal-layout-hanging-wrap= (property symbols)
+- =text-align= (property symbol)
+- =horizontal-layout-suppress-line-prefix= (text property sentinel)
+
+** org-sty.el
+- =org-sty-mode=, =org-style-mode= (defalias)
+- =org-sty-alist=, =org-sty-default=
+- =org-sty-remap=, =org-sty-apply=
+- Style plist keys: =:font=, =:font-size=, =:faces=, =:eval=,
+  =:num-level=, =:indent=, =:olivetti-width=
+
+* 7. Measurement rules
+
+These rules exist because Emacs provides multiple measurement APIs, most of
+which give wrong results in buffers with buffer-local face remapping active.
+In WP buffers, =variable-spacing-mode= remaps =default= to a 6pt floor;
+=body= to 12pt body text; heading and content faces to multiples of body.
+Any measurement function that uses the global =default= face will silently
+return the wrong metrics.
+
+** 7.1 Forbidden functions
+
+- =string-pixel-width= :: FORBIDDEN everywhere in this codebase. Opens a
+  temp buffer and measures with the global =default= face; completely ignores
+  buffer-local =face-remapping-alist=. Will give floor-size metrics in any
+  WP buffer.
+
+- =frame-char-width=, =frame-char-height= :: FORBIDDEN as pixel-conversion
+  factors for display-spec values. These return the frame's global =default=
+  font metrics, not the buffer-local remapped font. Any calculation that
+  multiplies a margin/spacing value by =frame-char-width= and stores the
+  result in a =(space :width N)= spec will produce wrong output: =N= in a
+  display spec means N × the face's own character width at render time, not
+  N × the frame default.
+
+** 7.2 Required approach
+
+- Rendered text width :: =window-text-pixel-size= on live buffer positions in
+  the target window. MUST be called from pass 3 only (geometry must be
+  settled; see §2.5).
+
+- Font metrics for off-screen content :: =face-font= + =font-info= called in
+  the target buffer's context (correctly consults buffer-local
+  =face-remapping-alist=, unlike =frame-char-height=).
+
+- Margin/indent values in display specs :: Store as canonical character widths
+  (integer N = "N space-character widths at this face's own font"). Let the
+  display engine do the conversion at render time. NEVER pre-multiply by
+  =frame-char-width= and store raw pixels.
+
+** 7.3 Measurement caching (planned refactor — not yet implemented)
+
+Currently, measurement caches are ad hoc and scattered across modules:
+
+- =(face . char-code) → pixel-width= in =text-align--char-width-cache=
+- Natural line width in =text-align--line-natural-px=
+- Space ring with per-space extra-px in =text-align--space-ring=
+- Spacer cache =(ratio . measure-face) → spacer= in =variable-spacing--apply-ratio=
+- Natural space-width via =text-align--natural-space-px=
+
+The planned refactor introduces face-extra interface functions for all
+measurements, so property modules never call =window-text-pixel-size= directly:
+
+#+begin_src elisp
+;; Proposed interface (not yet implemented):
+(face-extra-char-pixel-width char face &optional window) ; cached by (face . char)
+(face-extra-natural-line-px  beg end  &optional window) ; cached by content-hash
+(face-extra-zone-pixel-width face     &optional window) ; window-width − margins
+#+end_src
+
+These functions own the caches and invalidation logic centrally. Property
+modules call them and need not know what is cached or how. Invalidation is
+driven by =face-extra-invalidate-cache-functions=.
+
+Until this refactor is complete: each property module maintains its own
+caches under existing naming conventions. ALL such caches MUST register a
+cleanup function on =face-extra-invalidate-cache-functions= so they are
+cleared on font/scale changes.
+
+* 8. Extension guide
+
+** 8.1 Adding a new synthetic property
+
+1. Determine the correct pass (§2.1):
+   - Line-break-dependent (alignment, justify) → pass 3
+   - Affects line-breaking (margins, indent) → pass 2
+   - Vertical rhythm, no line-break dependency → pass 1
+   - Major-mode-specific face stamping → pass 0
+
+2. Define the callback functions in the owning module:
+   - =:apply= — required; signature depends on pass (see §3.1)
+   - =:before-pass3-walk= — if stale stamps need clearing before the walk
+   - =:before-keystroke= — if live per-keystroke behaviour is needed
+
+3. Add a load-time =face-extra-define-property= call at the *bottom* of the
+   file, after all function definitions, with =:mode= set to the owning mode.
+
+4. Add =face-extra-mode-require= to the mode enable body and
+   =face-extra-mode-release= to the disable body.
+
+5. Document the property symbol in §6 (Public API surfaces).
+
+** 8.2 Adding a body-face backend for a new major mode
+
+1. Define a =:stamp-body-text= function =(fn beg end)=.
+2. Define =:content-faces= and =:metadata-faces= lists.
+3. Register at load time via =body-face-register-backend=.
+4. No changes to =face-extra.el= or =body-face.el= are required.
+
+* 9. What constitutes an architectural change
+
+The following changes MUST update this document BEFORE any code is written:
+
+- Adding or removing a module dependency (§1)
+- Changing which pass a property runs in (§2)
+- Changing the =face-extra-define-property= signature or semantics (§3.1)
+- Changing the =:mode= guard contract (§3.2)
+- Changing =face-extra-mode= lifecycle semantics — =require=/=release=
+  protocol, ref-counting, =define-minor-mode= rationale (§4)
+- Changing mode enable ordering constraints (§4.3)
+- Changing the body-face backend protocol (§5)
+- Adding, removing, or renaming a public API symbol (§6)
+- Introducing a new measurement approach, a new cache, or new cache
+  invalidation trigger (§7)
+- Adding a new rendering pass or changing pass ordering (§2)
+
+The following do NOT require a document update:
+
+- Bug fixes that stay within existing contracts
+- Performance optimisations that use only permitted measurement functions
+- Adding a new font-lock keyword within an existing module
+- New =defcustom= values that parameterise existing behaviour
+- New style config entries in =org-sty-config.el=
+- New =:after= ordering constraints between properties in the same pass
+  (this is a local registration detail, not an architectural decision)

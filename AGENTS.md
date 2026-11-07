@@ -2,26 +2,31 @@
 
 ## What this repo is
 
-Four independent Emacs Lisp minor modes that form a word-processor visual
-layer for Org mode. Each file is self-contained and loadable on its own;
-`org-sty` is the only one that `require`s the others.
+A collection of Emacs Lisp packages that form a word-processor visual layer for Org mode.
+The packages are independently usable and publishable; `org-sty-config.el` is personal configuration, not a published package.
+
+**Architecture, contracts, and API surfaces are documented in `ARCHITECTURE.org`.** That document is the source of truth for module boundaries, the rendering pipeline, the face-extra lifecycle, measurement rules, and what constitutes an architectural change. Read it before making structural changes.
 
 | File | Purpose |
 |---|---|
-| `org-sty.el` | Reads `#+FILETAGS`, merges style plists, applies them; provides `org-sty-mode` |
-| `variable-spacing.el` | Per-element proportional line spacing via jit-lock |
-| `org-title-fold.el` | Folds `#+KEYWORD:` lines below `#+TITLE:` |
-| `org-block-appear.el` | Hides `#+begin_`/`#+end_` lines; reveals near point |
+| `face-extra.el` | Generic synthetic face-property engine: registry, pass dispatcher (passes 0–3), `face-extra-mode`, `face-extra-mode-require`/`release` lifecycle API |
+| `body-face.el` | Body-face hierarchy: `defface body`, `body-face-mode`, backend registry, Org backend, body-stamp pass-0 |
+| `variable-spacing.el` | Per-element proportional line spacing; depends on `body-face` |
+| `horizontal-layout.el` | Left/right margins, hanging indent, text alignment (centre, right, justify); depends on `face-extra` |
+| `org-sty.el` | Style dispatcher: reads `#+FILETAGS`, merges style plists, applies them; provides `org-sty-mode`. Depends on `face-extra`, `body-face`; all other package deps optional via `:eval` |
+| `org-title-fold.el` | Folds `#+KEYWORD:` lines below `#+TITLE:`; standalone |
+| `org-block-appear.el` | Hides `#+begin_`/`#+end_` lines; reveals near point; standalone |
+| `org-footnote-extra.el` | Inline paragraph-local footnote rendering; depends on `face-extra`, `body-face`, `horizontal-layout` |
+| `org-cite-appear.el` | Hides raw `[cite:@key]` markup behind rendered text; standalone (soft-dep citar) |
+| `page-metrics.el` | Physical page geometry (mm/pt/in → px); standalone (soft-dep olivetti) |
+| `org-sty-config.el` | **Personal config, not a package.** Wires all modules into a WP style via `org-sty`'s `:eval` key |
 
 ## Build / test / lint
 
 - **No build system.** Files are plain `.el`; load with `require` or `load-file`.
-- **No test suite yet.** Verify changes by loading the file in a live Emacs
-  session (`M-x load-file`) and exercising the affected mode interactively.
-- **Byte-compile check:** `emacs --batch -f batch-byte-compile <file>.el`
-  is the closest thing to a CI pass. Fix all warnings (not just errors).
-- **Lint:** `package-lint` and `checkdoc` are the conventional Emacs Lisp
-  linters; run them if available, but they are not enforced by any CI.
+- **Test suite:** `test/` contains ERT tests per module. Run all: `bash test/run-tests.sh`. Run one suite: `emacs --batch -L . -l test/test-face-extra.el -f ert-run-tests-batch-and-exit`.
+- **Byte-compile check:** `emacs --batch -L . -f batch-byte-compile face-extra.el body-face.el variable-spacing.el horizontal-layout.el org-sty.el org-footnote-extra.el` (adjust file list). Fix all warnings, not just errors. This is the CI pass.
+- **Lint:** `package-lint` and `checkdoc` are the conventional Emacs Lisp linters; run them before publishing.
 
 ## Code conventions
 
@@ -34,310 +39,44 @@ layer for Org mode. Each file is self-contained and loadable on its own;
   `cl` macros.
 - **`defcustom` for user-facing vars**, `defvar-local` for buffer-local
   internal state, `defconst` for fixed values.
-- **No global side-effects at load time** except the one `advice-add` in
-  `org-sty.el` (which is intentional and documented). New global hooks or
-  advice must be scoped to the minor mode body (add on enable, remove on
-  disable).
+- **No global side-effects at load time** except: (1) `face-extra.el` installs `advice-add` on `font-lock-fontify-keywords-region`, `font-lock-ensure`, `window-scroll-functions`, and `window-selection-change-functions` at load time — this is intentional, permanent, and documented; (2) each package's load-time `face-extra-define-property` calls populate the global registry. All other global hooks or advice must be scoped to mode bodies (add on enable, remove on disable).
 - **All new features go through `:eval`**, not new plist keys, unless the
   feature is a genuine primitive that belongs in the style plist itself.
 
-## Architecture constraints
+## Architecture and contracts
 
-### Long-term file structure
+See **`ARCHITECTURE.org`** — the authoritative source of truth for module
+boundaries, the rendering pipeline, face-extra property contracts, lifecycle
+semantics, measurement rules, and what constitutes an architectural change.
+Read it before making any structural change.
 
-The planned post-v1 dependency graph is:
+## Package refactor history (branch: `package-refactor`)
 
-```
-face-extra.el          ← generic core: registry, pass dispatcher, backend protocol,
-    ↑                       text-body face defn + bare-text scan loop
-    ↑                       (no deps beyond Emacs + cl-lib)
-variable-spacing.el    ← spacing impl; depends on face-extra; standalone useful
-horizontal-layout.el   ← margin/indent impl; depends on face-extra
-org-title-fold.el      ← standalone; no new deps
-org-block-appear.el    ← standalone; no new deps
-    ↑
-org-sty.el             ← dispatcher
-```
+All six phases complete. Summary of what was done:
 
-Pass 0 (face/font resolution) is the only mode-specific layer.  Passes 1–4
-are mode-agnostic — they operate on faces and geometry.  A backend for
-another major mode supplies pass 0 knowledge (face configuration + bare-text
-predicate) and the rest of the pipeline works unchanged.
-
-**`text-body` belongs in `face-extra`, not `variable-spacing`.**  `text-body`
-is not a spacing concept — it is a semantic identity face meaning "this
-character is body text."  It is the stand-in for "any unspecified text" in
-the pipeline: anything that wants to operate on naked document text without
-touching `default` (which belongs to all of Emacs) uses `text-body`.
-Variable-spacing, horizontal-layout, and text-align are all consumers of
-`text-body`; none of them owns it.  The bare-text scan loop — the pass-0
-walk that stamps `text-body` on characters Org left unstyled — is likewise
-face-extra infrastructure, not a spacing feature.  The Org-specific
-bare-text predicate (what counts as "bare" in Org: no `face` and no
-`font-lock-face`) stays in the backend registration, which can remain in
-`variable-spacing.el` until there is a reason to split it out.
-
-`text-body` is useful beyond Org.  Any major mode backend that wants to
-distinguish body text from structural or metadata text can register a
-backend that stamps `text-body`, and all three property packages
-(variable-spacing, horizontal-layout, text-align) will then apply to that
-text automatically.  The `defface` should carry neutral default attrs
-(`'((t :inherit default))`) with no sizing opinion baked in — the size is
-supplied by `variable-spacing-mode`'s floor/body remap on enable, not by
-the face definition itself.
-
-### Independence of files
-The four files are deliberately decoupled. Do not add cross-`require`
-dependencies between `variable-spacing`, `org-title-fold`, or
-`org-block-appear`. `org-sty.el` is the only allowed aggregator.
-
-### `:eval` is the extension point
-`org-sty` has no knowledge of spacing, folding, or block appearance.
-Wiring those modes in is done via `:eval` in the user's style plist, not
-by adding new plist keys to the dispatcher.
-
-### Font remap ownership (`org-sty`)
-`:font` uses `assq-delete-all` to strip any prior `default` face remap
-before installing its own. This is intentional — relative remaps stack and
-hook ordering is unreliable. Do not switch this to `face-remap-add-relative`
-for `default`; doing so breaks font precedence. Heading faces use
-`face-remap-add-relative` with `:family`-only to preserve their
-`:height`/`:weight`.
-
-### Pixel spacers, not `line-spacing` (`variable-spacing`)
-Spacing is applied as `line-prefix`/`wrap-prefix` display properties with a
-`(space :height (Npx))` spec, computed from the live font via `font-at`.
-Never replace this with the `line-spacing` variable — it applies uniformly
-to all lines, defeating the per-element design.
-
-### jit-lock + deferred initial refresh (`variable-spacing`)
-The initial visible-area refresh after mode enable is deferred via
-`(run-with-idle-timer 0 ...)`. Do not call `variable-spacing--refresh-visible`
-synchronously during a mode hook — window geometry is unsettled at that
-point and `window-end` returns a wrong value.
-
-### `text-scale-mode` advice scoping (`variable-spacing`)
-The advice on `text-scale-mode` is added/removed inside the minor mode body,
-not at file load time. Keep it that way — it must be active only in buffers
-where `variable-spacing-mode` is on.
-
-### `org-fold-core` spec is buffer-local (`org-title-fold`)
-`org-fold-core--specs` is buffer-local. The fold spec must be registered per
-buffer via `org-title-fold--ensure-spec`, not once at file load. The existing
-top-level registration is only a best-effort fallback for the current buffer
-at load time.
-
-### Fold region starts at `line-end-position` (`org-title-fold`)
-The fold `beg` is the newline character at the end of the `#+TITLE:` line
-(not the start of the next line). This places the ellipsis at the end of the
-title line, matching `org-fold-core`'s drawer convention. Do not change this
-to `(line-beginning-position 2)`.
-
-### Custom sentinel property (`org-block-appear`)
-The mode uses `org-block-appear--hidden` as a separate sentinel text property
-alongside `invisible`. This is intentional — it lets the mode clear exactly
-its own spans without touching Org's heading-folding or any other package's
-`invisible` uses. Do not collapse this into a plain `invisible`-only check.
-
-### Buffer-local `default` floor (`variable-spacing`)
-
-`variable-spacing-mode` installs a buffer-local remap on `default` to a
-small floor height (`variable-spacing-floor-height`, default 60 = 6pt).
-This makes `default` the **floor** for metadata/structural elements in that
-buffer, while body text opts up via `text-body`.  The global `default` face
-is never touched; non-WP buffers are entirely unaffected.
-
-**`frame-char-height` as a fallback is wrong** in buffers where
-`variable-spacing-mode` is active, because the buffer-local floor remap
-makes it return the small floor value rather than the body text height.
-Code that uses `frame-char-height` as a proxy for line height in the current
-buffer (notably `variable-spacing--spacer`) will compute incorrect results
-for off-screen content.  The correct approach is to read the effective
-`:height` from `face-remapping-alist` for the current buffer and convert to
-pixels using the frame's pixels-per-point ratio.  Do not add new callers of
-`frame-char-height` for font-metric purposes; fix the existing one before
-implementing pagination.
-
-### Rendering pipeline — passes and ordering
-
-Visual properties are applied in a fixed sequence of passes.  Dependencies
-between properties are shallow and map cleanly onto this sequence; no general
-dependency resolver is needed.  (The same fixed-pipeline approach underlies
-CSS's style → box-model → layout → paint sequence, which handles a far wider
-property vocabulary than ours.)
-
-**Pass 0 — Face/font resolution** (Emacs `face-remapping-alist`; always first)
-Font family, size, height.  Resolved automatically by Emacs before any
-display properties are consulted.  All subsequent passes may read font metrics
-via `font-at` or `face-remapping-alist`.
-
-**Pass 1 — Vertical metrics** (after-fontify; no line-breaking dependency)
-Line spacing ratio (`variable-spacing-ratio`), space-before/after paragraphs.
-These stamp `line-prefix`/`wrap-prefix` pixel spacers derived from font
-metrics.  They affect vertical rhythm but do not need to know where lines
-break.  Properties in this pass are independent of each other.
-
-**Pass 2 — Horizontal bounds** (after-fontify; *affects* subsequent
-line-breaking)
-Left/right margins, first-line indent, hanging indent, tab stops.  These
-stamp `line-prefix`/`wrap-prefix` to narrow the available text width.
-Intra-pass ordering: margins must be applied before first-line-indent and
-tab stops, since the latter are margin-relative.  Note: because these are
-applied in the after-fontify pass and the display engine re-breaks lines on
-the following render cycle, there is an inherent one-cycle lag between a
-margin change and any property in pass 3 seeing the updated line breaks.
-This is normally imperceptible.
-
-**Pass 3 — Line-break-dependent** (after-fontify; inline, linewise)
-Justification, centre alignment, right alignment.  Unlike passes 1–2 which
-operate chunkwise, Pass 3 is **linewise**: it expands the jit-lock chunk to
-full line boundaries before processing, then walks line by line.
-
-**Chunk expansion rule:** extend `beg` backwards to BOL and `end` forwards to
-EOL, but only as far as the text is already fontified — check the `fontified`
-text property before extending in either direction.  Drop partial lines at
-unfontified boundaries; they will be processed when their own chunk fires and
-extends back to BOL.  Re-processing an already-correct line is idempotent
-(same inputs, same stamp overwritten).
-
-**Geometry source:** Pass 3 reads margin and indent geometry from the
-`line-prefix`/`wrap-prefix` display properties stamped in the buffer by
-Pass 2, and measures text widths with `window-text-pixel-size` on live
-buffer positions.  Both require the text to be fontified — the `fontified`
-expansion check is necessary for face-metric accuracy and for geometry
-accuracy equally.  Pass 3 must not derive geometry from the face-extra
-registry or local-properties table; those give unresolved values, not the
-pixel widths that Pass 2 has computed and stamped.
-
-**NEVER use `string-pixel-width` for any measurement in this codebase.**
-It opens a temp buffer and measures with the global default face, completely
-ignoring the buffer-local `face-remapping-alist`.  In WP buffers,
-`variable-spacing-mode` remaps `default` to a floor font and body text to a
-different family altogether; `string-pixel-width` will silently return the
-wrong font's metrics.  Always use `window-text-pixel-size` on a live buffer
-position in the target window.
-
-**No deferral for centre/right:** these have no feedback loop — a `line-prefix`
-alignment spacer shifts text rightward but does not change where lines wrap —
-so they run inline and give live visual updates as the user types.
-
-**Justification — deferred decision:** justify mutates interword space widths,
-which changes line breaking and risks a jit-lock feedback loop.  Whether
-justify should use a deferred execution path (e.g. `jit-lock-register` with
-`defer=t`) is an open decision to be made when justify is implemented.
-Justify must also clear its old interword-space stamps before re-measuring,
-because stale stamps inflate the `window-text-pixel-size` measurement.
-
-**Window resize:** when the window width changes, all Pass 3 stamps are stale.
-A `window-size-change-functions` hook must call `font-lock-flush` to trigger
-a full re-fontification.
-
-Intra-pass ordering: tab stop geometry must be resolved before justification,
-since justification distributes remaining space after tab-consumed space is
-accounted for.
-
-**Pass 4 — Page layout** (separate idle-timer pass; not fontification)
-Cumulative pixel heights, page breaks, page count.  Like Pass 3, Pass 4 is
-**linewise** — it operates on complete lines, not jit-lock chunks.  Runs
-after jit-lock has settled for the visible region.  Needs reliable line
-heights for all buffer positions including off-screen content; blocked on
-the `variable-spacing--spacer` fallback fix.
-
-**Registry implication:** when the `face-remap-add-extra` API is generalised,
-each registered property should declare its pass number.  The after-fontify
-dispatcher iterates passes 1–3 in order, running all properties registered
-for each pass before moving to the next.
+- **Phase 1** — Renamed `text-body` → `body` throughout.
+- **Phase 2** — Moved body-face machinery out of `variable-spacing.el`.
+  Final destination: new standalone `body-face.el` (originally planned for
+  `face-extra.el`; split out to keep `face-extra` Org-agnostic).
+- **Phase 3** — `face-extra-mode` as `define-minor-mode :interactive nil`
+  with `face-extra-mode-require`/`release` ref-counted public API.
+  `body-face-mode` in `body-face.el`. Global dispatch advice installed
+  permanently at load time. `:pre-clear` → `:before-pass3-walk`;
+  `:pre-command` → `:before-keystroke`. `:mode` made a required key on
+  all `face-extra-define-property` calls; dispatcher enforces the guard
+  centrally, callbacks need no guard of their own.
+- **Phase 4** — `variable-spacing.el` stripped to spacing-only; calls
+  `(body-face-mode 1/−1)` as a dependency.
+- **Phase 5** — `(require 'variable-spacing)` removed from `org-sty.el`;
+  `(require 'body-face)` added.
+- **Phase 6** — Package headers (`Package-Requires`, `URL`, `Keywords`)
+  added to all 10 publishable files.
 
 ## Known planned work (not yet implemented)
 
-### ⚑ HIGH PRIORITY — Move `text-body` and bare-text scan to `face-extra`
+### ~~⚑ HIGH PRIORITY — Move `text-body` and bare-text scan to `face-extra`~~ — superseded
 
-**Rationale:** `text-body` is a semantic identity face ("this character is
-body text"), not a spacing concept.  It is the correct target for any
-property that wants to operate on naked document text without touching
-`default`.  Variable-spacing, horizontal-layout, and text-align are all
-consumers; none of them should own it.  The bare-text scan loop (pass 0) is
-face-extra infrastructure.  Leaving both in `variable-spacing.el` is a
-layering violation that has already caused one bug (text-body stamped in
-untagged buffers because the backend registration was global) and will
-cause more as new property packages are added.
-
-**Scope of changes:**
-
-1. **`face-extra.el`** — add:
-   - `defface text-body` with neutral attrs `'((t :inherit default))` — no
-     `:height`, no sizing opinion.
-   - `face-extra--stamp-body-text` — the generic scan-and-stamp loop,
-     extracted verbatim from `variable-spacing--stamp-body-text` minus the
-     `(bound-and-true-p variable-spacing-mode)` guard (that guard becomes
-     unnecessary once registration is mode-scoped; see below).
-   - `face-extra-remove-body-face` — thin public wrapper around the existing
-     `variable-spacing--remove-body-face` logic, so callers outside
-     variable-spacing can clean up stamps.
-   - Update the backend protocol doc: `:stamp-body-text` may call
-     `face-extra--stamp-body-text` directly, or supply its own function.
-
-2. **`variable-spacing.el`** — change:
-   - Remove `defface text-body` and the scan loop; `(require 'face-extra)`
-     already pulls them in.
-   - `variable-spacing-mode` enable: install the floor remap on `default`
-     and the `(:inherit text-body)` remaps on content faces (unchanged).
-     The `text-body` face itself stays neutral; variable-spacing makes it
-     sized via the floor model.
-   - Move `(face-extra-register-backend 'org-mode ...)` from load-time into
-     `variable-spacing-mode`'s enable/disable body (register on enable,
-     deregister on disable).  This makes `face-extra--active-backend` return
-     nil in inactive buffers naturally — the `(bound-and-true-p
-     variable-spacing-mode)` guard added to fix the text-body-huge bug can
-     then be removed.
-   - Update `variable-spacing--stamp-body-text` to delegate to
-     `face-extra--stamp-body-text` (or remove it if the backend directly
-     names the face-extra function).
-
-3. **`horizontal-layout.el`**, **`text-align` / `face-extra.el`** — no
-   functional change; they already operate on `text-body` spans and will
-   continue to do so.  Remove any `(require 'variable-spacing)` that was
-   added solely for `text-body`.
-
-4. **`org-sty-config.el`** / user configs — no change; `text-body` is still
-   the same symbol.
-
-**Debugging concerns (the main risk):**
-
-- **Neutral `defface` may break existing `:height` expectations.**  Any
-  code that currently relies on `text-body` having `:height 2.0` at face
-  definition time (before `variable-spacing-mode` runs) will silently render
-  at floor size.  The fix is to ensure `variable-spacing-mode` runs before
-  any fontification — already the case via `org-sty-apply` + `font-lock-flush`
-  ordering, but worth instrumenting explicitly during the migration.  A
-  temporary `(face-attribute 'text-body :height)` assertion in the mode body
-  can catch this.
-
-- **Mode-scoped backend registration means the scan loop doesn't run if
-  `variable-spacing-mode` is not yet on when the first jit-lock cycle fires.**
-  This is the same ordering constraint as today; the idle-0 refresh after
-  mode enable handles it.  Verify by opening a WP buffer and confirming
-  body text renders correctly before and after a `font-lock-flush`.
-
-- **Other buffers that happen to `require 'variable-spacing`** will lose the
-  global `text-body` defface if they haven't also loaded `face-extra`.  The
-  `(require 'face-extra)` at the top of `variable-spacing.el` ensures
-  `text-body` is always defined when variable-spacing is loaded; no user
-  config change is needed.
-
-- **`variable-spacing--remove-body-face` is currently private.** Callers
-  outside variable-spacing (e.g. a future `text-align` cleanup path) need
-  the public `face-extra-remove-body-face` wrapper.  Audit all callers before
-  removing the private function.
-
-**Effort estimate:** ~2–3 hours of focused work.  The scan loop is ~50 lines
-of well-understood code; the `defface` move is mechanical; the registration
-change is ~10 lines.  The bulk of the time is verification: open an untagged
-Org buffer, a WP-tagged buffer, and a non-Org buffer, confirm no spurious
-stamping, confirm variable-spacing renders correctly, byte-compile all four
-files clean.  The `(bound-and-true-p variable-spacing-mode)` guard added as
-a stopgap can be removed as the final step, which gives a clean before/after
-regression test point.
+This work is superseded and significantly expanded by the package refactor plan. See **Package refactor plan** above.
 
 ### v1 release
 
@@ -347,259 +86,14 @@ regression test point.
   activated modes via `org-sty--eval-activated-modes`.
 - **Git tag `v1.0-beta`:** Tag the rename commit as `v1.0-beta`.
 
-### `face-extra` branch
+### ~~`face-extra` branch~~ — DONE (see Package refactor plan)
 
-- **New file `face-extra.el` — generic synthetic attribute core:**
-  Extract and generalise the current `variable-spacing-face-remap-add-extra`
-  / `remove-extra` API into a standalone `face-extra.el`.  This becomes the
-  foundation for all synthetic face properties — attributes that drive display
-  effects not expressible as standard Emacs face attributes.
+- **~~New file `face-extra.el` — generic synthetic attribute core~~** — DONE.
+  `face-extra.el` is the registry, cache, and dispatch core.  `body-face.el`
+  owns body-face machinery and the Org backend.  See Package refactor plan
+  for the complete record of design decisions and what landed where.
 
-  #### Registry API
 
-  Properties are registered once at load time:
-
-  ```elisp
-  (face-extra-define-property 'variable-spacing-ratio
-    :pass  1
-    :after nil        ; other property symbols in the same pass that must
-                      ; run before this one — intra-pass ordering constraint
-    :apply (lambda (spans) ...)  ; SPANS is a list of (beg end value) triples
-    :clear (lambda (cookie) ...))
-  ```
-
-  `face-extra--registry` is a hash table mapping property symbol → plist.
-  `:after` may only name properties in the same pass; cross-pass references
-  are validated and rejected at registration time.  When a new property is
-  registered, the intra-pass order for its bucket is recomputed via
-  topological sort.
-
-  The public API for installing a property value on a face:
-
-  ```elisp
-  (face-extra-add          face property value) → cookie  ; global
-  (face-extra-add-relative face property value) → cookie  ; buffer-local
-  (face-extra-remove       cookie)                        ; works for both
-  ```
-
-  `face-extra-add` sets the value globally via `(put face property value)`,
-  affecting all buffers.  `face-extra-add-relative` writes into
-  `face-extra--local-properties` (a buffer-local hash table keyed by
-  `(face . property)`), leaving the global symbol property untouched.
-  The cookie format encodes which mechanism was used so `face-extra-remove`
-  knows how to undo it.  The natural cookie format for symbol-property
-  effects is `(FACE PROPERTY OLD-VALUE)`.
-
-  `org-sty-remap` and `variable-spacing` internals use
-  `face-extra-add-relative` (buffer-local per-document styling).
-  `face-extra-add` is for library-level defaults that should apply in all
-  buffers.
-
-  #### Per-face dispatch cache
-
-  The central performance mechanism.  `face-extra--face-cache` is a
-  buffer-local hash table:
-
-  ```
-  face-symbol →
-    { pass1: [(property, value, apply-fn), ...],   ← pre-sorted
-      pass2: [...],
-      pass3: [...] }
-  ```
-
-  Built lazily the first time a face is encountered during a dispatch call.
-  Each entry encodes the fully-resolved property values for that face and
-  the pre-sorted apply-fn list for each pass.  Resolution order when
-  building an entry (mirrors how `face-remapping-alist` relates to global
-  face definitions):
-
-  1. `face-extra--local-properties` buffer-local hash table `(face . property) → value`
-  2. Global symbol property `(get face property)`
-  3. `face-remapping-alist` `:inherit` chain
-  4. Global face `:inherit` attribute(s)
-
-  Cycle guard via visited set throughout.  Value 0 at any level means
-  explicitly suppressed — stops the search.
-
-  **Cache invalidation:**
-  - New property registered → clear entire cache (load-time only, rare)
-  - `face-remapping-alist` changes → clear buffer-local cache (happens on
-    `org-sty-apply`)
-  - `face-extra--local-properties` changes → clear buffer-local cache
-  - Global symbol property mutated (via `set-face-attribute` advice) →
-    clear entry for that face only
-
-  #### Pass dispatcher
-
-  The after-fontify advice moves from `variable-spacing.el` to
-  `face-extra.el`.  On each jit-lock chunk:
-
-  1. Call the active backend's bare-text stamper (pass 0 completion;
-     mode-specific — see Backend protocol below).
-  2. Scan the region once, building three pass-specific span lists:
-     ```
-     pass-N-spans: [(beg, end, face, apply-fns), ...]
-     ```
-     For each face boundary: look up the face in `face-extra--face-cache`
-     (populate lazily if absent); append the span to the appropriate
-     pass-specific lists.  Faces with no registered properties produce no
-     entries — they are never revisited.
-  3. Run pass-1-spans, pass-2-spans, pass-3-spans in order.  For each span,
-     call each apply-fn in the pre-sorted list.
-
-  Each property's `:apply` function receives `(spans)` — the full list of
-  `(beg end value)` triples collected for it across the region — called
-  once per dispatch.  This allows batched work (e.g. variable-spacing
-  applies all spacers in a single loop).
-
-  **Complexity:** O(region_size) for the scan with O(1) cache lookups; O(applicable_spans ×
-  properties_per_face_per_pass) for application.  Properties absent from
-  the region incur zero cost.
-
-  `variable-spacing.el` registers its properties via
-  `face-extra-define-property` and no longer owns the dispatch loop.
-
-  #### Inheritance (subtask — implement within this work)
-
-  Each registered property's lookup must follow the face remap/inheritance
-  chain, consistent with standard Emacs face attribute inheritance.  The
-  lookup order is the same as the cache resolution order defined above
-  (local-properties → global symbol property → remap :inherit chain →
-  global :inherit).
-
-  Guard the recursive walker against inheritance cycles with a visited set.
-  The lookup must be universal — all faces.
-
-  **Config update required on implementation:** `org-block`, `org-quote`,
-  and `org-verse` in `org-sty-config.el` will begin inheriting the
-  `text-body` ratio (1.6) through the content-face remap chain.  Add
-  `:variable-spacing-ratio 0` to their `:faces` entries to suppress it.
-
-  #### `org-sty-remap` integration
-
-  `org-sty-remap` (in `org-sty.el`) currently has a hardcoded special case
-  for `:variable-spacing-ratio`.  After generalisation, it should:
-
-  1. Separate the attrs plist into standard face attributes and registered
-     extra properties (check each key against `face-extra--registry`).
-  2. Pass standard attrs to `face-remap-add-relative` as before.
-  3. Pass registered extra properties to `face-extra-add-relative` (buffer-local;
-     per-document styling), storing cookies in `org-sty--face-remap-cookies`
-     alongside the existing remap cookies.
-  4. Warn and skip unknown keys (keys that are neither standard face
-     attributes nor registered extra properties).
-
-  #### Backend protocol (deferred — specify before generalising beyond Org)
-
-  The pass dispatcher needs to call a mode-specific bare-text stamper to
-  complete pass 0 for the current major mode.  The backend interface should
-  provide at minimum:
-
-  - A bare-text predicate: given a buffer position, is this unattributed
-    body text that should receive the `text-body` stamp?  (For Org: no
-    `face` or `font-lock-face` present.  For other modes: TBD.)
-  - Face configuration: which faces should receive `(:inherit text-body)`
-    remaps on mode enable?
-
-  The backend is discovered via a variable (e.g.
-  `face-extra-backend-alist`, keyed by major mode symbol).  Specify the
-  full protocol before implementing support for any non-Org mode.
-
-  #### File and function plan
-
-  **`face-extra.el`** — new; no deps beyond Emacs + cl-lib
-
-  ```
-  1. Registry
-     face-extra--registry            global hash table:
-                                       property-symbol → (:pass :after :apply :clear)
-     face-extra-define-property      validates :after are same-pass; re-sorts bucket
-     face-extra--validate-after      cross-pass reference check
-     face-extra--sort-pass           topological sort within a pass bucket
-
-  2. Per-face cache
-     face-extra--local-properties    buffer-local hash table: (face . property) → value
-     face-extra--face-cache          buffer-local hash table:
-                                       face → { pass1 pass2 pass3: [(prop val apply-fn)...] }
-                                       pre-sorted; built lazily
-     face-extra--resolve-property    inheritance walker (local → global put →
-                                       remap :inherit chain → global :inherit;
-                                       cycle guard via visited set)
-     face-extra--build-cache-entry
-     face-extra--invalidate-cache    clear entire buffer-local cache
-     face-extra--invalidate-face     clear single face entry
-
-  3. Public install API
-     face-extra-add           (face property value) → cookie   ; global via (put)
-     face-extra-add-relative  (face property value) → cookie   ; buffer-local
-     face-extra-remove        (cookie)                         ; works for both
-
-  4. Backend protocol
-     face-extra--backend-alist       major-mode → backend plist
-     face-extra-register-backend
-     face-extra--active-backend
-     backend key: :stamp-body-text (beg end)
-
-  5. Dispatch
-     face-extra--dispatch            after-fontify function:
-                                       1. call backend :stamp-body-text (pass 0)
-                                       2. scan region once → pass1/2/3-span lists
-                                          (face boundary → cache lookup → append;
-                                           faces with no properties skipped entirely)
-                                       3. run pass1, pass2, pass3 spans in order;
-                                          each :apply called once with full (spans) list
-     advice on font-lock-fontify-keywords-region
-  ```
-
-  **`variable-spacing.el`** — gains `(require 'face-extra)`; loses dispatch
-  loop, after-fontify advice, and `variable-spacing-face-remap-add-extra` /
-  `remove-extra` (dropped entirely — callers use `face-extra-add-relative`
-  and `face-extra-remove` directly)
-
-  ```
-  1. Customization
-     variable-spacing-floor-height
-     variable-spacing-content-faces
-     variable-spacing-metadata-faces
-     variable-spacing-rules          (kept; element-based config API)
-
-  2. Backend definitions
-     variable-spacing-org-backend    (org-element-at-point; Org bare-text stamper)
-     variable-spacing-text-backend   (one line per physical line; fallback)
-     variable-spacing-mode-backends  (alist for auto-detection)
-
-  3. Text-body face model
-     variable-spacing--install-body-remaps
-     variable-spacing--remove-body-remaps
-     variable-spacing--remove-body-face    (stamp cleanup on mode disable)
-
-  4. Spacer computation
-     variable-spacing--spacer              (pixel height from font metrics)
-     variable-spacing--apply-ratio         (:apply fn; receives (spans) list)
-     variable-spacing--clear-ratio         (:clear fn)
-
-  5. Minor mode
-     variable-spacing-mode                 (enable/disable; text-scale-mode advice)
-
-  6. Registration  (load time, after mode is defined)
-     (face-extra-define-property 'variable-spacing-ratio ...)
-     (face-extra-register-backend 'org-mode variable-spacing-org-backend)
-  ```
-
-  **`org-sty.el`** — minor updates only
-
-  ```
-  - add (require 'face-extra)
-  - org-sty-remap: replace hardcoded :variable-spacing-ratio special case
-      with face-extra--registry lookup; registered extra properties →
-      face-extra-add-relative; standard face attrs → face-remap-add-relative;
-      unknown keys → warn and skip
-  - org-sty--clear-face-remaps: 'extra teardown calls face-extra-remove
-      directly (no longer goes through variable-spacing wrapper)
-  ```
-
-  **`org-title-fold.el`**, **`org-block-appear.el`**, **`org-sty-config.el`**
-  — untouched.
 
 - **Text alignment (`text-align` as a synthetic face property):** Left,
   centre, right, and justify, implemented as a symbol property on faces.
@@ -758,8 +252,8 @@ Before optimisation, a typical typing profile showed:
   the line is skipped — existing stamps are still correct.
 - If changed: per-line `text-align--justify-clear` (removes stale space
   stamps for clean measurement), then stamp, then store new hash.
-- The global `:pre-clear` was removed from the `text-align` registration
-  in favour of this per-line selective clear.  `text-align--justify-clear`
+- The global `:before-pass3-walk` (formerly `:pre-clear`) was removed from
+  the `text-align` registration in favour of this per-line selective clear.  `text-align--justify-clear`
   still clears hash props when called from `text-align-clear` (mode disable
   or re-apply), so font/scale changes correctly invalidate all hashes.
 
@@ -769,12 +263,12 @@ Before optimisation, a typical typing profile showed:
   `clrhash`ed between walks, eliminating per-walk GC allocation.
 
 **Pre-command hook infrastructure** (`face-extra.el`, `horizontal-layout.el`):
-- `face-extra-define-property` gains a `:pre-command` slot.
+- `face-extra-define-property` has a `:before-keystroke` slot (formerly `:pre-command`).
   `face-extra--pre-command` is added to `pre-command-hook` buffer-locally
   when pass-3 is enabled; it fires only for self-insert and delete commands,
   maintains a cached visual BOL/EOL in `face-extra--vline-beg/end`
   (recomputed via `vertical-motion` only when point leaves the cached range),
-  and dispatches to any pass-3 property that registered `:pre-command`.
+  and dispatches to any pass-3 property that registered `:before-keystroke`.
 - `face-extra--pass3-force-full`: buffer-local flag consumed by
   `face-extra--dispatch-pass3` on the next jit-lock cycle.  When set,
   the visual-line narrowing is bypassed so `face-extra--expand-to-lines`
@@ -869,24 +363,36 @@ and/or Org keyword activation are the remaining contributors.
 
 ### Known remaining issues
 
+**`text-scale-mode` increase breaks justification** (FIXED):
+Two-part fix:
+1. `variable-spacing--text-scale-refresh`: add `(face-extra--invalidate-cache)'
+   which runs `face-extra-invalidate-cache-functions' and fires
+   `text-align--clear-char-width-cache' — clearing the char-width cache,
+   ring, and natural-px.
+2. `text-align--clear-char-width-cache': also remove all
+   `text-align--line-hash-prop' from the buffer.  Without this, the content
+   hash check in `text-align--apply' sees unchanged buffer text, declares a
+   hit, and skips re-stamping — leaving old stamps at the wrong scale even
+   after `font-lock-flush' had re-triggered pass 3.
+
 **Heading justification: over-wide spaces and wrong visual-line wrap** (FIXED):
 Root cause: `org-hide` (the face Org applies as a `face` text property to
-leading heading stars) was absent from `variable-spacing-metadata-faces`.
-`has-explicit-face-p` returned nil for it, so pass 0 stamped `text-body` on
-the star characters.  Pass 3 then saw `text-body` → `justify` on those
+leading heading stars) was absent from `body-face-org-metadata-faces` (formerly `variable-spacing-metadata-faces`).
+`body-face--org-explicit-face-p` returned nil for it, so pass 0 stamped `body` on
+the star characters.  Pass 3 then saw `body` → `justify` on those
 positions and applied justification to the whole heading visual line.
 
-Fix: added `org-hide` to `variable-spacing-metadata-faces`.
+Fix: added `org-hide` to `body-face-org-metadata-faces`.
 
 **Debugging path — for future "something fontifies wrong" bugs:**
 When a pass-3 property (e.g. `text-align`) fires on an element where it
 shouldn't, the first question is always "why does pass 0 think that position
 is bare body text?"  Use `describe-char` on the offending character and check
 the `face` text property.  If it contains a face that is absent from both
-`variable-spacing-content-faces` and `variable-spacing-metadata-faces`,
-`has-explicit-face-p` returns nil and pass 0 stamps `text-body` on it —
+`body-face-org-content-faces` and `body-face-org-metadata-faces`,
+`body-face--org-explicit-face-p` returns nil and pass 0 stamps `body` on it —
 which then propagates `text-align`, `variable-spacing-ratio`, and any other
-`text-body`-inherited property to that position.  The fix is to add the face
+`body`-inherited property to that position.  The fix is to add the face
 to the appropriate list.
 
 **Mid-paragraph spacing goes crazy** (UNFIXED, needs diagnosis):
@@ -932,7 +438,7 @@ In large or structurally complex Org buffers (e.g. a file containing both
 test-case EXPECT blocks and thousands of lines of body text), some paragraphs
 on the first visible screen render without variable-spacing height stamps or
 margins, while neighbouring paragraphs render correctly.  The face at
-affected positions is correctly `text-body` (pass-0 runs), but `line-prefix`
+affected positions is correctly `body` (pass-0 runs), but `line-prefix`
 is absent (passes 1–2 did not run).  Removing the passes 1–2 narrowing
 entirely does not fix it and introduces a regression (justify clears on
 focus loss).  The idle-0 refresh that correctly handles simpler files does
@@ -941,6 +447,17 @@ not yet identified; needs targeted instrumentation of `face-extra--dispatch`
 to determine which jit-lock chunks are processed, at what idle state, and
 whether the affected paragraphs are ever included in a full-region passes 1–2
 run.
+
+**Occasional paragraph spacing not applied during editing** (OBSERVED, not yet diagnosed):
+Intermittent: some paragraphs lose their `variable-spacing` height stamps
+during normal editing — neighbours render correctly while the affected
+paragraph shows no line-prefix spacing.  First noticed after the
+`text-align-clean` merge (delete-path ring-walk + underflow detection
+commits).  Unclear whether caused by the new pre-clear logic, the
+window-end cap in `post-command-reflow`, or the stale-ring discard.
+Distinguish from the "initial open" bug below by checking whether the
+affected paragraph had stamps before the edit and lost them, vs never
+receiving stamps at all.  Needs reproduction steps before diagnosis.
 
 **Footnote definition gap collapses when org-cite-appear expands a citation** (UNFIXED):
 When `org-cite-appear-mode` is active and the cursor moves into a footnote
@@ -1076,22 +593,15 @@ Possible approaches:
   "Pre-command hook infrastructure" and "Live justify" in the Optimisations
   implemented section above, and "Known limits" for remaining gaps.
 
-## Architecture notes — `text-body` face model
+## Architecture notes — `body` face model
 
-> **Ownership note:** `text-body` and the bare-text scan loop currently live
-> in `variable-spacing.el` but are planned to move to `face-extra.el`.  See
-> the "Long-term file structure" section and the "`text-body` move to
-> `face-extra`" planned work item.  The description below reflects the
-> current implementation; after the move the only changes are that the
-> `defface` loses its `:height 2.0` (neutral `(:inherit default)` instead)
-> and sizing becomes entirely `variable-spacing-mode`'s responsibility via
-> its floor/body remap.
+> **Ownership note:** `body` (formerly `text-body`) and the bare-text scan loop now live in `body-face.el`.  The move from `variable-spacing.el` is complete.  `defface body` is `'((t :inherit default))` — neutral, no sizing opinion; height is supplied by the style config (`(body . (:height 2.0 :variable-spacing-ratio 1.6))` in `wp-faces`).
 
 Body-text sizing uses `default` as a true floor (very small, e.g. 6pt);
-body text opts in to a larger `text-body` face via two orthogonal mechanisms:
+body text opts in to a larger `body` face via two orthogonal mechanisms:
 
 1. **Buffer-local face remaps** (`face-remap-add-relative`): a curated list
-   of faces (`variable-spacing-body-faces`) each receive `(:inherit text-body)`
+   of faces (`body-face-org-content-faces`) each receive `(:inherit body)`
    injected into their effective attribute chain.  Three populations:
    - Heading faces `org-level-1`…`org-level-8` — applied by Org as
      `font-lock-face`; remap is the only way to lift them above the floor.
@@ -1104,9 +614,10 @@ body text opts in to a larger `text-body` face via two orthogonal mechanisms:
      `org-cite`, `org-cite-key`, `org-footnote`, `org-list-dt`.
 
 2. **After-fontify pass** (`font-lock-fontify-keywords-region` `:after`
-   advice): after Org's complete keyword list has run for each jit-lock chunk,
+   advice, installed permanently by `face-extra.el` at load time): after Org's
+   complete keyword list has run for each jit-lock chunk, `body-face--org-stamp-body-text`
    scans the region for characters with *neither* `face` nor `font-lock-face`
-   (plain paragraph text Org leaves bare) and stamps `text-body` on those runs,
+   (plain paragraph text Org leaves bare) and stamps `body` on those runs,
    skipping bare `\n` characters.  Stale stamps are cleared before re-stamping
    so that text newly covered by an Org face does not retain a stale stamp.
    The advice targets `font-lock-fontify-keywords-region` (not the outer
@@ -1114,27 +625,27 @@ body text opts in to a larger `text-body` face via two orthogonal mechanisms:
    already-extended `[fstart, fend]` bounds that jit-lock marks as clean —
    advising the outer function would miss text covered by region extension.
 
-On mode **disable**: `variable-spacing--remove-body-face` is called over the
-full buffer to clean up stamps (which carry no `variable-spacing--prop`
-sentinel and so are not caught by `variable-spacing-clear`).
+On `body-face-mode` **disable**: `body-face-remove-body-face` is called over
+the full buffer to clean up stamps.
 
-`text-body` `:height` is expressed as a float `2.0` relative to `default`,
-so `text-scale-mode`'s float multiplier on `default` propagates through
-`text-body` to all content faces correctly.  The floor remap on `default`
+`body` `:height` is expressed as a float `2.0` in the style config (via
+`(body . (:height 2.0 :variable-spacing-ratio 1.6))` in `wp-faces`) relative
+to `default`, so `text-scale-mode`'s float multiplier on `default` propagates
+through `body` to all content faces correctly.  The floor remap on `default`
 remains absolute (`variable-spacing-floor-height`), so metadata elements
 stay small regardless of text scale.
 
 ### Content and metadata face lists
 
-Two `defcustom` lists govern which faces receive the `text-body` remap
-and which are exempt from the after-fontify stamp:
+Two `defcustom` lists (now in `body-face.el`) govern which faces receive
+the `body` remap and which are exempt from the after-fontify stamp:
 
-  - **`variable-spacing-content-faces`** — document content: headings,
+  - **`body-face-org-content-faces`** — document content: headings,
     body blocks, tables, quotes.  Receive a buffer-local
-    `(:inherit text-body)` remap on mode enable.  The after-fontify
+    `(:inherit body)` remap on `body-face-mode` enable.  The after-fontify
     pass also skips them (they are already sized).
 
-  - **`variable-spacing-metadata-faces`** — structural annotations:
+  - **`body-face-org-metadata-faces`** — structural annotations:
     drawers, property blocks, keyword tags, block delimiter lines.
     Receive no remap.  Also excluded from the stamp so they inherit
     floor size from the `default` remap.
@@ -1197,7 +708,6 @@ pairs.  It is pure syntax sugar: `--apply-faces` iterates the alist and calls
                          (org-quote   . (:slant italic
                                          :variable-spacing-ratio 1.0)))
                  :eval (progn
-                         (put 'text-body 'variable-spacing-ratio 1.6)
                          (variable-spacing-mode 1)
                          (org-title-fold-mode 1))))
 
@@ -1232,23 +742,21 @@ style is re-applied.  Re-applying a style is therefore fully idempotent.
 
 #### `:variable-spacing-ratio` dispatch
 
-`:variable-spacing-ratio` is not a face attribute and cannot be passed to
-`face-remap-add-relative`.  Both `--apply-faces` and `org-sty-remap` strip it
-from the attrs plist before calling `face-remap-add-relative`, and route it
-instead to `variable-spacing-face-remap-add-extra` (defined in
-`variable-spacing.el`), which stores the previous symbol property value as a
-cookie so it can be precisely restored on teardown.
+`:variable-spacing-ratio` is not a standard face attribute and cannot be passed to
+`face-remap-add-relative`.  Both `--apply-faces` and `org-sty-remap` detect it
+via the `face-extra--registry` lookup (it is a registered extra property), strip it
+from the attrs plist, and route it to `face-extra-add-relative` (buffer-local),
+storing the cookie in `org-sty--face-remap-cookies` alongside the standard remap
+cookies.  Teardown calls `face-extra-remove` on those cookies.
 
-If `variable-spacing` is not loaded, `:variable-spacing-ratio` entries are
-silently skipped (guarded with `fboundp`), preserving the ability to use
-`org-sty` without `variable-spacing`.
+If `face-extra` is not loaded (unusual — `org-sty` now requires it), `:variable-spacing-ratio`
+entries are silently skipped.
 
 #### What stays in `:eval`
 
 `:eval` remains correct for:
 
   - Enabling/disabling minor modes (`variable-spacing-mode`, `org-title-fold-mode`, etc.)
-  - Setting symbol properties not tied to a specific face (`put 'text-body …`)
   - Any logic requiring runtime conditions or imperative sequencing
 
 All face attribute changes should go through `:faces` or `org-sty-remap` so
@@ -1721,7 +1229,7 @@ Symptom: `org-sty--face-remap-cookies` matched exactly the committed
 `org-sty--merge` replaces the `:faces` key wholesale with the override
 style's `:faces`.  Suppressors and `:slant italic` entries placed in
 `org-sty-default :faces` were silently dropped whenever a WP tag style
-was active.  Fix: move all WP-specific face attributes (text-body ratio,
+was active.  Fix: move all WP-specific face attributes (body ratio,
 org-quote/verse slant, suppressors) into `wp-faces` and `wp-eval` where
 they survive the merge.
 
@@ -1743,9 +1251,9 @@ it silently overwrote the `:faces` suppressor (ratio 0) that had just
 been installed.  Fix: remove the ratio from `--install-styling` entirely.
 Spacing policy belongs in the style config (`wp-faces`), not in the mode.
 The `:variable-spacing-ratio 0` suppressor in `wp-faces` is still required
-because `org-footnote-extra-mode` installs `(:inherit text-body)` on
+because `org-footnote-extra-mode` installs `(:inherit body)` on
 `org-footnote`, which would otherwise let ratio 1.6 flow through from
-`text-body`.  Also added `org-footnote-extra-mode 1` to `wp-eval` and
+`body`.  Also added `org-footnote-extra-mode 1` to `wp-eval` and
 `org-footnote-extra-mode` to `org-sty--known-eval-modes` for clean teardown.
 
 **Diagnostic pattern — when cookies are missing from `org-sty--face-remap-cookies`:**
@@ -1779,7 +1287,7 @@ character in the **frame's default font** — the global default face, not
 the buffer-local remapped one.  In WP buffers, `variable-spacing-mode`
 installs a buffer-local remap on `default` to a small floor face
 (e.g. Iosevka Aile 6pt, ~4–5 px/char).  Body text and quote-block text
-use `text-body` → Times New Roman 12pt (~8–9 px/char).  `frame-char-width`
+use `body` → Times New Roman 12pt (~8–9 px/char).  `frame-char-width`
 returns the floor font's width, which is roughly half the body font's width.
 
 When a `(space :width N)` display spec is evaluated by the display engine,

@@ -17,7 +17,7 @@
 ;; `org-sty-remap' from within `:eval'.
 ;;
 ;; The default style :eval handles only mode toggles; the wp-style :eval
-;; handles only mode enables and the text-body spacing ratio.
+;; handles only mode enables and the body spacing ratio.
 
 ;;; Code:
 
@@ -38,12 +38,12 @@
 ;;
 ;; Note on heading heights: the float values (2.4, 2.2 …) are relative to
 ;; each face's effective parent at display time.  In WP buffers where
-;; variable-spacing-mode is active, org-level faces inherit text-body via a
+;; variable-spacing-mode is active, org-level faces inherit body via a
 ;; buffer-local remap; the interaction between that inherited height and the
 ;; float multiplier here may need tuning.  Verify heading sizes interactively.
 ;;
 ;; Note on org-quote/org-verse: :slant italic is set here as a default.  In
-;; WP buffers the (:inherit text-body) remap may bring in :slant normal from
+;; WP buffers the (:inherit body) remap may bring in :slant normal from
 ;; the default chain and override it.  If that happens, add an explicit
 ;; :slant override in the wp-style :faces below.
 
@@ -55,7 +55,7 @@
          ;; :font overrides (e.g. "Times New Roman" for WP buffers) are
          ;; respected.  Never specify :family/:font here.
          ;; :text-align 0 suppresses justify/center/right inherited from
-         ;; text-body through the face-extra resolver.  Headings must
+         ;; body through the face-extra resolver.  Headings must
          ;; never be justified.
          (org-level-1         . (:weight bold :height 1.4 :text-align 0))
          (org-level-2         . (:weight bold :height 1.3 :text-align 0))
@@ -135,22 +135,24 @@
                    ;(lsp-ltex-plus-mode 1)
                    (org-block-appear-mode 1)
                    (org-cite-appear-mode 1)
-                   (org-footnote-extra-mode 1)
-                   ;; Suppress inherited text-body ratio on block/quote faces
+                   ;; Suppress inherited body ratio on block/quote faces
                    ;; BEFORE variable-spacing-mode enables.  variable-spacing-mode
-                   ;; installs (:inherit text-body) remaps and may trigger a
-                   ;; fontification cycle; if the suppressors arrive later (via
-                   ;; :faces) the cache is built without them and spacers are
-                   ;; stamped on these faces before the suppressor can block it.
+                   ;; may trigger a fontification cycle; if the suppressors arrive
+                   ;; later (via :faces) the cache is built without them and spacers
+                   ;; are stamped on these faces before the suppressor can block it.
                    ;; Those stale spacers are never cleared by the span-only clear
                    ;; loop in variable-spacing--apply-ratio.
                    (org-sty-remap 'org-quote :variable-spacing-ratio 0)
                    (org-sty-remap 'org-verse :variable-spacing-ratio 0)
                    (org-sty-remap 'org-block :variable-spacing-ratio 0)
                    (variable-spacing-mode 1)
+                   ;; org-footnote-extra-mode must come AFTER variable-spacing-mode
+                   ;; so that install-styling sees variable-spacing-mode active and
+                   ;; installs the (:inherit body) remap on org-footnote.
+                   (org-footnote-extra-mode 1)
 
                    ;; superscripts & subscripts are set relative to 'default rather
-                   ;; than 'text-body; make them 0.8x 'text-body
+                   ;; than 'body; make them 0.8x 'body
                    (setq-local org-script-display
                                '(((raise -0.3) (height 1.6))
                                  ((raise 0.3) (height 1.6))
@@ -163,8 +165,8 @@
                    ;; the midpoint of each visual line in hot pink to confirm
                    ;; the linewise pass fires.  Remove once centering is real.
                    (text-align-mode 1)
-                   ;(face-extra-add-relative 'text-body 'text-align 'right)
-                   (face-extra-add-relative 'text-body 'text-align 'justify)
+                   ;(face-extra-add-relative 'body 'text-align 'right)
+                   (face-extra-add-relative 'body 'text-align 'justify)
                    ;; org-document-title centering is declared in :faces below
                    ;; so it runs in the :faces phase (after :eval) and wins
                    ;; cleanly over any base-style suppressor.
@@ -202,14 +204,14 @@
                    (setq-local org-footnote-auto-adjust 'renumber))
                )
        (wp-faces '(;; ── Variable spacing ────────────────────────────────────
-                   ;; text-body ratio and block suppressors live here, not in
+                   ;; body ratio and block suppressors live here, not in
                    ;; org-sty-default :faces, because the shallow plist merge
                    ;; in org-sty--merge replaces :faces wholesale — anything
                    ;; in org-sty-default :faces is clobbered by the WP :faces.
                    ;; Setting the ratio here also makes it buffer-local (via
                    ;; face-extra-add-relative) rather than global (put), so it
                    ;; is cleaned up correctly on re-apply or mode disable.
-                   (text-body           . (:variable-spacing-ratio 1.6))
+                   (body           . (:height 2.0 :variable-spacing-ratio 1.6))
                    ;; Slant for quote/verse.  Each wp-faces entry must carry
                    ;; ALL standard-face attrs for that face because the shallow
                    ;; :faces merge means this entry replaces the org-sty-default
@@ -220,7 +222,7 @@
                    (org-verse           . (:slant italic))
                    ;; ── Text alignment ──────────────────────────────────────
                    ;; :text-align left on headings suppresses justify/center/right
-                   ;; inherited from text-body via the face-extra resolver.
+                   ;; inherited from body via the face-extra resolver.
                    ;; Must live here (after :eval) not in org-sty-default :faces,
                    ;; because horizontal-layout.el — which registers 'text-align
                    ;; with face-extra — is only loaded when text-align-mode is
@@ -240,7 +242,7 @@
                    (org-property-value  . (:height 60))
                    (org-special-keyword . (:height 60))
                    ;; Footnote definitions: ~8pt (0.67 × 12pt body).
-                   ;; The (:inherit text-body) remap is installed by
+                   ;; The (:inherit body) remap is installed by
                    ;; org-footnote-extra-mode; this height sits on top of
                    ;; it as a relative multiplier.  :underline nil suppresses
                    ;; the link-style underline org-footnote carries by default.
