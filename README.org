@@ -1,5 +1,5 @@
-#+TITLE: org-sty.el — Org Style your buffers. Build a Word Processor
-#+AUTHOR: Brad
+#+TITLE: org-sty.el — Turning emacs into a Word Processor
+#+AUTHOR: Brad Stewart
 
 A collection of Emacs minor modes that together aim to emulate a
 word-processor interface inside Org mode. Each file is independently
